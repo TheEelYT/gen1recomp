@@ -223,15 +223,39 @@ function ChipAudio.playMusic(data, header, allowLoops)
     love.audio.newQueueableSource, sampleRate(), 16, 2, MUSIC_BUFFER_COUNT)
   if not ok2 then return nil, source end
   ChipAudio.stopMusic()
+  statFrames = 0
+  statUnderruns = 0
+  statRestarts = 0
+
+  statDepthMin = nil
+  statDepthSum = 0
+  statDepthFrames = 0
+
+  statWorkerJit = nil
+  statWorkerXrt = nil
+
+  statXrtSum = 0
+  statXrtCount = 0
+  statXrtMax = nil
+
+  lastCosted = nil
   musicGen = musicGen + 1
   local gen = musicGen
-  cmdCh:push({ cmd = "play", gen = gen, header = header,
-               allowLoops = allowLoops, audio = slimAudio(data),
-               channelVolumes = ChipSynth.getChannelVolumes(),
-               channelPitches = ChipSynth.getChannelPitches(),
-               stereo = ChipSynth.getStereo(),
-               sampleRate = sampleRate(),
-               stereoEpoch = stereoEpoch })
+  cmdCh:push({
+    cmd = "play",
+    gen = gen,
+    header = header,
+    allowLoops = allowLoops,
+    audio = slimAudio(data),
+    channelVolumes = ChipSynth.getChannelVolumes(),
+    channelPitches = ChipSynth.getChannelPitches(),
+    stereo = ChipSynth.getStereo(),
+    sampleRate = sampleRate(),
+    stereoEpoch = stereoEpoch,
+
+    generation = engine.generation,
+    vitaAudioJit = false,
+  })
   currentMusic = { source = source, gen = gen, threaded = true,
                    started = false, finished = false,
                    stereoEpoch = stereoEpoch,
@@ -308,12 +332,35 @@ local function noteStats(m)
     if statDepthMin == nil or depth < statDepthMin then statDepthMin = depth end
   end
   if depth == 0 then statUnderruns = statUnderruns + 1 end
-  if STATS and statFrames % 60 == 0 then
+  if STATS and statFrames % 300 == 0 then
+    local worker
+    if statWorkerJit == true then
+      worker = "jit"
+    elseif statWorkerJit == false then
+      worker = "interp"
+    else
+      worker = "starting"
+    end
+
+    local xrt = statWorkerXrt or -1
+    local xrtAvg = statXrtCount > 0
+      and (statXrtSum / statXrtCount) or -1
+    local xrtMax = statXrtMax or -1
+
     require("src.core.Logger").info(
-      "chipaudio: depth=%d/%d out=%d underruns=%d restarts=%d rate=%d",
-      depth or -1, MUSIC_BUFFER_COUNT,
+      "chipaudio: worker=%s depth=%d/%d out=%d underruns=%d restarts=%d "
+        .. "rate=%d xrt=%.3f avg=%.3f max=%.3f n=%d",
+      worker,
+      depth or -1,
+      MUSIC_BUFFER_COUNT,
       (m.threaded and outCh) and outCh:getCount() or -1,
-      statUnderruns, statRestarts, sampleRate())
+      statUnderruns,
+      statRestarts,
+      sampleRate(),
+      xrt,
+      xrtAvg,
+      xrtMax,
+      statXrtCount)
   end
 end
 

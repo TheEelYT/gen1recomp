@@ -288,6 +288,13 @@ local function ensureParents(root, rel)
 end
 
 local function resolveWriteRoot()
+  -- Vita writes should stay inside LÖVE/PhysFS. Using the native save path
+  -- through io.open/FFI mkdir can fail on ux0: and hide the real extractor
+  -- error behind a cache-write failure.
+  if _G.POKEPORT_VITA == true then
+    return nil
+  end
+
   local root = CacheFs.root()
   if root then return root end
   if Platform.isNX and Platform.isNX() then return nil end

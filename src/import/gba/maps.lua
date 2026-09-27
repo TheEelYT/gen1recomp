@@ -8,13 +8,22 @@ function Maps.loadGrid(rom, layoutSpec)
   local n = w * h
   local cells = {}
   local offset = layoutSpec.offset
+  local packed = _G.POKEPORT_VITA == true
+
   for i = 0, n - 1 do
     local v = rom:u16(offset + i * 2)
-    local mid = v % 1024
-    local coll = math.floor(v / 1024) % 4
-    local elev = math.floor(v / 4096) % 16
-    cells[i + 1] = { mid = mid, coll = coll, elev = elev }
+
+    if packed then
+      -- Vita: keep the original packed GBA map cell.
+      cells[i + 1] = v
+    else
+      local mid = v % 1024
+      local coll = math.floor(v / 1024) % 4
+      local elev = math.floor(v / 4096) % 16
+      cells[i + 1] = { mid = mid, coll = coll, elev = elev }
+    end
   end
+
   return { width = w, height = h, cells = cells }
 end
 

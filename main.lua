@@ -204,6 +204,7 @@ end
 
 local Game, EditorApp, Importer, TouchEditor, Studio, Prelaunch
 local launcherSplash
+local audioStatsFont
 
 -- #887: quit-to-launcher state, shared by love.load and love.quit (both need
 -- it, so it is declared here rather than next to love.quit).
@@ -619,6 +620,9 @@ function bootGame(version, cartId, opts)
       error("src.core.Game missing load after reload")
     end
     Game = gameMod
+    if _G.POKEPORT_VITA then
+      Game.onExit = function() pendingLauncherReturn = {} end
+    end
     if arena then
       Game.returnToLauncher = function(o) pendingLauncherReturn = o or {} end
     end
@@ -1038,6 +1042,7 @@ function love.draw()
 
   HostDisplay.beginFrame("game", Game)
   Game:draw()
+
   -- frame capture requested by a driver
   if Game.capturePath then
     local path = Game.capturePath
@@ -1051,7 +1056,60 @@ function love.draw()
       end
     end)
   end
+
   HostDisplay.endFrame("game", Game)
+
+  -- Temporary Vita chip-audio performance overlay.
+  if _G.POKEPORT_VITA then
+    local ChipAudio = package.loaded["src.core.ChipAudio"]
+
+    if ChipAudio and ChipAudio.stats then
+      local stats = ChipAudio.stats()
+
+      if not audioStatsFont then
+        audioStatsFont = love.graphics.newFont(14)
+      end
+
+      local function n(v)
+        if type(v) ~= "number" then return "-" end
+        return string.format("%.3f", v)
+      end
+
+      local line1 = string.format(
+        "AUDIO %s  %d Hz   xRT %s   avg %s   max %s",
+        tostring(stats.worker),
+        tonumber(stats.rate) or 0,
+        n(stats.xrt),
+        n(stats.xrtAvg),
+        n(stats.xrtMax)
+      )
+
+      local line2 = string.format(
+        "depth %s/%d   min %s   underruns %d   restarts %d   buffers %d",
+        stats.depth and tostring(stats.depth) or "-",
+        tonumber(stats.depthMax) or 0,
+        stats.depthMin and tostring(stats.depthMin) or "-",
+        tonumber(stats.underruns) or 0,
+        tonumber(stats.restarts) or 0,
+        tonumber(stats.buffers) or 0
+      )
+
+      love.graphics.push("all")
+      love.graphics.setCanvas()
+      love.graphics.origin()
+
+      love.graphics.setFont(audioStatsFont)
+
+      love.graphics.setColor(0, 0, 0, 0.8)
+      love.graphics.rectangle("fill", 4, 4, 620, 42)
+
+      love.graphics.setColor(1, 1, 1, 1)
+      love.graphics.print(line1, 8, 6)
+      love.graphics.print(line2, 8, 24)
+
+      love.graphics.pop()
+    end
+  end
 end
 
 function love.keypressed(key, scancode, isrepeat)
@@ -1565,7 +1623,8 @@ function love.quit()
   -- SessionLifecycle workers (ChipAudio / Fetch / Check) make that warning
   -- real -- endProcess joins them, then the native restart still blows up.
   local osName = love.system and love.system.getOS and love.system.getOS()
-  local inProcessReturn = (osName == "Android" or osName == "iOS")
+  local inProcessReturn = _G.POKEPORT_VITA == true
+    or osName == "Android" or osName == "iOS"
   local wouldReturnToLauncher = PlatformHooks.quitToLauncher(function()
     return Game and not Importer and not quitToLauncher and not scripted
       and (inProcessReturn or not launchedIntoGame)

@@ -53,51 +53,110 @@ local stereoEpoch = 0  -- matches ChipAudio; stale pan buffers are dropped
 
 local function handle(cmd)
   if cmd.cmd == "play" then
+    if cmd.vitaAudioJit then
+      if not jitEnabled and jit and jit.on then
+        if jit.opt and jit.opt.start then
+          pcall(jit.opt.start,
+            0,
+            "sizemcode=128",
+            "maxmcode=2048",
+            "hotloop=56",
+            "hotexit=10")
+        end
+
+        pcall(jit.on)
+        jitEnabled = (jit.status and jit.status()) == true
+      end
+    else
+      -- Gen 1 stays interpreted. If the persistent worker previously played
+      -- Gen 2 with JIT enabled, shut it back down and discard those traces.
+      if jitEnabled and jit and jit.off then
+        pcall(jit.off)
+        if jit.flush then
+          pcall(jit.flush)
+        end
+      end
+      jitEnabled = false
+    end
+
     gen = cmd.gen
     finished = false
     engine = nil
-    outCh:clear() -- drop any buffers left from the previous song
+    outCh:clear()
     data = { audio = cmd.audio }
+
     if cmd.sampleRate ~= nil then
       BUF_SECONDS = BUF / ChipSynth.setSampleRate(cmd.sampleRate)
     end
+
     if cmd.channelVolumes ~= nil then
       ChipSynth.setChannelVolumes(cmd.channelVolumes)
     end
+
     if cmd.channelPitches ~= nil then
       ChipSynth.setChannelPitches(cmd.channelPitches)
     end
+
     if cmd.stereo ~= nil then
       ChipSynth.setStereo(cmd.stereo)
     end
-    if cmd.stereoEpoch ~= nil then stereoEpoch = cmd.stereoEpoch end
-    local ok, eng = pcall(ChipSynth.newEngine, data, cmd.header,
-                          { allowLoops = cmd.allowLoops })
+
+    if cmd.stereoEpoch ~= nil then
+      stereoEpoch = cmd.stereoEpoch
+    end
+
+    local ok, eng = pcall(
+      ChipSynth.newEngine,
+      data,
+      cmd.header,
+      { allowLoops = cmd.allowLoops }
+    )
+
     if ok then
       engine = eng
     else
-      outCh:push({ gen = gen, error = tostring(eng) })
+      outCh:push({
+        gen = gen,
+        error = tostring(eng)
+      })
       finished = true
     end
+
   elseif cmd.cmd == "stop" then
     gen = nil
     engine = nil
     finished = false
     outCh:clear()
+
   elseif cmd.cmd == "channelMix" then
-    if cmd.volumes ~= nil then ChipSynth.setChannelVolumes(cmd.volumes) end
-    if cmd.pitches ~= nil then ChipSynth.setChannelPitches(cmd.pitches) end
-    if cmd.stereo ~= nil then ChipSynth.setStereo(cmd.stereo) end
-    if engine and cmd.stereo ~= nil then ChipSynth.applyStereo(engine) end
+    if cmd.volumes ~= nil then
+      ChipSynth.setChannelVolumes(cmd.volumes)
+    end
+
+    if cmd.pitches ~= nil then
+      ChipSynth.setChannelPitches(cmd.pitches)
+    end
+
+    if cmd.stereo ~= nil then
+      ChipSynth.setStereo(cmd.stereo)
+    end
+
+    if engine and cmd.stereo ~= nil then
+      ChipSynth.applyStereo(engine)
+    end
+
     if cmd.stereoEpoch ~= nil then
       stereoEpoch = cmd.stereoEpoch
       outCh:clear()
     end
+
   elseif cmd.cmd == "invalidate" then
     ChipSynth.invalidateBanks()
+
   elseif cmd.cmd == "quit" then
     return true
   end
+
   return false
 end
 

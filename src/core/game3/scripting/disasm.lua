@@ -4,18 +4,28 @@ local Opcodes = require("src.core.game3.scripting.opcodes")
 
 local Disasm = {}
 
+local function byte_at(bytes, i)
+  if type(bytes) == "string" then
+    return string.byte(bytes, i) or 0
+  end
+  return bytes[i] or 0
+end
+
 local function u8(bytes, i)
-  return bytes[i] or 0, i + 1
+  return byte_at(bytes, i), i + 1
 end
 
 local function u16(bytes, i)
-  local lo = bytes[i] or 0
-  local hi = bytes[i + 1] or 0
+  local lo = byte_at(bytes, i)
+  local hi = byte_at(bytes, i + 1)
   return lo + hi * 256, i + 2
 end
 
 local function u32(bytes, i)
-  local a, b, c, d = bytes[i] or 0, bytes[i + 1] or 0, bytes[i + 2] or 0, bytes[i + 3] or 0
+  local a = byte_at(bytes, i)
+  local b = byte_at(bytes, i + 1)
+  local c = byte_at(bytes, i + 2)
+  local d = byte_at(bytes, i + 3)
   return a + b * 256 + c * 65536 + d * 16777216, i + 4
 end
 
@@ -164,7 +174,7 @@ function Disasm.decodeMovement(bytes, start)
   local out = {}
   local i = start
   while i <= #bytes do
-    local b = bytes[i]
+    local b = byte_at(bytes, i)
     out[#out + 1] = b
     i = i + 1
     if b == Opcodes.STEP_END then break end

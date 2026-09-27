@@ -75,23 +75,41 @@ local function pad_even(grid)
   local nw = w + (w % 2)
   local nh = h + (h % 2)
   if nw == w and nh == h then return grid end
+
   local indoor = grid.environment == "INDOOR" or grid.kind == "indoor"
-  local voidCell = { mid = 0, coll = 1, elev = 0 }
+  local packed = type(grid.cells[1]) == "number"
+
+  -- packed 1024 = mid 0, collision 1, elevation 0
+  local voidCell = packed and 1024 or { mid = 0, coll = 1, elev = 0 }
+
   local cells = {}
+
   local function at(x, y)
     if indoor and (x >= w or y >= h) then
       return voidCell
     end
+
     local sx = math.min(x, w - 1)
     local sy = math.min(y, h - 1)
     return grid.cells[sy * w + sx + 1]
   end
+
   for y = 0, nh - 1 do
     for x = 0, nw - 1 do
       local c = at(x, y)
-      cells[#cells + 1] = { mid = c.mid, coll = c.coll, elev = c.elev }
+
+      if packed then
+        cells[#cells + 1] = c
+      else
+        cells[#cells + 1] = {
+          mid = c.mid,
+          coll = c.coll,
+          elev = c.elev,
+        }
+      end
     end
   end
+
   return {
     width = nw,
     height = nh,
@@ -149,7 +167,8 @@ local function unique_mids_by_pair(grids, scriptMids)
       byPair[pair] = seen
     end
     for _, cell in ipairs(grid.cells) do
-      seen[cell.mid] = true
+      local mid = type(cell) == "number" and (cell % 1024) or cell.mid
+      seen[mid] = true
     end
   end
   for pair, mids in pairs(scriptMids or {}) do
@@ -302,6 +321,13 @@ function Extract.run(imports, cache, progressCb, opts)
   local census = assert(MapTree.walk(rom, version))
   local mapOrder, byEngine = MapCatalog.allOrder(census, MAP_ORDER)
   MapCatalog.registerOrder(rom, version, mapOrder, byEngine)
+
+  -- Nothing below needs the heavy census entries themselves. They contain
+  -- parsed headers/events/connections and otherwise stay alive throughout
+  -- the entire map extraction.
+  census = nil
+  byEngine = nil
+  collectgarbage("collect")
   rom:clearCache()
   progress(progressCb, 0, "census", #mapOrder, #mapOrder)
 
@@ -316,27 +342,67 @@ function Extract.run(imports, cache, progressCb, opts)
   table.sort(pairNames)
 
   progress(progressCb, 1, "tilesets", 0, #pairNames)
+  local lowMemoryBundles = _G.POKEPORT_VITA == true
+  local validPairs = {}
   local bundles = {}
   for i, pairName in ipairs(pairNames) do
     progress(progressCb, 1, "tilesets", i - 1, #pairNames)
     local okLoad, bundleOrErr = pcall(Tileset.loadPair, rom, version, pairName)
     if okLoad and bundleOrErr then
-      bundles[pairName] = bundleOrErr
+      validPairs[pairName] = true
+      if lowMemoryBundles then
+        -- Vita only validates the pair here. Do not retain all decompressed
+        -- tilesets at once; the lazy table below keeps at most one resident.
+        bundleOrErr = nil
+        collectgarbage("collect")
+      else
+        bundles[pairName] = bundleOrErr
+      end
     else
       print("[extract] skip tileset pair " .. tostring(pairName) .. ": " .. tostring(bundleOrErr))
     end
   end
+
+  if lowMemoryBundles then
+    local loadedName = nil
+    local loadedBundle = nil
+    setmetatable(bundles, {
+      __index = function(_, pairName)
+        if not validPairs[pairName] then return nil end
+        if loadedName == pairName and loadedBundle then
+          return loadedBundle
+        end
+
+        -- Release the previous decompressed pair before loading another one.
+        loadedBundle = nil
+        loadedName = nil
+        collectgarbage("collect")
+
+        local okLoad, bundleOrErr = pcall(Tileset.loadPair, rom, version, pairName)
+        if not okLoad or not bundleOrErr then
+          error("failed reloading tileset pair " .. tostring(pairName) .. ": " .. tostring(bundleOrErr))
+        end
+
+        loadedName = pairName
+        loadedBundle = bundleOrErr
+        return loadedBundle
+      end
+    })
+    collectgarbage("collect")
+  end
+
   rom:clearCache()
 
-  progress(progressCb, 2, "maps", 0, 1)
   local Maps = require("src.import.gba.maps")
+  progress(progressCb, 2, "maps: grids", 0, #mapOrder)
   local grids = {}
   local dropped = {}
-  for _, mapId in ipairs(mapOrder) do
+  for mapIndex, mapId in ipairs(mapOrder) do
+    progress(progressCb, 2, "maps: grids", mapIndex - 1, #mapOrder)
     local spec = Versions.MAPS[mapId]
     local layoutName = spec and spec.layout
     local layoutSpec = layoutName and version.layouts and version.layouts[layoutName]
-    if layoutSpec and bundles[spec.pair] then
+    if layoutSpec and validPairs[spec.pair] then
       local grid = Maps.loadGrid(rom, layoutSpec)
       grid.map_id = mapId
       grid.kind = spec.kind
@@ -353,22 +419,33 @@ function Extract.run(imports, cache, progressCb, opts)
   if #dropped > 0 then
     return false, "dropped " .. #dropped .. " map(s): " .. table.concat(dropped, ",")
   end
+  progress(progressCb, 2, "maps: borders", 0, #mapOrder)
   local borders = {}
   for _, mapId in ipairs(mapOrder) do
     if grids[mapId] then
       borders[mapId] = Maps.loadBorder(rom, version, mapId)
     end
   end
+  progress(progressCb, 2, "maps: alternate layouts", 0, 1)
   require("src.import.gba.alt_layouts").build(rom, version, grids, borders, pad_even)
-  local extractedScripts = require("src.import.gba.extract_scripts").extractFromRom(rom, version)
+  progress(progressCb, 2, "maps: scripts", 0, 1)
+  local extractedScripts = require("src.import.gba.extract_scripts").extractFromRom(
+    rom,
+    version,
+    function(name, cur, total)
+      progress(progressCb, 2, "maps: scripts: " .. tostring(name), cur, total)
+    end
+  )
   local scriptMids = script_mids_by_pair(extractedScripts, grids)
   rom:clearCache()
 
+  progress(progressCb, 2, "maps: metatile scan", 0, 1)
   local midsByPair = unique_mids_by_pair(grids, scriptMids)
   local totalMids = 0
   for _, list in pairs(midsByPair) do totalMids = totalMids + #list end
 
   -- Build midIndex dictionary without 2bpp quantize
+  progress(progressCb, 2, "maps: collision index", 0, #pairNames)
   local midIndex = {}
   for _, pairName in ipairs(pairNames) do
     midIndex[pairName] = {}
@@ -472,30 +549,93 @@ function Extract.run(imports, cache, progressCb, opts)
   end
   NativePack.writeExtract(
     cache, Extract.CACHE_ROOT, bundles, grids, borders, pairNames, midIndex,
-    Tileset.behaviorOf, Collision.fromCell, scriptMids, warpCells)
+    Tileset.behaviorOf, Collision.fromCell, scriptMids, warpCells,
+    function(label, cur, total)
+      progress(
+        progressCb,
+        6,
+        "native_pack: " .. tostring(label),
+        cur,
+        total
+      )
+    end)
+
+  local function postNativeStage(name)
+    progress(progressCb, 6, "post-native: " .. tostring(name), 0, 1)
+
+    if _G.POKEPORT_VITA then
+      rom:clearCache()
+      collectgarbage("collect")
+    end
+  end
+
+  postNativeStage("prepare")
+
+  -- AnimPack is the final consumer of grids/borders/scriptMids. Build this
+  -- small derived table now so the heavy world-map structures can die.
+  local midLists = {}
+  for _, pairName in ipairs(pairNames) do
+    midLists[pairName] =
+      NativePack.collectMidsForPair(
+        grids,
+        borders,
+        pairName,
+        scriptMids
+      )
+  end
+
+  if _G.POKEPORT_VITA then
+    midsByPair = nil
+    midIndex = nil
+    grids = nil
+    borders = nil
+    scriptMids = nil
+    warpCells = nil
+
+    rom:clearCache()
+    collectgarbage("collect")
+  end
 
   -- OW sprites + tileset anims + encounters + audio + chrome from ROM
   do
-    local rom2 = assert(Rom.open(imports, importId))
+    local rom2
+	if _G.POKEPORT_VITA then
+	  rom:clearCache()
+	  collectgarbage("collect")
+	  rom2 = rom
+	else
+	  rom2 = assert(Rom.open(imports, importId))
+	end
     if not (opts and opts.skipScriptsAndOw) then
+      postNativeStage("help")
       require("src.import.gba.help_extract").writeExtract(rom2, cache)
+      postNativeStage("quest log")
       require("src.import.gba.quest_log_extract").writeExtract(rom2, cache)
+      postNativeStage("object interactions")
       require("src.import.gba.object_interactions_extract").writeExtract(rom2, cache, Extract.CACHE_ROOT, version)
     end
-    local midLists = {}
-    for _, pairName in ipairs(pairNames) do
-      midLists[pairName] = NativePack.collectMidsForPair(grids, borders, pairName, scriptMids)
-    end
     local AnimPack = require("src.import.gba.tileset_anim_pack")
+    postNativeStage("tileset animations")
     AnimPack.writeExtract(rom2, cache, Extract.CACHE_ROOT, bundles, midLists, version)
+
+    if _G.POKEPORT_VITA then
+      midLists = nil
+      bundles = nil
+      rom2:clearCache()
+      collectgarbage("collect")
+    end
     if not (opts and opts.skipScriptsAndOw) then
+      postNativeStage("overworld sprites")
       local OwExtract = require("src.import.gba.ow_extract")
       OwExtract.writeExtract(rom2, cache, Extract.CACHE_ROOT, version)
+      postNativeStage("encounters")
       local EncExtract = require("src.import.gba.encounters_extract")
       EncExtract.writeExtract(rom2, cache, Extract.CACHE_ROOT, version)
+      postNativeStage("field effects")
       local FxExtract = require("src.import.gba.field_effect_extract")
       FxExtract.writeExtract(rom2, cache, Extract.CACHE_ROOT, version)
       do
+        postNativeStage("marts")
         local MartsExtract = require("src.import.gba.marts_extract")
         local okM, detailM = pcall(MartsExtract.run, rom2, cache, {
           cacheRoot = Extract.CACHE_ROOT,
@@ -505,13 +645,28 @@ function Extract.run(imports, cache, progressCb, opts)
             detailM.listCount or 0, tostring(detailM.path)))
         end
       end
-      for _, name in ipairs({ "online_ui_extract", "berry_crush_extract", "dodrio_extract", "pokemon_jump_extract" }) do
-        require("src.import.gba." .. name).run(rom2, cache, { cacheRoot = Extract.CACHE_ROOT })
-      end
+      for _, name in ipairs({
+		  "online_ui_extract",
+		  "berry_crush_extract",
+		  "dodrio_extract",
+		  "pokemon_jump_extract",
+		}) do
+		  if _G.POKEPORT_VITA and name == "pokemon_jump_extract" then
+			postNativeStage("pokemon_jump_extract skipped")
+		  else
+			postNativeStage(name)
+			require("src.import.gba." .. name).run(
+			  rom2,
+			  cache,
+			  { cacheRoot = Extract.CACHE_ROOT }
+			)
+		  end
+		end
     end
     rom2:clearCache()
   end
 
+  postNativeStage("write warps")
   local wl = { "return {\n" }
   for _, mapId in ipairs(mapOrder) do
     local list = warps[mapId] or {}
@@ -533,6 +688,7 @@ function Extract.run(imports, cache, progressCb, opts)
   wl[#wl + 1] = "}\n"
   cache:write(Extract.CACHE_ROOT .. "/warps.lua", table.concat(wl))
 
+  postNativeStage("write connections")
   local cl = { "return {\n" }
   for _, mapId in ipairs(mapOrder) do
     local conns = connections[mapId] or {}
@@ -546,16 +702,37 @@ function Extract.run(imports, cache, progressCb, opts)
   cl[#cl + 1] = "}\n"
   cache:write(Extract.CACHE_ROOT .. "/connections.lua", table.concat(cl))
 
+  if _G.POKEPORT_VITA then
+    wl = nil
+    cl = nil
+    warps = nil
+    connections = nil
+    collectgarbage("collect")
+  end
+
   local scriptBundle = nil
   if not (opts and opts.skipScriptsAndOw) then
     -- game3 scripts/events/text/movements from ROM MapEvents + BFS
     local ExtractScripts = require("src.import.gba.extract_scripts")
-    rom = assert(Rom.open(imports, importId))
+    if _G.POKEPORT_VITA then
+	  rom:clearCache()
+	  collectgarbage("collect")
+	else
+	  rom = assert(Rom.open(imports, importId))
+	end
+    postNativeStage("script bundle")
     scriptBundle = ExtractScripts.writeBundleFromRom(
       rom, cache, Extract.CACHE_ROOT, version, extractedScripts)
 
     -- Extract full trainer parties, AI flags, dialogs, and sprites
     do
+      if _G.POKEPORT_VITA then
+        extractedScripts = nil
+        rom:clearCache()
+        collectgarbage("collect")
+      end
+
+      postNativeStage("trainers")
       local TrainerExtract = require("src.import.gba.trainer_extract")
       TrainerExtract.run(rom, cache, {
         cacheRoot = Extract.CACHE_ROOT,
@@ -566,6 +743,7 @@ function Extract.run(imports, cache, progressCb, opts)
 
     -- Normalized map_tree mirror
     do
+      postNativeStage("map tree")
       local MapTreeExtract = require("src.import.gba.map_tree_extract")
       local okTree, treeDetail = MapTreeExtract.run(rom, cache, {
         version = version,
@@ -655,7 +833,6 @@ local function _dormant_quantize_run(imports, cache, progressCb)
   end
   rom:clearCache()
 
-  progress(progressCb, 2, "maps", 0, 1)
   -- Load every registered map grid from ROM MapLayout pointers.
   local grids = {}
   do
@@ -1992,7 +2169,6 @@ function Extract.runNativeOnly(imports, cache, progressCb)
   end
   rom:clearCache()
 
-  progress(progressCb, 2, "maps", 0, 1)
   local grids = {}
   do
     for _, mapId in ipairs(mapOrder) do

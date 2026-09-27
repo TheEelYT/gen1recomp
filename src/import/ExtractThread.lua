@@ -27,7 +27,9 @@ table.insert(package.searchers or package.loaders, 1, function(modname)
   end
 end)
 
-local version, prefix, romData, progressName, resultName, romSha1 = ...
+local version, prefix, romData, progressName, resultName, romSha1, isVita = ...
+
+_G.POKEPORT_VITA = isVita == true
 
 local progressChannel = love.thread and love.thread.getChannel and love.thread.getChannel(progressName)
 local resultChannel = love.thread and love.thread.getChannel and love.thread.getChannel(resultName)

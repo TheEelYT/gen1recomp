@@ -11,6 +11,7 @@
 -- keeping them out is what lets the same synth code run in the worker.
 
 local bit = require("bit")
+local ffiOk, ffi = pcall(require, "ffi")
 
 local ChipSynth = {}
 
@@ -23,6 +24,9 @@ local SAMPLE_RATE = (function()
   if rate and rate >= 8000 and rate <= 48000 then return math.floor(rate) end
   return 44100
 end)()
+
+local FRAME_PER_SAMPLE = 60 / SAMPLE_RATE
+
 local TICKS_PER_SECOND = 15360
 local FRAME_TICKS = 256
 local GB_CLOCK = 4194304
@@ -166,6 +170,7 @@ function ChipSynth.setSampleRate(rate)
     if rate < 8000 then rate = 8000 elseif rate > 48000 then rate = 48000 end
     if rate ~= SAMPLE_RATE then
       SAMPLE_RATE = rate
+      FRAME_PER_SAMPLE = 60 / SAMPLE_RATE
       HPF_CHARGE = 0.999958 ^ (GB_CLOCK / SAMPLE_RATE)
       ChipSynth.SAMPLE_RATE = SAMPLE_RATE
     end
@@ -317,6 +322,8 @@ function Channel.new(engine, spec, options)
     noiseSampling = false, -- Gen 2 toggle_noise
     condition = 0, -- Gen 2 set_condition / sound_jump_if
     tracks = tracks, -- Gen 2 CHANNEL_TRACKS (NR51 bits for this channel)
+	panLeftCached = true,
+	panRightCached = true,
     -- last Music_StereoPanning byte; remembered even while MONO so a live
     -- SOUND toggle can re-apply it without restarting the song (#1471)
     stereoPanning = nil,
@@ -420,17 +427,28 @@ function Channel:timedEvent(event, ticks)
   event.duration = ticks / TICKS_PER_SECOND
   event.samples = snapTicks(self.timeTicks) - first
   event.sample = 0
-  event.elapsed = 0
   return event
 end
 
-function Channel:pan()
+function Channel:refreshPanCache()
+  if self.engine.generation ~= 2 then return end
+
   local mask = bit.lshift(1, self.hardware - 1)
+  local tracks = self.tracks or 0xFF
+
+  self.panLeftCached =
+    bit.band(bit.rshift(tracks, 4), mask) ~= 0
+
+  self.panRightCached =
+    bit.band(tracks, mask) ~= 0
+end
+
+function Channel:pan()
   if self.engine.generation == 2 then
-    local tracks = self.tracks or 0xFF
-    return bit.band(bit.rshift(tracks, 4), mask) ~= 0,
-      bit.band(tracks, mask) ~= 0
+    return self.panLeftCached, self.panRightCached
   end
+
+  local mask = bit.lshift(1, self.hardware - 1)
   return bit.band(bit.rshift(self.engine.pan, 4), mask) ~= 0,
     bit.band(self.engine.pan, mask) ~= 0
 end
@@ -440,13 +458,17 @@ end
 function Channel:applyStereoMix()
   local mask = bit.lshift(1, self.hardware - 1)
   local default = bit.bor(bit.lshift(mask, 4), mask)
+
   if self.forcePanning then
+    self:refreshPanCache()
     return
   elseif stereoEnabled and self.stereoPanning then
     self.tracks = bit.band(self.stereoPanning, default)
   else
     self.tracks = default
   end
+
+  self:refreshPanCache()
 end
 
 function Channel:tone(ticks, register, volume, fade)
@@ -800,6 +822,7 @@ function Channel:nextEventGen2()
       local default = bit.bor(bit.lshift(mask, 4), mask)
       self.tracks = bit.band(packed, default)
       self.forcePanning = true
+	  self:refreshPanCache()
       self.engine:refreshMonoMix()
     elseif command == 0xE5 then -- volume (global master; ignored for mix)
       self:byte()
@@ -833,6 +856,7 @@ function Channel:nextEventGen2()
         local mask = bit.lshift(1, self.hardware - 1)
         local default = bit.bor(bit.lshift(mask, 4), mask)
         self.tracks = bit.band(packed, default)
+		self:refreshPanCache()
       end
     elseif command == 0xF0 then -- sfx_toggle_noise
       if self.noiseSampling then
@@ -890,11 +914,86 @@ function Channel:nextEventGen2()
   return nil
 end
 
+-- Envelope levels only change a handful of times during a note. The old
+-- path recalculated floor(elapsed / step) for every output sample.
+local function envelopeNextSample(absFade, step)
+  -- ceil(step * absFade * SAMPLE_RATE / 64), using integer arithmetic.
+  return math.floor(
+    (step * absFade * SAMPLE_RATE + 63) / 64)
+end
+
 local function envelopeVolume(volume, fade, elapsed)
   if fade == 0 then return volume end
   local steps = math.floor(elapsed / (math.abs(fade) / 64))
   if fade > 0 then return math.max(0, volume - steps) end
   return math.min(15, volume + steps)
+end
+
+local function envelopeNextSample(absFade, step)
+  return math.floor(
+    (step * absFade * SAMPLE_RATE + 63) / 64)
+end
+
+local function envelopeVolumeEvent(event, sampleIndex)
+  local volume = event.volume or 0
+  local fade = event.fade or 0
+
+  if fade == 0 then
+    return volume
+  end
+
+  if event._envValue == nil then
+    event._envStep = 0
+    event._envValue = volume
+    event._envAbsFade = math.abs(fade)
+
+    if (fade > 0 and volume <= 0)
+        or (fade < 0 and volume >= 15) then
+      event._envNext = nil
+    else
+      event._envNext =
+        envelopeNextSample(event._envAbsFade, 1)
+    end
+  end
+
+  local nextSample = event._envNext
+
+  if nextSample and sampleIndex >= nextSample then
+    local step = event._envStep
+    local value = event._envValue
+
+    repeat
+      step = step + 1
+
+      if fade > 0 then
+        value = volume - step
+
+        if value <= 0 then
+          value = 0
+          nextSample = nil
+          break
+        end
+      else
+        value = volume + step
+
+        if value >= 15 then
+          value = 15
+          nextSample = nil
+          break
+        end
+      end
+
+      nextSample =
+        envelopeNextSample(event._envAbsFade, step + 1)
+
+    until sampleIndex < nextSample
+
+    event._envStep = step
+    event._envValue = value
+    event._envNext = nextSample
+  end
+
+  return event._envValue
 end
 
 
@@ -935,26 +1034,103 @@ function Channel:clockNoise(width7)
   end
 end
 
+local function advanceNoiseLfsr(state, clocks, width7)
+  if clocks <= 0 then
+    return state
+  end
+
+  if width7 then
+    -- In 7-bit mode the low seven bits form an independent LFSR.
+    -- Advance up to six clocks at once; before the seventh clock none
+    -- of the newly generated feedback bits can feed back into bit 0/1.
+    state = bit.band(state, 0x7F)
+
+    while clocks > 0 do
+      local count = math.min(clocks, 6)
+      local mask = bit.lshift(1, count) - 1
+
+      local feedback = bit.band(
+        bit.bxor(state, bit.rshift(state, 1)),
+        mask)
+
+      state = bit.bor(
+        bit.rshift(state, count),
+        bit.lshift(feedback, 7 - count))
+
+      clocks = clocks - count
+    end
+
+    return state
+  end
+
+  -- Same idea for the normal 15-bit LFSR. Up to fourteen clocks can be
+  -- collapsed into one operation before generated feedback reaches the
+  -- low input bits again.
+  state = bit.band(state, 0x7FFF)
+
+  while clocks > 0 do
+    local count = math.min(clocks, 14)
+    local mask = bit.lshift(1, count) - 1
+
+    local feedback = bit.band(
+      bit.bxor(state, bit.rshift(state, 1)),
+      mask)
+
+    state = bit.bor(
+      bit.rshift(state, count),
+      bit.lshift(feedback, 15 - count))
+
+    clocks = clocks - count
+  end
+
+  return state
+end
+
 function Channel:sampleNoise(parameter)
   parameter = parameter or 0
-  local divisor = NOISE_DIVISORS[bit.band(parameter, 7)]
-  local shift = bit.rshift(parameter, 4)
-  if shift < 14 then
-    local pitch = channelPitch[self.hardware] or 1
-    local cycles = GB_CLOCK / divisor / (2 ^ shift) / SAMPLE_RATE * pitch
-    local width7 = bit.band(parameter, 8) ~= 0
-    local remaining = cycles
-    while remaining > 0 do
-      local untilClock = 1 - self.noiseClock
-      local span = math.min(remaining, untilClock)
-      self.noiseClock = self.noiseClock + span
-      remaining = remaining - span
-      if self.noiseClock >= 1 - 1e-12 then
-        self.noiseClock = 0
-        self:clockNoise(width7)
-      end
+
+  local pitch = channelPitch[self.hardware] or 1
+
+  -- The polynomial counter parameter normally stays unchanged for thousands
+  -- of output samples. Cache everything derived from it rather than doing
+  -- divides, exponentiation and bit decoding for every sample.
+  if self.noiseCachedParameter ~= parameter
+      or self.noiseCachedPitch ~= pitch then
+
+    local shift = bit.rshift(parameter, 4)
+
+    self.noiseCachedParameter = parameter
+    self.noiseCachedPitch = pitch
+    self.noiseCachedWidth7 = bit.band(parameter, 8) ~= 0
+
+    if shift < 14 then
+      local divisor = NOISE_DIVISORS[bit.band(parameter, 7)]
+
+      self.noiseCachedCycles =
+        GB_CLOCK / divisor / (2 ^ shift) / SAMPLE_RATE * pitch
+    else
+      self.noiseCachedCycles = 0
     end
   end
+
+  local cycles = self.noiseCachedCycles
+
+  if cycles > 0 then
+    -- Equivalent to consuming `cycles` through the old remaining/span loop,
+    -- but calculate the number of LFSR clocks directly.
+    local total = self.noiseClock + cycles
+    local clocks = math.floor(total + 1e-12)
+
+    self.noiseClock = total - clocks
+
+    if clocks > 0 then
+      self.noiseLfsr = advanceNoiseLfsr(
+        self.noiseLfsr,
+        clocks,
+        self.noiseCachedWidth7)
+    end
+  end
+
   return bit.band(self.noiseLfsr, 1) == 0 and 1 or 0
 end
 
@@ -1027,7 +1203,6 @@ function Channel:sample()
     return self:sampleDrum(tail, sampleIndex) * gain
   end
   local sampleIndex = event.sample
-  event.elapsed = sampleIndex / SAMPLE_RATE
   event.sample = sampleIndex + 1
   if event.silence then
     local tail = self.drumTail
@@ -1044,39 +1219,84 @@ function Channel:sample()
     return self:sampleDrum(event, sampleIndex) * gain
   end
   self.drumTail = nil
-  local volume = envelopeVolume(
-    event.volume or 0, event.fade or 0, event.elapsed)
+  local volume = envelopeVolumeEvent(event, sampleIndex)
   if event.noise then
     return self:sampleNoise(event.noiseParameter) * volume / 15 * gain
   end
 
-  local register = event.register
-  local frame = math.floor(event.elapsed * 60)
+  local frame = math.floor(sampleIndex * FRAME_PER_SAMPLE)
+local pitch = channelPitch[self.hardware] or 1
+
+local phaseStep
+
+  -- Hardware sweep is used by SFX and can update faster than the 60 Hz
+  -- music frame clock, so leave that path sample-accurate.
   if event.sweep then
-    register = sweptRegister(register, event.sweep, event.elapsed)
+    local elapsed = sampleIndex / SAMPLE_RATE
+
+    local register = sweptRegister(
+      event.register, event.sweep, elapsed)
+
     if not register then return 0 end
-  elseif event.slide then
-    local amount = math.min(1, frame / event.slide.frames)
-    register = register + (event.slide.target - register) * amount
-  elseif event.vibrato and frame >= event.vibrato.delay then
-    local vibrato = event.vibrato
-    local toggles = math.floor(
-      (frame - vibrato.delay + 1) / (vibrato.rate + 1))
-    if toggles > 0 then
-      local low = bit.band(register, 0xFF)
-      local high = bit.band(register, 0x700)
-      if bit.band(toggles, 1) ~= 0 then
-        register = high + math.min(0xFF, low + vibrato.above)
-      else
-        register = high + math.max(0, low - vibrato.below)
-      end
+
+    local frequency =
+      131072 / (2048 - math.min(register, 2047)) * pitch
+
+    if event.wave then
+      frequency = frequency * 0.5
     end
+
+    phaseStep = frequency / SAMPLE_RATE
+  else
+    -- Music pitch modulation changes only on frame boundaries.
+    -- Recompute the oscillator increment only when that state changes.
+    if event._phaseFrame ~= frame
+        or event._phasePitch ~= pitch
+        or event._phaseStep == nil then
+
+      local register = event.register
+
+      if event.slide then
+        local amount = math.min(1, frame / event.slide.frames)
+        register =
+          register + (event.slide.target - register) * amount
+
+      elseif event.vibrato and frame >= event.vibrato.delay then
+        local vibrato = event.vibrato
+        local toggles = math.floor(
+          (frame - vibrato.delay + 1) / (vibrato.rate + 1))
+
+        if toggles > 0 then
+          local low = bit.band(register, 0xFF)
+          local high = bit.band(register, 0x700)
+
+          if bit.band(toggles, 1) ~= 0 then
+            register =
+              high + math.min(0xFF, low + vibrato.above)
+          else
+            register =
+              high + math.max(0, low - vibrato.below)
+          end
+        end
+      end
+
+      local frequency =
+        131072 / (2048 - math.min(register, 2047)) * pitch
+
+      if event.wave then
+        frequency = frequency * 0.5
+      end
+
+      event._phaseStep = frequency / SAMPLE_RATE
+      event._phaseFrame = frame
+      event._phasePitch = pitch
+    end
+
+    phaseStep = event._phaseStep
   end
-  local pitch = channelPitch[self.hardware] or 1
-  local frequency = 131072 / (2048 - math.min(register, 2047)) * pitch
-  if event.wave then frequency = frequency * 0.5 end
+
   local phase = self.phase
-  self.phase = (phase + frequency / SAMPLE_RATE) % 1
+  self.phase = (phase + phaseStep) % 1
   if event.wave then
     local wave = self.engine.waves[
       math.min(event.waveInstrument + 1, #self.engine.waves)]
@@ -1377,7 +1597,8 @@ function Engine:sampleStereo()
     if self.generation == 2 then
       -- live CHANNEL_TRACKS, not the pan baked into the current note, so a
       -- SOUND toggle reaches the next synthesized sample (#1471)
-      panLeft, panRight = channel:pan()
+      panLeft, panRight =
+		channel.panLeftCached, channel.panRightCached
     else
       local event = channel.event
       panLeft = not event or event.panLeft ~= false
@@ -1412,15 +1633,56 @@ end
 -- produces and the main thread queues.
 local function soundData(engine, samples, channels)
   local result = love.sound.newSoundData(samples, SAMPLE_RATE, 16, channels)
+
+  -- Fast path: SoundData is already signed 16-bit PCM internally.
+  -- Writing its backing buffer directly avoids setSample's Lua-side
+  -- argument checks, channel math, bounds checks and object-cache lookup
+  -- for every individual sample.
+  local ptr
+  if ffiOk and ffi and result.getFFIPointer then
+    local ok, raw = pcall(result.getFFIPointer, result)
+    if ok and raw then
+      ptr = ffi.cast("int16_t *", raw)
+    end
+  end
+
+  if ptr then
+    if channels == 2 then
+      local sampleStereo = engine.sampleStereo
+      local out = 0
+
+      for _ = 1, samples do
+        local left, right = sampleStereo(engine)
+
+        ptr[out] = left * 32767
+        ptr[out + 1] = right * 32767
+
+        out = out + 2
+      end
+    else
+      local sample = engine.sample
+
+      for index = 0, samples - 1 do
+        ptr[index] = sample(engine) * 32767
+      end
+    end
+
+    return result
+  end
+
+  -- Portable fallback for non-LuaJIT runtimes.
+  local setSample = result.setSample
+
   for index = 0, samples - 1 do
     if channels == 2 then
       local left, right = engine:sampleStereo()
-      result:setSample(index, 1, left)
-      result:setSample(index, 2, right)
+      setSample(result, index, 1, left)
+      setSample(result, index, 2, right)
     else
-      result:setSample(index, engine:sample())
+      setSample(result, index, engine:sample())
     end
   end
+
   return result
 end
 

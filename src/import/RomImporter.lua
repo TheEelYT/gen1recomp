@@ -1708,7 +1708,18 @@ function RomImporter.new(onComplete, opts)
   -- arm the virtual cursor immediately so the player does not have to press a
   -- button before seeing something move.  Desktop keeps the cursor latent
   -- until the first stick bump so a plugged DualSense does not steal the mouse.
-  if self.launcher and love.joystick and love.joystick.getJoystickCount
+  -- Vita has a built-in controller and should use native menu navigation,
+  -- not the Linux-handheld virtual mouse cursor.
+  if self.launcher and _G.POKEPORT_VITA then
+    self._padCursorActive = false
+    self._padNavChosen = true
+
+    local okKit, Kit = pcall(require, "src.ui.kit.Kit")
+    if okKit then
+      Kit._ringShown = true
+    end
+
+  elseif self.launcher and love.joystick and love.joystick.getJoystickCount
       and love.joystick.getJoystickCount() > 0 then
     local osName = (love.system and love.system.getOS and love.system.getOS()) or ""
     if osName == "Linux" or self.isNX then
@@ -2038,7 +2049,7 @@ function RomImporter:_startExtractThread(version, prefix, data, displayName)
   love.thread.getChannel(progressName):clear()
   love.thread.getChannel(resultName):clear()
   local started = pcall(thread.start, thread, version, prefix, data,
-    progressName, resultName, self.romSha1)
+    progressName, resultName, self.romSha1, _G.POKEPORT_VITA == true)
   if not started then return false end
   self._extract = {
     thread = thread, version = version, prefix = prefix,
@@ -2392,12 +2403,24 @@ end
 function RomImporter:startPath(path)
   if not path then return end
   local data, readError = readExternalPath(path)
+  local sourcePath = path
+
+  -- Vita FileBrowser paths are LÖVE virtual filesystem paths, not native paths.
+  if not data and _G.POKEPORT_VITA and love.filesystem then
+    local virtualPath = tostring(path):gsub("^/+", "")
+    data, readError = love.filesystem.read(virtualPath)
+    if data then
+      sourcePath = nil
+    end
+  end
+
   if not data then
     self:setError("Could not read the selected file: " .. tostring(readError))
     return
   end
+
   self:startData(data, path:match("[^/\\]+$") or path,
-    require("src.import.RomSources").absolute(path))
+    sourcePath and require("src.import.RomSources").absolute(sourcePath) or nil)
 end
 
 function RomImporter:filedropped(file)
@@ -3265,7 +3288,7 @@ function RomImporter:choose(version)
   end
   local isHandheld = os.getenv("HANDHELD") == "1" or os.getenv("PORTMASTER") == "1"
     or os.getenv("POKEPORT_HANDHELD") == "1" or os.getenv("TRIMUI") == "1"
-    or os.getenv("MUOS") == "1" or os.getenv("KNULLI") == "1"
+    or os.getenv("MUOS") == "1" or os.getenv("KNULLI") == "1" or _G.POKEPORT_VITA == true
 
   if isHandheld then
     if importPendingRom(self) then return end
@@ -3766,8 +3789,22 @@ end
 function RomImporter:resumeAfterOverlay()
   self:ignoreReturningPointer()
   if not self.launcher then return end
+
+  if _G.POKEPORT_VITA then
+    self._padCursorActive = false
+    self._padNavChosen = true
+
+    local okKit, Kit = pcall(require, "src.ui.kit.Kit")
+    if okKit then
+      Kit._ringShown = true
+    end
+
+    return
+  end
+
   if not (love.joystick and love.joystick.getJoystickCount) then return end
   if love.joystick.getJoystickCount() <= 0 then return end
+
   local osName = (love.system and love.system.getOS and love.system.getOS()) or ""
   if osName == "Linux" or self.isNX then
     self:_activatePadCursor()

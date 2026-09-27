@@ -175,7 +175,12 @@ ExtractScripts.decodeBraille = decode_braille
 local function read_movement(rom, gbaPtr)
   local off = rom:ptrOffset(gbaPtr)
   if not off then return nil end
-  local bytes = rom:readBytes(off, MOVE_MAX)
+  local bytes
+  if _G.POKEPORT_VITA then
+    bytes = rom:readString(off, MOVE_MAX)
+  else
+    bytes = rom:readBytes(off, MOVE_MAX)
+  end
   return Disasm.decodeMovement(bytes, 1)
 end
 
@@ -203,7 +208,14 @@ function ExtractScripts.bfsFromSeeds(rom, seedPtrs)
     if scripts[key] then goto continue end
     local off = rom:ptrOffset(ptr)
     if not off then goto continue end
-    local bytes = rom:readBytes(off, SCRIPT_CHUNK)
+    local bytes
+    if _G.POKEPORT_VITA then
+      -- Keep the 8 KiB window as one compact string instead of
+      -- an 8192-element Lua-number table.
+      bytes = rom:readString(off, SCRIPT_CHUNK)
+    else
+      bytes = rom:readBytes(off, SCRIPT_CHUNK)
+    end
     local rows = {}
     local i = 1
     local guard = 0
@@ -299,6 +311,10 @@ function ExtractScripts.bfsFromSeeds(rom, seedPtrs)
       end
     end
     scripts[key] = rows
+
+    if _G.POKEPORT_VITA and processed % 128 == 0 then
+      collectgarbage("collect")
+    end
     ::continue::
   end
   assert(#queue == 0, "script BFS stopped at BFS_MAX with " .. #queue .. " scripts queued")
@@ -314,7 +330,14 @@ function ExtractScripts.bfsFromSeeds(rom, seedPtrs)
   }
 end
 
-function ExtractScripts.extractFromRom(rom, version)
+function ExtractScripts.extractFromRom(rom, version, progressCb)
+  local function report(name, cur, total)
+    if progressCb then
+      progressCb(name, cur or 0, total or 1)
+    end
+  end
+
+  report("map events", 0, 1)
   local events, seeds = ExtractMapEvents.extractIsland1(rom, version)
   local aliases = {}
   -- data/event_scripts.s:77
@@ -330,14 +353,15 @@ function ExtractScripts.extractFromRom(rom, version)
     seeds[#seeds + 1] = ptr
     aliases[name] = Opcodes.key(ptr)
   end
+  report("BFS", 0, 1)
   local bfs = ExtractScripts.bfsFromSeeds(rom, seeds)
-  local scripts = {}
-  for k, v in pairs(bfs.scripts) do scripts[k] = v end
+  report("BFS", 1, 1)
+  local scripts = bfs.scripts
   for name, key in pairs(aliases) do
     scripts[name] = assert(scripts[key], "ROM script " .. name .. " was not extracted")
   end
-  local text = {}
-  for k, v in pairs(bfs.text) do text[k] = v end
+  report("named text", 0, 1)
+  local text = bfs.text
   for name, off in pairs(Versions.NAMED_TEXTS) do
     text[name] = assert(read_text_ir(rom, 0x08000000 + off), "ROM text " .. name .. " is not readable")
   end
@@ -345,14 +369,18 @@ function ExtractScripts.extractFromRom(rom, version)
     text[name] = assert(read_text_ir(rom, 0x08000000 + off, { battle = true }),
       "ROM text " .. name .. " is not readable")
   end
+  report("text tables", 0, 1)
   local textTables = extract_text_tables(rom, text)
+  report("text tables", 1, 1)
   -- src/script_menu.c:574
+  report("standard strings", 0, Versions.STD_STRING_COUNT)
   for i = 0, Versions.STD_STRING_COUNT - 1 do
     local ptr = rom:u32(Versions.STD_STRING_PTRS + i * 4)
     text["stdstring:" .. i] = assert(read_text_ir(rom, ptr), "gStdStringPtrs entry " .. i .. " is not a ROM pointer")
   end
-  local movements = {}
-  for k, v in pairs(bfs.movements) do movements[k] = v end
+  report("finalize", 0, 1)
+  local movements = bfs.movements
+  report("finalize", 1, 1)
   return {
     events = events,
     scripts = scripts,

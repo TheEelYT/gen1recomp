@@ -720,7 +720,25 @@ end
 
 function CacheContract.requiredFilesFor(version)
   local override = CacheContract.VERSION_REQUIRED_FILES_OVERRIDE[version]
-  if override then return override, true end
+
+  if override then
+    if _G.POKEPORT_VITA
+        and (version == "firered" or version == "leafgreen") then
+      local filtered = {}
+      local prefix = "data/generated/gba/pokemon_jump/"
+
+      for _, path in ipairs(override) do
+        if path:sub(1, #prefix) ~= prefix then
+          filtered[#filtered + 1] = path
+        end
+      end
+
+      return filtered, true
+    end
+
+    return override, true
+  end
+
   return CacheContract.REQUIRED_FILES, false
 end
 

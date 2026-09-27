@@ -87,15 +87,79 @@ end
 function RevisionView.forImports(imports, importId, info)
   local rev = RevisionView.forSha1(info.md5)
   if not rev then return nil end
+
   local cached = byImports[imports]
   if cached then return cached end
+
+  -- Vita/LuaJIT low-memory path: construct the normalized revision directly
+  -- into one mutable 16 MiB buffer instead of creating several full-ROM
+  -- intermediate Lua strings.
+  local okFfi, ffi = pcall(require, "ffi")
+  if okFfi and ffi and ffi.new and ffi.copy and ffi.cast and ffi.string then
+    local size = info.size
+    local storage = ffi.new("uint8_t[?]", size)
+    local dst = ffi.cast("uint8_t *", storage)
+    local segments = rev.segments
+
+    -- Keep temporary reads small. The old path retained four 4 MiB chunks
+    -- and then concatenated them into another complete ROM.
+    local chunk = 512 * 1024
+
+    for i = 1, #segments do
+      local start, delta = segments[i][1], segments[i][2]
+      local stop = segments[i + 1] and segments[i + 1][1] or size
+
+      local srcOffset = start + delta
+      local dstOffset = start
+      local remaining = stop - start
+
+      while remaining > 0 do
+        local n = math.min(chunk, remaining)
+        local data, err = imports:read(importId, srcOffset, n)
+        if not data then error(err or "rom read failed") end
+
+        ffi.copy(dst + dstOffset, data, n)
+
+        srcOffset = srcOffset + n
+        dstOffset = dstOffset + n
+        remaining = remaining - n
+      end
+    end
+
+    -- Fix GBA pointers in-place. This is the same transformation
+    -- RevisionView.build performs after constructing its layout string.
+    local floor = math.floor
+    for _, site in ipairs(siteOffsets(rev)) do
+      local ptr =
+          tonumber(dst[site])
+        + tonumber(dst[site + 1]) * 256
+        + tonumber(dst[site + 2]) * 65536
+        + tonumber(dst[site + 3]) * 16777216
+
+      if ptr >= ROM_BASE and ptr < ROM_END then
+        local fixed = toBase(segments, ptr - ROM_BASE)
+        dst[site]     = fixed % 256
+        dst[site + 1] = floor(fixed / 256) % 256
+        dst[site + 2] = floor(fixed / 65536) % 256
+        dst[site + 3] = 0x08
+      end
+    end
+
+    local view = ffi.string(dst, size)
+    byImports[imports] = view
+    return view
+  end
+
+  -- Portable fallback for runtimes without LuaJIT FFI.
   local chunk = 4 * 1024 * 1024
   local parts = {}
   for offset = 0, info.size - 1, chunk do
-    local data, err = imports:read(importId, offset, math.min(chunk, info.size - offset))
+    local data, err = imports:read(
+      importId, offset, math.min(chunk, info.size - offset))
     if not data then error(err or "rom read failed") end
     parts[#parts + 1] = data
   end
+
   local view = RevisionView.build(table.concat(parts), rev)
   byImports[imports] = view
   return view

@@ -644,6 +644,11 @@ function RomExtractorGen3:runIntroAudio(sha1)
 end
 
 function RomExtractorGen3:runParallel(sha1)
+  -- Avoid six simultaneous 16 MiB ROM copies on Vita.
+  if _G.POKEPORT_VITA then
+    return false, "parallel Gen 3 extraction disabled on Vita"
+  end
+
   if os.getenv("POKEPORT_NO_THREAD") == "1" then
     return false, "POKEPORT_NO_THREAD set"
   end
