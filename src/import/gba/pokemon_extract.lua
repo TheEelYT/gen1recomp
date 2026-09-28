@@ -22,8 +22,8 @@ end
 
 local function put(cache, rel, bytes)
   local ok, err = cache:write(rel, bytes)
-  if ok == false then
-    error("pokemon_extract: could not write " .. rel .. ": " .. tostring(err))
+  if not ok then
+    error("WrFAIL: " .. tostring(err))
   end
   return true
 end
@@ -752,48 +752,108 @@ function PokemonExtract.run(rom, cache, opts)
 
   -- src/pokemon.c:5904
   local function write_pics(sp)
-    local palOff = gba_off(rom:u32(palTable + sp * 8))
-    local shinyOff = gba_off(rom:u32(Versions.MON_SHINY_PALETTE_TABLE + sp * 8))
+    local palPtr = rom:u32(palTable + sp * 8)
+    local shinyPtr = rom:u32(Versions.MON_SHINY_PALETTE_TABLE + sp * 8)
+
+    local palOff = gba_off(palPtr)
+    local shinyOff = gba_off(shinyPtr)
     local palBytes = palOff and lz(palOff)
     local shinyBytes = shinyOff and lz(shinyOff)
+
     for _, kind in ipairs({ "front", "back" }) do
       local tableOff = kind == "front" and frontPicTable or backPicTable
-      local picOff = gba_off(rom:u32(tableOff + sp * 8))
+      local picPtr = rom:u32(tableOff + sp * 8)
+      local picOff = gba_off(picPtr)
+
+      -- Species 1 is mandatory for final cache publication.
+      -- On Vita, fail here instead of silently skipping an invalid pointer.
+      if _G.POKEPORT_VITA
+          and sp == 1
+          and kind == "front"
+          and (not picOff or not palOff) then
+        error(string.format(
+          "pokemon_extract: front/1 invalid pointer(s): pic=0x%08X pal=0x%08X table=0x%X",
+          picPtr,
+          palPtr,
+          tableOff))
+      end
+
       if picOff and palOff then
         local tiles = lz(picOff)
         local rgba = tiles and palBytes and decode_pic_sheet(tiles, palBytes)
         local shiny = tiles and shinyBytes and decode_pic_sheet(tiles, shinyBytes)
+
         if rgba and shiny then
-          put(cache, root .. "/" .. kind .. "/" .. sp .. ".rgba", rgba)
+          local outPath = root .. "/" .. kind .. "/" .. sp .. ".rgba"
+          put(cache, outPath, rgba)
+
+          -- Verify Bulbasaur immediately while still inside the worker.
+          if _G.POKEPORT_VITA and sp == 1 and kind == "front" then
+            local check = cache:read(outPath)
+
+            if type(check) ~= "string" then
+              local CacheFs = require("src.import.CacheFs")
+              error(string.format(
+                "pokemon_extract: front/1 write succeeded but immediate readback failed; prefix=%q path=%s",
+                tostring(CacheFs.prefix),
+                outPath))
+            end
+
+            if #check ~= #rgba then
+              error(string.format(
+                "pokemon_extract: front/1 readback size mismatch: wrote=%d read=%d",
+                #rgba,
+                #check))
+            end
+          end
+
           put(cache, root .. "/" .. kind .. "_shiny/" .. sp .. ".rgba", shiny)
           picsWritten[kind] = picsWritten[kind] + 1
+
           -- pokefirered/graphics_file_rules.mk:29
           -- src/pokemon.c:1350, :5339
           if sp == SPECIES_SPINDA and kind == "front" then
             local function raw(t, n)
               if type(t) == "string" then return t:sub(1, n) end
               local out = {}
-              for i = 1, n do out[i] = string.char(t[i] or 0) end
+              for i = 1, n do
+                out[i] = string.char(t[i] or 0)
+              end
               return table.concat(out)
             end
+
             local spots = {}
-            for i = 0, 143 do spots[i + 1] = string.char(rom:get(Versions.SPINDA_SPOT_GRAPHICS + i)) end
+            for i = 0, 143 do
+              spots[i + 1] =
+                string.char(rom:get(Versions.SPINDA_SPOT_GRAPHICS + i))
+            end
+
             put(cache, root .. "/spinda/front.4bpp", raw(tiles, 2048))
             put(cache, root .. "/spinda/normal.gbapal", raw(palBytes, 32))
             put(cache, root .. "/spinda/shiny.gbapal", raw(shinyBytes, 32))
             put(cache, root .. "/spinda/spots.bin", table.concat(spots))
           end
+
           if sp == SPECIES_CASTFORM then
             for form = 1, 3 do
-              put(cache, root .. "/" .. kind .. "/" .. sp .. "_" .. form .. ".rgba",
-                decode_pic_sheet(tiles, palBytes, form, form))
-              put(cache, root .. "/" .. kind .. "_shiny/" .. sp .. "_" .. form .. ".rgba",
-                decode_pic_sheet(tiles, shinyBytes, form, form))
+              put(
+                cache,
+                root .. "/" .. kind .. "/" .. sp .. "_" .. form .. ".rgba",
+                decode_pic_sheet(tiles, palBytes, form, form)
+              )
+              put(
+                cache,
+                root .. "/" .. kind .. "_shiny/" .. sp .. "_" .. form .. ".rgba",
+                decode_pic_sheet(tiles, shinyBytes, form, form)
+              )
             end
           end
         else
           noteMissing(kind, sp)
         end
+      else
+        -- The original code silently ignored invalid picture/palette pointers.
+        noteMissing(kind, sp)
       end
     end
   end

@@ -383,27 +383,72 @@ function RomExtractorGen3:runAuxExtracts(sha1)
   local function wantedExtractor(name)
     return wanted == nil or wanted[name] == true
   end
+    -- Vita cannot afford to keep every Gen-3 auxiliary extractor resident at
+  -- once. Load extractor entry points on demand and immediately remove the
+  -- module from package.loaded so the next GC can reclaim its module state.
+  local function extractor(moduleName)
+    if not _G.POKEPORT_VITA then
+      return require(moduleName)
+    end
+
+    return setmetatable({}, {
+      __index = function(_, key)
+        collectgarbage("collect")
+
+        local mod = require(moduleName)
+        local value = mod[key]
+
+        -- The returned function keeps whatever upvalues it actually needs.
+        -- Do not pin the complete extractor module for the rest of import.
+        package.loaded[moduleName] = nil
+
+        return value
+      end,
+    })
+  end
+
   local Rom = require("src.import.gba.rom")
-  local RegionMapExtract = require("src.import.gba.region_map_extract")
-  local MapSectionsExtract = require("src.import.gba.map_sections_extract")
-  local MultichoiceExtract = require("src.import.gba.multichoice_extract")
-  local HealLocationsExtract = require("src.import.gba.heal_locations_extract")
-  local DoorAnimExtract = require("src.import.gba.door_anim_extract")
-  local SlotMachineExtract = require("src.import.gba.slot_machine_extract")
-  local TradeExtract = require("src.import.gba.trade_extract")
-  local LinkArtExtract = require("src.import.gba.link_art_extract")
-  local FameCheckerExtract = require("src.import.gba.fame_checker_extract")
-  local TeachyTvExtract = require("src.import.gba.teachy_tv_extract")
-  local MysteryGiftExtract = require("src.import.gba.mystery_gift_extract")
-  local TrainerTowerExtract = require("src.import.gba.trainer_tower_extract")
-  local TutorExtract = require("src.import.gba.tutor_extract")
-  local MuseumExtract = require("src.import.gba.museum_extract")
-  local MoveRelearnerExtract = require("src.import.gba.move_relearner_extract")
-  local EggExtract = require("src.import.gba.egg_extract")
-  local BattleAnimExtract = require("src.import.gba.battle_anim_extract")
-  local BattleAiExtract = require("src.import.gba.battle_ai_extract")
-  local CreditsExtract = require("src.import.gba.credits_extract")
-  local LeagueExtract = require("src.import.gba.league_extract")
+
+  local RegionMapExtract =
+    extractor("src.import.gba.region_map_extract")
+  local MapSectionsExtract =
+    extractor("src.import.gba.map_sections_extract")
+  local MultichoiceExtract =
+    extractor("src.import.gba.multichoice_extract")
+  local HealLocationsExtract =
+    extractor("src.import.gba.heal_locations_extract")
+  local DoorAnimExtract =
+    extractor("src.import.gba.door_anim_extract")
+  local SlotMachineExtract =
+    extractor("src.import.gba.slot_machine_extract")
+  local TradeExtract =
+    extractor("src.import.gba.trade_extract")
+  local LinkArtExtract =
+    extractor("src.import.gba.link_art_extract")
+  local FameCheckerExtract =
+    extractor("src.import.gba.fame_checker_extract")
+  local TeachyTvExtract =
+    extractor("src.import.gba.teachy_tv_extract")
+  local MysteryGiftExtract =
+    extractor("src.import.gba.mystery_gift_extract")
+  local TrainerTowerExtract =
+    extractor("src.import.gba.trainer_tower_extract")
+  local TutorExtract =
+    extractor("src.import.gba.tutor_extract")
+  local MuseumExtract =
+    extractor("src.import.gba.museum_extract")
+  local MoveRelearnerExtract =
+    extractor("src.import.gba.move_relearner_extract")
+  local EggExtract =
+    extractor("src.import.gba.egg_extract")
+  local BattleAnimExtract =
+    extractor("src.import.gba.battle_anim_extract")
+  local BattleAiExtract =
+    extractor("src.import.gba.battle_ai_extract")
+  local CreditsExtract =
+    extractor("src.import.gba.credits_extract")
+  local LeagueExtract =
+    extractor("src.import.gba.league_extract")
   local Extract = require("src.import.gba.extract_island1")
   local prevRoot = Extract.CACHE_ROOT
   Extract.CACHE_ROOT = GBA_ROOT
@@ -428,7 +473,8 @@ function RomExtractorGen3:runAuxExtracts(sha1)
   local needEgg = wantedExtractor("egg_extract") and not (EggExtract.ready and EggExtract.ready(cache, GBA_ROOT))
   local needAnims = wantedExtractor("battle_anim_extract") and not (BattleAnimExtract.ready and BattleAnimExtract.ready(cache, GBA_ROOT))
   local needAi = wantedExtractor("battle_ai_extract") and not (BattleAiExtract.ready and BattleAiExtract.ready(cache, GBA_ROOT))
-  local MapPreviewExtract = require("src.import.gba.map_preview_extract")
+  local MapPreviewExtract =
+    extractor("src.import.gba.map_preview_extract")
   local needPreview = wantedExtractor("map_preview_extract") and not (MapPreviewExtract.ready and MapPreviewExtract.ready(cache, GBA_ROOT))
   local needCredits = wantedExtractor("credits_extract") and not (CreditsExtract.ready and CreditsExtract.ready(cache, GBA_ROOT))
   local needLeague = wantedExtractor("league_extract") and not (LeagueExtract.ready and LeagueExtract.ready(cache, GBA_ROOT))
@@ -451,7 +497,17 @@ function RomExtractorGen3:runAuxExtracts(sha1)
     local out = {}
     local step = 0
     local totalSteps = 20
+
     local function auxTick(name)
+      -- None of these successful return values are used by the Vita importer.
+      -- Don't retain every extractor's result until the entire aux pass ends.
+      if _G.POKEPORT_VITA then
+        for key in pairs(out) do
+          out[key] = nil
+        end
+        collectgarbage("collect")
+      end
+
       step = step + 1
       self:report(step / totalSteps, "Game Data: " .. name, step, totalSteps)
     end
@@ -758,6 +814,7 @@ function RomExtractorGen3:run()
     error("GBA extract failed: " .. tostring(detail))
   end
   self:report(0.42, "World Maps Ready", 1, 1)
+
   collectgarbage("collect")
 
   local okPoke, pokeDetail = self:runPokemonExtract(sha1)

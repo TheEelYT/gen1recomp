@@ -361,7 +361,28 @@ function Player.renderBuffered(slot, n, opts)
   if n < 1 then n = 1 end
   local rate = opts.sampleRate or Mix.SAMPLE_RATE
   local master = opts.master or 1
-  local L, R = {}, {}
+
+  local L, R
+  if opts.raw then
+    L, R = {}, {}
+  else
+    slot._renderL = slot._renderL or {}
+    slot._renderR = slot._renderR or {}
+    L, R = slot._renderL, slot._renderR
+  end
+
+  slot._mixScratchL = slot._mixScratchL or {}
+  slot._mixScratchR = slot._mixScratchR or {}
+
+  local mixOpts = slot._mixOpts or {}
+  slot._mixOpts = mixOpts
+
+  mixOpts.raw = true
+  mixOpts.master = master
+  mixOpts.sampleRate = rate
+  mixOpts.outL = slot._mixScratchL
+  mixOpts.outR = slot._mixScratchR
+
   local produced = 0
   while produced < n do
     if (slot.frameSamplesLeft or 0) <= 0 then
@@ -372,23 +393,23 @@ function Player.renderBuffered(slot, n, opts)
     end
     local chunk = math.min(slot.frameSamplesLeft, n - produced)
     slot.hpfState = slot.hpfState or { l = 0, r = 0 }
-    local outL, outR, alive = Mix.render(slot.voices or {}, chunk, {
-      raw = true,
-      master = master,
-      sampleRate = rate,
-      hpfCapL = slot.hpfState.l,
-      hpfCapR = slot.hpfState.r,
-      hpfState = slot.hpfState,
-      reverbState = slot.reverbState,
-    })
+
+    mixOpts.hpfCapL = slot.hpfState.l
+    mixOpts.hpfCapR = slot.hpfState.r
+    mixOpts.hpfState = slot.hpfState
+    mixOpts.reverbState = slot.reverbState
+
+    local outL, outR, alive =
+      Mix.render(slot.voices or {}, chunk, mixOpts)
     if slot then
       slot.voices = alive or slot.voices
       if slot.seq then slot.seq.voices = slot.voices end
       slot.frameSamplesLeft = slot.frameSamplesLeft - chunk
     end
     for i = 1, chunk do
-      L[#L + 1] = outL[i] or 0
-      R[#R + 1] = outR[i] or 0
+      local dst = produced + i
+      L[dst] = outL[i] or 0
+      R[dst] = outR[i] or 0
     end
     produced = produced + chunk
   end
@@ -398,7 +419,7 @@ function Player.renderBuffered(slot, n, opts)
   if not (love and love.sound and love.sound.newSoundData) then
     return L, R
   end
-  local sd = love.sound.newSoundData(#L, rate, 16, 2)
+  local sd = love.sound.newSoundData(n, rate, 16, 2)
   local function clip(x)
     if x > 1 then return 1 end
     if x < -1 then return -1 end
@@ -406,7 +427,7 @@ function Player.renderBuffered(slot, n, opts)
   end
   local mono = opts.mono and true or false
   -- master already applied in Mix.render; clip only here.
-  for i = 1, #L do
+  for i = 1, n do
     local l = clip(L[i] or 0)
     local r = clip(R[i] or 0)
     if mono then

@@ -2018,14 +2018,27 @@ function RomImporter:startData(data, displayName, sourcePath)
   local prefix = info.cachePrefix
   local savedPrefix = CacheFs.prefix
   CacheFs.prefix = prefix
+
+  -- Vita Gen-3 development retries are expensive, especially native_pack.
+  -- Keep the incomplete cache and let each extractor's ready() check reuse
+  -- completed work. The completion marker is still removed so an incomplete
+  -- import can never be treated as ready.
+  local keepPartialGen3 =
+    _G.POKEPORT_VITA == true
+    and GameVersion.generation(version) == 3
+
   local cleared, clearError = pcall(function()
-    removeTree(prefix .. "data/generated")
-    removeTree(prefix .. "assets/generated")
+    if not keepPartialGen3 then
+      removeTree(prefix .. "data/generated")
+      removeTree(prefix .. "assets/generated")
+      CacheFs.removeTree("data/generated")
+      CacheFs.removeTree("assets/generated")
+    end
+
     love.filesystem.remove(prefix .. CacheContract.MARKER_PATH)
-    CacheFs.removeTree("data/generated")
-    CacheFs.removeTree("assets/generated")
     CacheFs.remove(CacheContract.MARKER_PATH)
   end)
+
   CacheFs.prefix = savedPrefix
   if not cleared then
     self:setError(tostring(clearError), version)

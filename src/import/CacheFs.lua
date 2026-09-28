@@ -288,9 +288,6 @@ local function ensureParents(root, rel)
 end
 
 local function resolveWriteRoot()
-  -- Vita writes should stay inside LÖVE/PhysFS. Using the native save path
-  -- through io.open/FFI mkdir can fail on ux0: and hide the real extractor
-  -- error behind a cache-write failure.
   if _G.POKEPORT_VITA == true then
     return nil
   end
@@ -343,7 +340,21 @@ function CacheFs.write(rel, data)
     local okDir, dirErr = ensureDirectory(parent)
     if not okDir then return false, dirErr end
   end
-  return love.filesystem.write(rel, data)
+    local ok, err = love.filesystem.write(rel, data)
+  if not ok then
+    local msg = tostring(err or "unknown error")
+
+    -- LÖVE errors usually end with "(actual PhysFS reason)".
+    -- Strip the long filename so Vita's crash screen shows the useful part.
+    local reason = msg:match("%(([^()]*)%)%s*$")
+    if reason then
+      msg = reason
+    end
+
+    return false, msg
+  end
+
+  return true
 end
 
 -- Open a cache-relative file for streaming replacement. The returned handle

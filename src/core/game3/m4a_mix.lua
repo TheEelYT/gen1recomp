@@ -86,6 +86,56 @@ local NOISE_TABLE = {
 
 local NOISE_DIV = { [0]=8, 16, 32, 48, 64, 80, 96, 112 }
 
+-- Precompute the deterministic GB noise sequences so high-frequency noise
+-- doesn't have to clock the LFSR many times for every output sample.
+local function noise_step(lfsr, shortNoise)
+  local lo = lfsr % 2
+  local hi = math.floor(lfsr / 2) % 2
+  local feedback = (lo == hi) and 0 or 1
+
+  lfsr = math.floor(lfsr / 2) + feedback * 0x4000
+
+  if shortNoise then
+    lfsr = lfsr
+      - (math.floor(lfsr / 64) % 2) * 64
+      + feedback * 64
+  end
+
+  return lfsr
+end
+
+local function build_noise_cycle(shortNoise, count, skipInitial)
+  local lfsr = 0x7FFF
+  if skipInitial then
+    lfsr = noise_step(lfsr, shortNoise)
+  end
+
+  local chunks = {}
+  local chunk = {}
+
+  for i = 1, count do
+    chunk[#chunk + 1] = string.char((lfsr % 2 == 0) and 1 or 0)
+    lfsr = noise_step(lfsr, shortNoise)
+
+    if #chunk == 256 then
+      chunks[#chunks + 1] = table.concat(chunk)
+      chunk = {}
+    end
+  end
+
+  if #chunk > 0 then
+    chunks[#chunks + 1] = table.concat(chunk)
+  end
+
+  return table.concat(chunks)
+end
+
+-- 15-bit mode repeats after 32767 clocks.
+local NOISE_LONG = build_noise_cycle(false, 32767, false)
+
+-- 7-bit mode has one initial state followed by a 127-clock repeating cycle.
+local NOISE_SHORT = build_noise_cycle(true, 127, true)
+
 -- pret gScaleTable / gFreqTable for MidiKeyToFreq (DirectSound)
 local DS_SCALE = {
   [0]=0xE0,0xE1,0xE2,0xE3,0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xEB,
@@ -615,22 +665,74 @@ local function render_voice(v, n, outL, outR)
       v.phase = v.phase % 1
     end
   elseif v.kind == "cgb_noise" then
+    local period = tonumber(v.period) or 1
+    if period <= 0 then period = 1 end
+
+    -- Hardware LFSR clocks per output sample. Cache this on the voice so
+    -- the hot loop does no division.
+    local step = v.noiseStep
+    if not step then
+      step = 1 / period
+      v.noiseStep = step
+    end
+
+    local phase = tonumber(v.noisePhase) or 0
+    local index = tonumber(v.noiseIndex) or 0
+    local shortNoise = v.shortNoise == true
+    local shortStarted = v.noiseShortStarted == true
+
+    local sequence = shortNoise and NOISE_SHORT or NOISE_LONG
+    local sequenceLength = shortNoise and 127 or 32767
+
+    -- Localize these because this is one of the hottest loops in the mixer.
+    local floor = math.floor
+    local byte = string.byte
+    local env = (v.envVol or 15) / 32
+    local routeL = v.routeL ~= false
+    local routeR = v.routeR ~= false
+
     for i = 1, n do
-      v.clock = v.clock + 1
-      while v.clock >= v.period do
-        v.clock = v.clock - v.period
-        local lo = v.lfsr % 2
-        local hi = math.floor(v.lfsr / 2) % 2
-        local bit = (lo == hi) and 0 or 1
-        v.lfsr = math.floor(v.lfsr / 2) + bit * 0x4000
-        if v.shortNoise then
-          v.lfsr = v.lfsr - (math.floor(v.lfsr / 64) % 2) * 64 + bit * 64
+      phase = phase + step
+
+      local advance = floor(phase)
+      if advance > 0 then
+        phase = phase - advance
+
+        if shortNoise and not shortStarted then
+          -- Initial 0x7FFF state sits immediately before the repeating
+          -- 127-state short-noise cycle.
+          shortStarted = true
+          index = 0
+          advance = advance - 1
+        end
+
+        if advance > 0 then
+          index = index + advance
+
+          -- advance is far smaller than either cycle length, so at most
+          -- one wrap can happen during one output sample.
+          if index >= sequenceLength then
+            index = index - sequenceLength
+          end
         end
       end
-      local s = ((v.lfsr % 2) == 0) and (v.envVol or 15) / 32 or 0
-      if v.routeL ~= false then outL[i] = outL[i] + s end
-      if v.routeR ~= false then outR[i] = outR[i] + s end
+
+      local high
+      if shortNoise and not shortStarted then
+        high = false
+      else
+        high = byte(sequence, index + 1) == 1
+      end
+
+      if high then
+        if routeL then outL[i] = outL[i] + env end
+        if routeR then outR[i] = outR[i] + env end
+      end
     end
+
+    v.noisePhase = phase
+    v.noiseIndex = index
+    v.noiseShortStarted = shortStarted
   end
   if v.lengthRemaining and v.lengthRemaining <= 0 then v.alive = false end
 end
@@ -682,8 +784,18 @@ end
 function Mix.render(voices, n, opts)
   opts = opts or {}
   n = n or 1024
-  local outL, outR = {}, {}
-  for i = 1, n do outL[i] = 0; outR[i] = 0 end
+
+  -- Allow the caller to reuse mix buffers. The live audio worker calls this
+  -- many times per output buffer, so allocating fresh tables here creates a
+  -- large amount of short-lived garbage.
+  local outL = opts.outL or {}
+  local outR = opts.outR or {}
+
+  for i = 1, n do
+    outL[i] = 0
+    outR[i] = 0
+  end
+  
   for _, v in ipairs(voices) do
     if v.kind == "ds" then render_voice(v, n, outL, outR) end
   end

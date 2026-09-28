@@ -337,7 +337,10 @@ function Dataset.hydrate(game)
   game.data.maps = Dataset.buildMaps()
   game.data.tilesets = game.data.tilesets or {}
 
-  local nLayouts = Dataset.attachMidLayouts(game.data.maps, cache)
+    local nLayouts = 0
+  if _G.POKEPORT_VITA ~= true then
+    nLayouts = Dataset.attachMidLayouts(game.data.maps, cache)
+  end
 
   local okS, Space = pcall(require, "src.core.game3.scripting.space")
   local nEvents = 0
