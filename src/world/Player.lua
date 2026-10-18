@@ -30,6 +30,11 @@ local TURN_FRAMES = 4
 -- run well past it even before the OS batches the touch events, so the
 -- overlay gets a longer window than a physical pad (#415).
 local TOUCH_TURN_FRAMES = 8
+-- home/overworld.asm:41-44
+local LOOP_FRAMES = 2
+-- engine/overworld/spinners.asm:23-49, home/copy2.asm:62-91
+local SPIN_ITER_FRAMES = LOOP_FRAMES + 4
+Player.SPIN_ITER_FRAMES = SPIN_ITER_FRAMES
 
 function Player.new(data, cx, cy, facing)
   local self = setmetatable({}, Player)
@@ -122,6 +127,10 @@ function Player:stepLength(dir)
   dir = dir or self.facing
   local slope = onBike and self.slopeMap and dir ~= "down" or false
   if slope then frames = self.stepFrames or STEP_FRAMES end
+  -- home/overworld.asm:268-273
+  if self.spinning and not self.spinFrames then
+    frames = math.floor(tonumber(frames) or STEP_FRAMES) / LOOP_FRAMES * SPIN_ITER_FRAMES
+  end
   if Runtime.wantsHook("movement.speed") then
     frames = Runtime.call("movement.speed", function(f) return f end, frames, {
       onBike = onBike,
@@ -263,7 +272,14 @@ local function textBoxUp()
 end
 
 function Player:walkPhase()
-  if textBoxUp() then return 0 end
+  if textBoxUp() then
+    -- engine/overworld/movement.asm:49
+    if not self.moving then
+      self.bumpFrames = nil
+      self.animClock = 0
+    end
+    return 0
+  end
   -- moving, the land-frame after a completed step, or an active wall-bonk
   -- (issue #230) animate; a standing sprite otherwise
   if not self.moving and not self.stepLanded
@@ -273,6 +289,28 @@ function Player:walkPhase()
   -- walk frame during the middle of each 16-frame animation cycle
   local p = (self.animClock or self.progress) % 16
   return (p >= 4 and p < 12) and 1 or 0
+end
+
+-- The surf bob is sampled by pose() (draw code) but must run at the fixed
+-- logic rate: it used to tick once per pose() call, so a 144Hz display
+-- bobbed 2.4x too fast and the battle-transition wipe, which draws the
+-- player twice a frame, doubled it.  It now advances by the number of
+-- Game:step logic steps since the last pose(), i.e. exactly once per step at
+-- 60Hz and never twice for one step.  Without a running Game (headless
+-- callers) there is no step clock and each call advances once, as before.
+function Player:advanceBob()
+  local Game = package.loaded["src.core.Game"]
+  local step = type(Game) == "table" and Game.logicStep or nil
+  local ticks = 1
+  if step then
+    local last = self.bobStep
+    ticks = last and step - last or 1
+    self.bobStep = step
+  end
+  if ticks > 0 then
+    self.bobTimer = ((self.bobTimer or 0) + ticks) % 32
+  end
+  return self.bobTimer or 0
 end
 
 local SPIN_ORDER = { "down", "left", "up", "right" }
@@ -298,7 +336,7 @@ function Player:pose()
     py = py - math.floor(10 * math.sin(t * math.pi) + 0.5)
     hopping = true
   elseif self.surfing then
-    self.bobTimer = ((self.bobTimer or 0) + 1) % 32
+    self:advanceBob()
     py = py + (self.bobTimer < 16 and 0 or 1)
   end
   -- engine/overworld/player_animations.asm:453
@@ -330,7 +368,7 @@ function Player:pose()
     end
   elseif self.spinning then
     -- spinners.asm:1-11, home/overworld.asm:41-44, :268-272
-    facing = SPIN_ORDER[math.floor((self.spinTimer or 0) / 2) % 4 + 1]
+    facing = SPIN_ORDER[math.floor((self.spinTimer or 0) / SPIN_ITER_FRAMES) % 4 + 1]
     phase, flip = 0, false
     -- teleport arrivals spin the sprite down into place
     -- (EnterMapAnim PlayerSpinWhileMovingDown)

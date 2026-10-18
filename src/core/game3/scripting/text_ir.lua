@@ -102,6 +102,136 @@ TextIR.B_TXT = {
 TextIR.B_TXT_CODE = {}
 for code, name in pairs(TextIR.B_TXT) do TextIR.B_TXT_CODE[name] = code end
 
+local function invert(t)
+  local out = {}
+  for k, v in pairs(t) do out[v] = k end
+  return out
+end
+
+-- pokeemerald/include/battle_message.h:57
+local B_TXT_RSE = {}
+for code, name in pairs(TextIR.B_TXT) do
+  if code < 0x2E then B_TXT_RSE[code] = name end
+end
+B_TXT_RSE[0x2E] = "B_TRAINER2_CLASS"
+B_TXT_RSE[0x2F] = "B_TRAINER2_NAME"
+B_TXT_RSE[0x30] = "B_TRAINER2_LOSE_TEXT"
+B_TXT_RSE[0x31] = "B_TRAINER2_WIN_TEXT"
+B_TXT_RSE[0x32] = "B_PARTNER_CLASS"
+B_TXT_RSE[0x33] = "B_PARTNER_NAME"
+B_TXT_RSE[0x34] = "B_BUFF3"
+
+-- pokeruby/include/battle_message.h:21
+local B_TXT_RS = { [0] = "B_BUFF1", [1] = "B_BUFF2" }
+for code = 0x02, 0x21 do B_TXT_RS[code] = TextIR.B_TXT[code + 3] end
+B_TXT_RS[0x22] = "B_26"
+for code = 0x23, 0x29 do B_TXT_RS[code] = TextIR.B_TXT[code + 4] end
+B_TXT_RS[0x2A] = "B_BUFF3"
+
+TextIR.DIALECTS = {
+  frlg = {
+    name = "frlg",
+    -- pokefirered/include/characters.h:267
+    PH_NAMES = {
+      [0x00] = "UNKNOWN", [0x01] = "PLAYER", [0x02] = "STR_VAR_1", [0x03] = "STR_VAR_2",
+      [0x04] = "STR_VAR_3", [0x05] = "KUN", [0x06] = "RIVAL", [0x07] = "VERSION",
+      [0x08] = "MAGMA", [0x09] = "AQUA", [0x0A] = "MAXIE", [0x0B] = "ARCHIE",
+      [0x0C] = "GROUDON", [0x0D] = "KYOGRE",
+    },
+    B_TXT = TextIR.B_TXT,
+    B_TXT_CODE = TextIR.B_TXT_CODE,
+    -- pokefirered/include/text.h:16
+    FONT_IDS = {
+      [0] = "FONT_SMALL", [1] = "FONT_NORMAL_COPY_1", [2] = "FONT_NORMAL",
+      [3] = "FONT_NORMAL_COPY_2", [4] = "FONT_MALE", [5] = "FONT_FEMALE",
+      [6] = "FONT_BRAILLE", [7] = "FONT_BOLD",
+    },
+    -- pokefirered/src/string_util.c:386: the honorific after the player's
+    -- name is the cart's gExpandedPlaceholder_Kun or _Chan string, by the
+    -- player's gender (empty on the US cart).
+    GENDERED_LABELS = { KUN = { male = "gExpandedPlaceholder_Kun", female = "gExpandedPlaceholder_Chan" } },
+  },
+  rse = {
+    name = "rse",
+    -- pokeemerald/include/constants/characters.h:251
+    PH_NAMES = {
+      [0x00] = "UNKNOWN", [0x01] = "PLAYER", [0x02] = "STR_VAR_1", [0x03] = "STR_VAR_2",
+      [0x04] = "STR_VAR_3", [0x05] = "KUN", [0x06] = "RIVAL", [0x07] = "VERSION",
+      [0x08] = "AQUA", [0x09] = "MAGMA", [0x0A] = "ARCHIE", [0x0B] = "MAXIE",
+      [0x0C] = "KYOGRE", [0x0D] = "GROUDON",
+    },
+    B_TXT = B_TXT_RSE,
+    B_TXT_CODE = invert(B_TXT_RSE),
+    -- pokeemerald/include/text.h:12
+    FONT_IDS = {
+      [0] = "FONT_SMALL", [1] = "FONT_NORMAL", [2] = "FONT_SHORT", [3] = "FONT_SHORT_COPY_1",
+      [4] = "FONT_SHORT_COPY_2", [5] = "FONT_SHORT_COPY_3", [6] = "FONT_BRAILLE",
+      [7] = "FONT_NARROW", [8] = "FONT_SMALL_NARROW", [9] = "FONT_BOLD",
+    },
+    -- pokeemerald/charmap.txt:45
+    CHARMAP_EXTRA = {
+      [0x34] = "{LV}",
+      [0x55] = "{POKEBLOCK}", [0x56] = "", [0x57] = "", [0x58] = "", [0x59] = "",
+      [0x77] = "{UNK_SPACER}",
+      [0x79] = "{UP_ARROW}", [0x7A] = "{DOWN_ARROW}", [0x7B] = "{LEFT_ARROW}", [0x7C] = "{RIGHT_ARROW}",
+    },
+    -- pokeemerald/charmap.txt:52
+    CHARMAP_RUNS = {
+      [0x55] = { bytes = { 0x55, 0x56, 0x57, 0x58, 0x59 }, tag = "{POKEBLOCK}" },
+    },
+    -- pokeemerald/src/string_util.c:456
+    GENDERED_PH = { KUN = true, RIVAL = true },
+    placeholders = "data/generated/gba/text/placeholders.lua",
+  },
+}
+-- pokeruby/src/string_util.c:476
+TextIR.DIALECTS.rs = {
+  name = "rs",
+  PH_NAMES = {
+    [0] = "UNKNOWN", [1] = "PLAYER", [2] = "STR_VAR_1", [3] = "STR_VAR_2",
+    [4] = "STR_VAR_3", [5] = "KUN", [6] = "RIVAL", [7] = "VERSION",
+    [8] = "EVIL_TEAM", [9] = "GOOD_TEAM", [10] = "EVIL_LEADER", [11] = "GOOD_LEADER",
+    [12] = "EVIL_LEGENDARY", [13] = "GOOD_LEGENDARY",
+  },
+  B_TXT = B_TXT_RS, B_TXT_CODE = invert(B_TXT_RS),
+  -- pokeruby/src/text.c:419
+  FONT_IDS = {
+    [0] = "FONT_RS_0", [1] = "FONT_RS_1", [2] = "FONT_RS_2", [3] = "FONT_RS_3",
+    [4] = "FONT_RS_4", [5] = "FONT_RS_5", [6] = "FONT_BRAILLE",
+  },
+  CHARMAP_EXTRA = TextIR.DIALECTS.rse.CHARMAP_EXTRA,
+  CHARMAP_RUNS = TextIR.DIALECTS.rse.CHARMAP_RUNS,
+  GENDERED_PH = TextIR.DIALECTS.rse.GENDERED_PH,
+  placeholders = "data/generated/gba/text/placeholders.lua",
+}
+for _, d in pairs(TextIR.DIALECTS) do
+  d.PH_CODE = invert(d.PH_NAMES)
+  d.FONT_CODE = invert(d.FONT_IDS)
+end
+
+TextIR.DEFAULT_DIALECT = "frlg"
+
+function TextIR.dialectOf(version)
+  local GameVersion = require("src.core.GameVersion")
+  local id = version or GameVersion.get()
+  if id == "ruby" or id == "sapphire" then return "rs" end
+  local family = GameVersion.layout and GameVersion.layout(id) or nil
+  if not family then
+    local Profile = package.loaded["src.core.game3.profile"]
+    local ok, row = false, nil
+    if Profile and Profile.isGame3Version and Profile.isGame3Version(id) then
+      ok, row = pcall(Profile.of, id)
+    end
+    family = ok and type(row) == "table" and row.family or nil
+  end
+  return TextIR.DIALECTS[family] and family or TextIR.DEFAULT_DIALECT
+end
+
+function TextIR.dialect(which)
+  if type(which) == "table" then return which end
+  return TextIR.DIALECTS[which or TextIR.dialectOf()] or TextIR.DIALECTS[TextIR.DEFAULT_DIALECT]
+end
+
 TextIR.KEYGFX = {
   [0x00] = "A_BUTTON", [0x01] = "B_BUTTON", [0x02] = "L_BUTTON", [0x03] = "R_BUTTON",
   [0x04] = "START_BUTTON", [0x05] = "SELECT_BUTTON", [0x06] = "DPAD_UP", [0x07] = "DPAD_DOWN",
@@ -178,6 +308,94 @@ for _, sym in pairs(TextIR.EXTRA_SYMBOL) do
   local name = sym:match("^{(.+)}$")
   if name then TextIR.TAG_NAMES[name] = true end
 end
+for _, d in pairs(TextIR.DIALECTS) do
+  for _, sym in pairs(d.CHARMAP_EXTRA or {}) do
+    local name = sym:match("^{(.+)}$")
+    if name then TextIR.TAG_NAMES[name] = true end
+  end
+end
+
+TextIR._provider = nil
+
+function TextIR.setContextProvider(fn)
+  TextIR._provider = type(fn) == "function" and fn or nil
+end
+
+function TextIR.placeholdersFor(ctx)
+  if ctx and ctx.placeholders then return ctx.placeholders end
+  local provider = TextIR._provider
+  if not provider then return nil end
+  local d = TextIR.dialect(ctx and ctx.dialect)
+  if not d.placeholders then return nil end
+  return provider("placeholders", d, ctx)
+end
+
+local function is_female(g)
+  return g == 1 or g == "female" or g == "F" or g == "girl"
+end
+
+local function player_female(d, ctx)
+  local g = ctx and ctx.playerGender
+  if g == nil and TextIR._provider then g = TextIR._provider("gender", d, ctx) end
+  return is_female(g)
+end
+
+-- pokeemerald/src/string_util.c:456
+local function gendered_ph(name, ctx)
+  local d = TextIR.dialect(ctx and ctx.dialect)
+  if not (d.GENDERED_PH and d.GENDERED_PH[name]) then return nil end
+  local ph = TextIR.placeholdersFor(ctx)
+  local by = ph and ph.byGender and ph.byGender[name]
+  if type(by) ~= "table" then return nil end
+  if player_female(d, ctx) then return by.female end
+  return by.male
+end
+
+-- A dialect's gendered placeholder read from the cart strings the loaded
+-- script cache holds under its labels, where a mod's text overrides land; ""
+-- when the cache is not loaded or both strings are empty (the US cart). A
+-- label whose own text holds the placeholder expands it to "" there.
+local reading_label = false
+local function gendered_label(d, name, ctx)
+  local labels = d.GENDERED_LABELS and d.GENDERED_LABELS[name]
+  if not labels then return nil end
+  if reading_label then return "" end
+  local Space = package.loaded["src.core.game3.scripting.space"]
+  if not (Space and Space.bundle) then return "" end
+  local RomText = require("src.core.game3.rom_text")
+  local function read(label) return RomText.has(label) and RomText.plain(label) or "" end
+  reading_label = true
+  local ok, male, female = pcall(function() return read(labels.male), read(labels.female) end)
+  reading_label = false
+  if not ok then error(male, 0) end
+  if male == "" and female == "" then return "" end
+  if player_female(d, ctx) then return female end
+  return male
+end
+
+-- pokeemerald/src/string_util.c:428
+local function live(field, ctx)
+  local v = ctx and ctx[field]
+  if v ~= nil then return v end
+  local provider = TextIR._provider
+  if not provider then return nil end
+  return provider(field, TextIR.dialect(ctx and ctx.dialect), ctx)
+end
+
+local function player_name(ctx)
+  return live("playerName", ctx) or "PLAYER"
+end
+
+local function string_var(n, ctx)
+  local sv = live("stringVars", ctx)
+  return (type(sv) == "table" and sv[n]) or ""
+end
+
+local function rival_name(ctx)
+  local v = gendered_ph("RIVAL", ctx)
+  if v ~= nil then return v end
+  return live("rivalName", ctx) or "RIVAL"
+end
 
 local function expand_seg(seg, ctx)
   local t = seg.t
@@ -187,18 +405,18 @@ local function expand_seg(seg, ctx)
     local dyn = ctx and ctx.dynamic
     return (dyn and dyn[seg.n]) or ""
   elseif t == "player" then
-    return (ctx and ctx.playerName) or "PLAYER"
+    return player_name(ctx)
   elseif t == "rival" then
-    return (ctx and ctx.rivalName) or "RIVAL"
+    return rival_name(ctx)
   elseif t == "strvar" then
-    local sv = ctx and ctx.stringVars
-    return (sv and sv[seg.n]) or ""
+    return string_var(seg.n, ctx)
   elseif t == "tag" then
     return seg.tag
   elseif t == "bph" then
     local value = ctx and ctx.battle and ctx.battle[seg.code]
     if value == nil then
-      error("battle text placeholder {" .. tostring(TextIR.B_TXT[seg.code] or seg.code)
+      local names = (ctx and ctx.dialect) and TextIR.dialect(ctx.dialect).B_TXT or TextIR.B_TXT
+      error("battle text placeholder {" .. tostring(names[seg.code] or seg.code)
         .. "} has no value", 0)
     end
     return value
@@ -207,23 +425,31 @@ local function expand_seg(seg, ctx)
     local code = tonumber(seg.code)
     local name = seg.name
     if code == 0x01 or name == "PLAYER" then
-      return (ctx and ctx.playerName) or "PLAYER"
+      return player_name(ctx)
     end
     if code == 0x06 or name == "RIVAL" then
-      return (ctx and ctx.rivalName) or "RIVAL"
+      return rival_name(ctx)
     end
     if code and code >= 0x02 and code <= 0x04 then
-      local sv = ctx and ctx.stringVars
-      return (sv and sv[code - 1]) or ""
+      return string_var(code - 1, ctx)
     end
     if name == "STR_VAR_1" or name == "STR_VAR_2" or name == "STR_VAR_3" then
-      local n = tonumber(name:sub(-1)) or 1
-      local sv = ctx and ctx.stringVars
-      return (sv and sv[n]) or ""
+      return string_var(tonumber(name:sub(-1)) or 1, ctx)
     end
     if name and (name == "FONT_MALE" or name == "FONT_FEMALE" or name == "FONT_NORMAL"
         or name:find("^COLOR") or name:find("^SHADOW") or name:find("^HIGHLIGHT") or name:find("^BG")) then
       return "{" .. name .. "}"
+    end
+    -- pokeemerald/src/string_util.c:464
+    local d = TextIR.dialect(ctx and ctx.dialect)
+    local pname = name or (code and d.PH_NAMES[code])
+    local fromLabel = pname and gendered_label(d, pname, ctx)
+    if fromLabel ~= nil then return fromLabel end
+    local placeholders = TextIR.placeholdersFor(ctx)
+    if placeholders then
+      local g = pname and gendered_ph(pname, ctx)
+      if g ~= nil then return g end
+      if pname and placeholders[pname] then return placeholders[pname] end
     end
     return ""
   end
@@ -241,6 +467,9 @@ end
 --- Decode raw GBA string bytes (table of ints or string) into IR.
 function TextIR.decode(bytes, opts)
   local battle = opts and opts.battle
+  local dialect = TextIR.dialect(opts and opts.dialect)
+  local named = dialect.name ~= TextIR.DEFAULT_DIALECT
+  local extra, runs = dialect.CHARMAP_EXTRA, dialect.CHARMAP_RUNS
   local out, buf = {}, {}
   local i, n = 1, #bytes
   local function b(idx)
@@ -276,6 +505,8 @@ function TextIR.decode(bytes, opts)
         out[#out + 1] = { t = "rival" }
       elseif nn >= 0x02 and nn <= 0x04 then
         out[#out + 1] = { t = "strvar", n = nn - 1 }
+      elseif named then
+        out[#out + 1] = { t = "ph", code = nn, name = dialect.PH_NAMES[nn] }
       else
         out[#out + 1] = { t = "ph", code = nn }
       end
@@ -305,6 +536,7 @@ function TextIR.decode(bytes, opts)
       local args = {}
       for k = 1, nargs do args[k] = b(i + 1 + k) or 0 end
       out[#out + 1] = { t = "ext", cmd = cmd, args = args }
+      if named and cmd == 0x06 then out[#out].font = dialect.FONT_IDS[args[1]] end
       i = i + 2 + nargs
     else
       local g = CHARMAP[c]
@@ -320,6 +552,21 @@ function TextIR.decode(bytes, opts)
           out[#out + 1] = { t = "tag", tag = TextIR.LIGATURE[c] }
           i = i + 1
         end
+      elseif extra and extra[c] then
+        local run = runs and runs[c]
+        local len = 0
+        if run then
+          len = #run.bytes
+          for k = 1, len do
+            if b(i + k - 1) ~= run.bytes[k] then len = 0 break end
+          end
+        end
+        local tag = len > 0 and run.tag or extra[c]
+        if tag ~= "" then
+          flush_text(out, buf); buf = {}
+          out[#out + 1] = { t = "tag", tag = tag }
+        end
+        i = i + math.max(len, 1)
       else
         buf[#buf + 1] = "?"
         i = i + 1
@@ -331,7 +578,8 @@ function TextIR.decode(bytes, opts)
 end
 
 --- Build IR from pret-style ASCII with \n \p \l {PLAYER} {STR_VAR_1} …
-function TextIR.fromAscii(s)
+function TextIR.fromAscii(s, opts)
+  local bcodes = TextIR.dialect(opts and opts.dialect).B_TXT_CODE
   local out, buf = {}, {}
   local i = 1
   while i <= #s do
@@ -376,8 +624,8 @@ function TextIR.fromAscii(s)
           out[#out + 1] = { t = "strvar", n = 2 }
         elseif name == "STR_VAR_3" then
           out[#out + 1] = { t = "strvar", n = 3 }
-        elseif TextIR.B_TXT_CODE[name] then
-          out[#out + 1] = { t = "bph", code = TextIR.B_TXT_CODE[name] }
+        elseif bcodes[name] then
+          out[#out + 1] = { t = "bph", code = bcodes[name] }
         elseif TextIR.TAG_NAMES[name] then
           out[#out + 1] = { t = "tag", tag = "{" .. name .. "}" }
         elseif name == "FONT_MALE" or name == "FONT_FEMALE" or name == "FONT_NORMAL"

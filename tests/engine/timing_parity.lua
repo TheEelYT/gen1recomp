@@ -37,19 +37,58 @@ T.eq(Timing.WARP_FADE_IN, 0, "there is no fade in: LoadGBPal restores in one wri
 
 -- ---------------------------------------------------------------- HP bar
 
--- UpdateHPBar walks one HP point per iteration.  On the player's HUD each
--- point costs a frame (PrintHPNumber's DelayFrame, gated on wHPBarType) and
--- each pixel of bar movement costs two more; on the enemy HUD only the
--- pixels cost anything.
+-- engine/gfx/hp_bar.asm:81-135
 T.eq(Timing.hpBarPixels(150, 150), 48, "a full bar is 48 px")
 T.eq(Timing.hpBarPixels(75, 150), 24, "half HP is half the bar")
 T.eq(Timing.hpBarPixels(0, 150), 0, "an empty bar is 0 px")
 T.eq(Timing.hpBarPixels(1, 150), 1, "GetHPBarLength clamps a sliver to 1 px")
+-- engine/gfx/hp_bar.asm:19-34
+T.eq(Timing.hpBarPixels(199, 399), 24, "max HP >= 256 divides both sides by 4 first")
+T.eq(Timing.hpBarPixels(349, 399), 42, "so 349/399 is 42 px, not 41")
+-- engine/gfx/hp_bar.asm:42-45
+T.eq(Timing.hpBarLength(0, 150), 1, "GetHPBarLength also clamps 0 HP to 1 px")
 
-T.eq(Timing.hpDrainFrames(150, 0, 150, true), 150 + 96 + 6,
-  "a 150 HP player mon drains in D + 2P + 6 = 252 frames")
-T.eq(Timing.hpDrainFrames(150, 0, 150, false), 96 + 5,
-  "the same drain on the enemy HUD costs only 2P + 5 = 101 frames")
+T.eq(Timing.hpDrainFrames(150, 0, 150, true), 150 + 94 + 6,
+  "a 150 HP player mon drains in D + 2P + 6 = 250 frames, 1 -> 0 moves no pixel")
+T.eq(Timing.hpDrainFrames(150, 0, 150, false), 147,
+  "the same drain on the enemy HUD lags a frame per pixel: 147")
+T.eq(Timing.hpDrainFrames(40, 0, 40, false), 2 * 47 + 5,
+  "a sub-48 HP enemy crosses a pixel every step, so no lag")
+
+-- engine/gfx/hp_bar.asm:81-135
+local measured = {
+  { 100, 1, 100, false, 103 }, { 100, 0, 100, false, 103 },
+  { 150, 1, 150, false, 147 }, { 150, 0, 150, false, 147 },
+  { 193, 1, 193, false, 148 }, { 193, 0, 193, false, 148 },
+  { 200, 1, 200, false, 152 }, { 200, 0, 200, false, 152 },
+  { 255, 1, 255, false, 179 }, { 255, 0, 255, false, 179 },
+  { 300, 1, 300, false, 195 }, { 300, 0, 300, false, 195 },
+  { 400, 1, 400, false, 243 }, { 400, 0, 400, false, 243 },
+  { 150, 90, 200, false, 50 }, { 300, 180, 400, false, 78 },
+  { 300, 263, 300, false, 29 }, { 90, 1, 150, false, 88 },
+  { 150, 0, 150, true, 250 }, { 150, 50, 150, true, 170 },
+  { 200, 120, 200, true, 126 }, { 255, 1, 255, true, 354 },
+  { 256, 0, 256, true, 356 }, { 399, 0, 399, true, 499 },
+  { 399, 199, 399, true, 254 }, { 703, 303, 703, true, 462 },
+  { 1, 415, 415, true, 514 }, { 1, 150, 150, true, 249 },
+  { 37, 200, 200, true, 249 }, { 100, 255, 255, true, 221 },
+}
+for _, m in ipairs(measured) do
+  T.eq(Timing.hpDrainFrames(m[1], m[2], m[3], m[4]), m[5],
+    string.format("%s %d -> %d of %d matches the cart's %d frames",
+      m[4] and "player" or "enemy", m[1], m[2], m[3], m[5]))
+end
+local knifeEdge = {
+  { 240, 1, 240, 172 }, { 240, 0, 240, 172 }, { 256, 1, 256, 186 },
+  { 256, 0, 256, 186 }, { 500, 1, 500, 283 }, { 500, 0, 500, 283 },
+  { 703, 1, 703, 362 }, { 703, 0, 703, 362 },
+}
+for _, m in ipairs(knifeEdge) do
+  local got = Timing.hpDrainFrames(m[1], m[2], m[3], false)
+  T.check(math.abs(got - m[4]) <= 10,
+    string.format("enemy %d -> %d of %d is within 10 of the cart's %d (got %d)",
+      m[1], m[2], m[3], m[4], got))
+end
 
 -- The engine's per-frame stepper has to agree with that closed form, or the
 -- bar is animating at a rate nothing else measures.
@@ -264,13 +303,10 @@ T.eq(Timing.SHAKE_HORIZ_SLOW, 48, "type 3 slow horizontal, lb bc, 6, 2")
 T.eq(Timing.SHAKE_HORIZ_LIGHT, 18, "type 5 fast horizontal b=2")
 T.eq(Timing.SHAKE_HORIZ_SLOW2, 24, "type 6 slow horizontal, lb bc, 3, 2")
 
--- Type 4 is the player's plain damaging move -- the most-seen animation in
--- the game.  AnimationBlinkMon is `ld c, 6` of hide/DelayFrames 5/show/
--- DelayFrames 5 (animations.asm:1360-1376): 60 frames, not the 20 the port
--- used to run.
-T.eq(Timing.BLINK_MON, 60, "AnimationBlinkMon is 6 x (5 hidden + 5 shown)")
-T.eq(Timing.BLINK_MON % 10, 0,
-  "and divides into whole 10-frame blinks, matching fxHidden's period")
+-- engine/battle/animations.asm:1360
+T.eq(Timing.BLINK_MON, 78, "AnimationBlinkMon is 6 x (5 hidden + 8 shown)")
+T.eq(Timing.BLINK_MON % 13, 0,
+  "and divides into whole 13-frame blinks, matching fxHidden's period")
 
 -- SlideDownFaintedMonPic: b = PIC_HEIGHT slide steps of DelayFrames 2
 T.eq(Timing.FAINT_SLIDE, 14, "the faint slide is 7 steps x 2 frames")
@@ -345,6 +381,13 @@ do
   T.eq(b.waitFrames, Timing.BLINK_MON,
     "the enemy blink still runs with animations off (#1384)")
   T.check(b.fx and b.fx.blink ~= nil, "and it targets the enemy pic")
+  local pattern = {}
+  for _ = 1, 13 do
+    pattern[#pattern + 1] = b:fxHidden(b.enemy) and "h" or "s"
+    b.fx.blink.frames = b.fx.blink.frames - 1
+  end
+  T.eq(table.concat(pattern), "hhhhhssssssss",
+    "each blink is 5 frames hidden then 8 shown")
 end
 
 -- animations.asm:415-419
@@ -618,6 +661,21 @@ do
   -- degenerate grids must not hang or error
   T.eq(#BT.gridOrder("spiralin", 1, 1), 1, "a 1x1 grid is one tile")
   T.eq(#BT.gridOrder("spiralout", 3, 1), 3, "a single-row grid walks straight")
+
+  -- engine/battle/battle_transitions.asm:243-260
+  local Renderer = require("src.render.Renderer")
+  local g = love.graphics
+  local saved = { g.rectangle, g.setScissor, g.setColor }
+  local inside = 0
+  g.rectangle = function(_, x, y)
+    if x >= 80 and x < 240 and y >= 40 and y < 184 then inside = inside + 1 end
+  end
+  g.setScissor, g.setColor = function() end, function() end
+  Renderer.drawBattleWipe(nil, { style = "spiralin", prog = 0.5 },
+    320, 224, 80, 40, 160, 144, 1, 1, 0, 0)
+  g.rectangle, g.setScissor, g.setColor = saved[1], saved[2], saved[3]
+  T.eq(inside, 180,
+    "an extended inward spiral keeps the letterbox at the ROM's cadence")
 end
 
 -- SlidePlayerAndEnemySilhouettesOnScreen: 144 px at 2 px/frame
@@ -742,5 +800,29 @@ T.check(rephasedMargin > 0.002,
   "and the re-phase sets the residual instead of walking it onto the boundary")
 
 T.eq(FixedStep.refreshPeriod, nil, "and the period is left nil for everyone else")
+
+-- engine/battle/animations.asm:1564-1615
+local squish = BattleState._squishColumns
+T.check(squish ~= nil, "AnimationSquishMonPic is modeled per tile column")
+if squish then
+  local function shown(passes, lo, hi)
+    local cols = squish(passes)
+    for d = 1, 7 do
+      local s = cols[d]
+      if s and s >= lo and s <= hi then return true end
+    end
+    return false
+  end
+  local cols = squish(2)
+  T.eq(table.concat({ tostring(cols[1]), cols[2], cols[3], cols[4], cols[5],
+    cols[6], tostring(cols[7]) }, ","), "nil,1,2,3,6,7,nil",
+    "two passes drop the middle columns and push the outer ones inward")
+  T.check(shown(4, 2, 6) and not shown(5, 2, 6),
+    "a 5-column front pic is gone after the fourth pass (12 frames)")
+  T.check(shown(6, 1, 7) and not shown(7, 1, 7),
+    "a full 7-column pic lasts six passes")
+end
+T.eq(Timing.SEND_OUT_PIC_LOAD, 27,
+  "LoadMonBackPic holds the poof 27 frames after Go! (core.asm:1732)")
 
 T.finish("timing parity")

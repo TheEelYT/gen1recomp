@@ -30,6 +30,7 @@ local PAL = {
   red         = { 255, 80, 90 },   -- destructive
   blue        = { 76, 163, 240 },  -- links, in-panel navigation
   buttonBlue  = { 36, 106, 181 }, -- darker fill for white action labels
+  buttonPurple = { 88, 44, 140 },
   steel       = { 120, 120, 120 }, -- disabled
   -- the version rail is the one piece of brand colour that stays
   railRed     = { 255, 60, 72 },
@@ -40,6 +41,9 @@ local PAL = {
   railCrystal = { 132, 196, 228 }, -- Crystal cartridge (translucent ice blue)
   railLeafGreen = { 38, 162, 78 }, -- LeafGreen cartridge (vibrant deep forest green)
   railFireRed = { 220, 48, 48 },   -- FireRed cartridge (deeper red than Red)
+  railEmerald = { 31, 158, 110 },
+  railRuby = { 185, 46, 50 },
+  railSapphire = { 53, 94, 196 },
 }
 -- Semantic aliases kept so ported call sites read the same as before.
 PAL.cardBorder = PAL.line
@@ -184,21 +188,41 @@ function Theme.shadow(x, y, w, h, r)
   end
 end
 
-function Theme.fillRounded(x, y, w, h, c, a, r)
+function Theme.fillRounded(x, y, w, h, c, a, r, segments)
   if not G or w <= 0 or h <= 0 then return end
   r = r or Theme.radius()
   col(c or PAL.bg, a or 1)
-  G.rectangle("fill", snap(x), snap(y), snap(w), snap(h), r, r)
+  x, y, w, h = snap(x), snap(y), snap(w), snap(h)
+  if segments and r > 1 and w > 2 and h > 2 and (a or 1) == 1 and probe("setLineWidth") then
+    -- Filled polygons have no edge antialiasing on a non-MSAA canvas.
+    -- Inset the opaque body, then finish its boundary with a smooth 1px
+    -- line in the same colour. Translucent overlays keep a single fill so
+    -- their opacity does not accumulate at the edge.
+    local innerRadius = math.min(r, w / 2, h / 2) - 0.5
+    local oldWidth = probe("getLineWidth") and G.getLineWidth() or 1
+    local oldStyle = probe("getLineStyle") and G.getLineStyle() or nil
+    G.rectangle("fill", x + 0.5, y + 0.5, w - 1, h - 1, innerRadius, innerRadius, segments)
+    G.setLineWidth(1)
+    if oldStyle and probe("setLineStyle") then G.setLineStyle("smooth") end
+    G.rectangle("line", x + 0.5, y + 0.5, w - 1, h - 1, innerRadius, innerRadius, segments)
+    G.setLineWidth(oldWidth)
+    if oldStyle and probe("setLineStyle") then G.setLineStyle(oldStyle) end
+  else
+    G.rectangle("fill", x, y, w, h, r, r, segments)
+  end
 end
 
-function Theme.strokeRounded(x, y, w, h, c, a, lw, r)
+function Theme.strokeRounded(x, y, w, h, c, a, lw, r, segments)
   if not G or w <= 0 or h <= 0 then return end
   lw = lw or 1
   r = r or Theme.radius()
   if probe("setLineWidth") then G.setLineWidth(lw) end
   col(c or PAL.line, a or Theme.A.hairline)
+  -- Explicitly tessellated controls keep the outline's outer arc aligned
+  -- with the fill, including thicker selection rings.
+  local insetRadius = segments and math.max(0, r - lw / 2) or r
   G.rectangle("line", snap(x) + lw / 2, snap(y) + lw / 2,
-    snap(w) - lw, snap(h) - lw, r, r)
+    snap(w) - lw, snap(h) - lw, insetRadius, insetRadius, segments)
   if probe("setLineWidth") then G.setLineWidth(1) end
 end
 
@@ -298,13 +322,15 @@ end
 
 local railColors = {
   PAL.railRed, PAL.railBlue, PAL.railGold, PAL.railAmber, PAL.railSilver,
-  PAL.railCrystal, PAL.railFireRed, PAL.railLeafGreen,
+  PAL.railCrystal, PAL.railFireRed, PAL.railLeafGreen, PAL.railEmerald,
+  PAL.railRuby, PAL.railSapphire,
 }
 
 -- One seamless sweep every 24 seconds. Pixel strips keep this in the same
 -- batched rectangle pipeline as the rest of the theme, without a shader.
-function Theme.versionRail(x, y, w, h)
+function Theme.versionRail(x, y, w, h, colors)
   if not G then return end
+  local railColors = (colors and #colors > 0) and colors or railColors
   x, y, w, h = snap(x), snap(y), snap(w), snap(h)
   if w <= 0 or h <= 0 then return end
   local now = love.timer and love.timer.getTime and love.timer.getTime() or 0

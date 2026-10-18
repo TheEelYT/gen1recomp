@@ -6,6 +6,7 @@
 local ShaderFX = {}
 
 local Json = require("src.link.Json")
+local FrameProfiler = require("src.core.FrameProfiler")
 local SaveData = require("src.core.SaveData")
 local Performance = require("src.core.Performance")
 
@@ -29,7 +30,7 @@ local function realFullPath(rel, fallbackDir)
     if ok and type(root) == "string" and root ~= "" then
       local sep = package.config:sub(1, 1)
       local path = (root:gsub("[/\\]+$", "")) .. sep .. rel
-      local f = io.open(path, "rb")
+      local f = SaveData.openNative(path, "rb")
       if f then
         f:close()
         return path
@@ -43,7 +44,7 @@ function ShaderFX.list()
   local dir = ShaderFX.presetDir()
   if not dir then return {} end
   pcall(function() require("src.import.CacheFs").root() end)
-  love.filesystem.createDirectory("shaders")
+  SaveData.persistenceFs(love.filesystem).createDirectory("shaders")
   local out = {}
   local function scan(relPath)
     local items = love.filesystem.getDirectoryItems(relPath)
@@ -74,7 +75,7 @@ end
 
 -- A real OS path outside any love.filesystem mount, so io.open, not getInfo.
 function ShaderFX.isConverted(entry)
-  local f = io.open(ShaderFX.artifactPath(entry), "rb")
+  local f = SaveData.openNative(ShaderFX.artifactPath(entry), "rb")
   if not f then return false end
   f:close()
   return true
@@ -259,7 +260,7 @@ function ShaderFX.installDownloaded(notModified)
   if notModified then
     return 0, nil, true
   end
-  love.filesystem.createDirectory("shaders")
+  SaveData.persistenceFs(love.filesystem).createDirectory("shaders")
   if not love.filesystem.mount(DOWNLOAD_ZIP_REL, DOWNLOAD_MOUNT) then
     return nil, "could not open the downloaded archive"
   end
@@ -323,7 +324,7 @@ local function saveDir()
 end
 
 local function fileReadable(path)
-  local f = io.open(path, "rb")
+  local f = SaveData.openNative(path, "rb")
   if not f then return false end
   f:close()
   return true
@@ -474,7 +475,7 @@ end
 -- love.graphics.newImage cannot open an absolute path outside LOVE's own
 -- mounts, which is where a preset's LUTs live, so read the bytes by hand.
 function ShaderFX.loadImageFromPath(path)
-  local f, err = io.open(path, "rb")
+  local f, err = SaveData.openNative(path, "rb")
   if not f then return nil, "io.open failed: " .. tostring(err) end
   local bytes = f:read("*a")
   f:close()
@@ -673,6 +674,88 @@ local function sizeTable(state, i, dims, sizeUniforms, viewport, original)
   return values
 end
 
+-- ------- per-pass uniform bookkeeping
+--
+-- runPass used to rebuild and pcall-send every uniform every frame.  Each
+-- pass's shader is private to its chain state (built at activate, dropped
+-- with the state) and nothing else sends to it, so `cached.sent` remembers
+-- what the shader last received and a uniform is only re-sent when its value
+-- changed.  A failed send is remembered too: it would fail the same way again
+-- for the same name and value.
+
+local textureUniformNames = {}
+local function textureUniform(name)
+  local u = textureUniformNames[name]
+  if not u then
+    u = "LIBRA_TEXTURE_" .. name
+    textureUniformNames[name] = u
+  end
+  return u
+end
+
+-- Fixup.packValues over `values` with ALL_DEFAULTS layered on top (a default
+-- wins, exactly as copying it into `values` did), into tables reused across
+-- frames: shader:send copies, so the vec4 groups need not be fresh.
+local PACK_SLOT = { x = 1, y = 2, z = 3, w = 4 }
+local function packPass(cached, manifest, defaults, values)
+  local packed = cached.packed
+  if not packed then
+    packed = {}
+    cached.packed = packed
+    cached.groups = {}
+    for _, entry in ipairs(manifest) do
+      if entry.component and not cached.groups[entry.uniform] then
+        cached.groups[entry.uniform] = { 0, 0, 0, 0 }
+      end
+    end
+  end
+  for uniform, group in pairs(cached.groups) do
+    group[1], group[2], group[3], group[4] = 0, 0, 0, 0
+    packed[uniform] = group
+  end
+  for _, entry in ipairs(manifest) do
+    local value = defaults[entry.name]
+    if value == nil then value = values[entry.name] end
+    if entry.component then
+      packed[entry.uniform][PACK_SLOT[entry.component]] = value or 0
+    else
+      packed[entry.uniform] = value
+    end
+  end
+  return packed
+end
+
+-- Whether `value` differs from what `sent[name]` recorded.  Arrays of plain
+-- numbers/booleans are compared element-wise; anything else always sends.
+local function changedSince(sent, name, value)
+  local last = sent[name]
+  if last == nil then return true end
+  if type(value) ~= "table" then return last ~= value end
+  if type(last) ~= "table" or last.n ~= #value then return true end
+  for k = 1, last.n do
+    local v = value[k]
+    local tv = type(v)
+    if (tv ~= "number" and tv ~= "boolean") or last[k] ~= v then return true end
+  end
+  return false
+end
+
+local function remember(sent, name, value)
+  if type(value) ~= "table" then
+    sent[name] = value
+    return
+  end
+  local snap = sent[name]
+  if type(snap) ~= "table" then
+    snap = {}
+    sent[name] = snap
+  end
+  local n = #value
+  for k = 1, n do snap[k] = value[k] end
+  for k = n + 1, (snap.n or 0) do snap[k] = nil end
+  snap.n = n
+end
+
 -- Runs pass `i`, drawing `srcImg` into a freshly sized canvas. `lutByName`
 -- resolves a User-semantic sampler by the name the translation reported.
 local function runPass(state, i, pass, outputs, frameSource, lutByName, viewport, original, layer)
@@ -684,6 +767,11 @@ local function runPass(state, i, pass, outputs, frameSource, lutByName, viewport
   local cached = assert(state.shaderCache[i],
     ("pass%d: shader was not built at activate"):format(i))
   local shader, fragManifest = cached.shader, cached.fragManifest
+  local sent = cached.sent
+  if not sent then
+    sent = {}
+    cached.sent = sent
+  end
 
   for _, s in ipairs(pass.samplers) do
     local img
@@ -694,13 +782,21 @@ local function runPass(state, i, pass, outputs, frameSource, lutByName, viewport
     elseif s.semantic == "User" then img = lutByName and lutByName[s.user_name] end
     assert(img, ("pass%d: no binding resolved for sampler %s (semantic=%s)")
       :format(i, s.name, tostring(s.semantic)))
-    pcall(shader.send, shader, "LIBRA_TEXTURE_" .. s.name, img)
+    local uniform = textureUniform(s.name)
+    if sent[uniform] ~= img then
+      pcall(shader.send, shader, uniform, img)
+      sent[uniform] = img
+    end
   end
 
   local values = sizeTable(state, i, dims, pass.size_uniforms, viewport, original)
-  for name, value in pairs(state.ALL_DEFAULTS) do values[name] = value end
-  local packed = Fixup.packValues(fragManifest, values)
-  for name, value in pairs(packed) do pcall(shader.send, shader, name, value) end
+  local packed = packPass(cached, fragManifest, state.ALL_DEFAULTS, values)
+  for name, value in pairs(packed) do
+    if changedSince(sent, name, value) then
+      pcall(shader.send, shader, name, value)
+      remember(sent, name, value)
+    end
+  end
 
   local srcImg = (i == 0) and frameSource or outputs[i - 1]
   local srcDims = passInputDims(state, i, original)
@@ -856,7 +952,7 @@ local function doConvert(entry, es)
   local buf = {}
   serializeLua(preset, buf)
   local path = ShaderFX.artifactPath(entry)
-  local f, ferr = io.open(path, "wb")
+  local f, ferr = SaveData.openNative(path, "wb")
   if not f then return false, "io.open failed: " .. tostring(ferr) end
   f:write("return ")
   f:write(table.concat(buf))
@@ -905,10 +1001,11 @@ function ShaderFX.recordError(presetName, message)
   errs[#errs + 1] = line
   while #errs > MAX_ERRORS do table.remove(errs, 1) end
   require("src.core.Logger").error("ShaderFX: %s", line)
-  if love.filesystem and love.filesystem.write then
+  local pfs = love.filesystem and SaveData.persistenceFs(love.filesystem)
+  if pfs and pfs.write then
     local head = ("es=%s glsl3=%s renderer=%s\n\n"):format(
       tostring(defaultEs()), glsl3Supported(), rendererInfo())
-    pcall(love.filesystem.write, ShaderFX.ERROR_LOG_REL, head .. table.concat(errs, "\n\n") .. "\n")
+    pcall(pfs.write, ShaderFX.ERROR_LOG_REL, head .. table.concat(errs, "\n\n") .. "\n")
   end
   return line
 end
@@ -1089,6 +1186,7 @@ end
 -- Crops the playfield rect out of `canvas` at `renderScale`. The output canvas
 -- is cached module-wide and reallocated only on a real size change.
 local cropCanvasCache = {}
+local cropQuadCache = {}
 
 local function gridGeometry(rect, renderScale, originX, originY)
   local s = tonumber(rect.scale)
@@ -1111,16 +1209,24 @@ local function cropToGbSource(canvas, rect, srcW, srcH, renderScale, layer, geo)
   -- Cheap insurance against a read-after-write hazard between this draw and
   -- whatever last rendered into `canvas`.
   love.graphics.flushBatch()
-  local outW, outH, quad
+  local outW, outH, qx, qy, qw, qh
   if geo then
     outW, outH = geo.crop.w, geo.crop.h
-    quad = love.graphics.newQuad(rect.x + geo.x0 + CROP_SAMPLE_BIAS,
-      rect.y + geo.y0 + CROP_SAMPLE_BIAS, geo.cols * geo.scale, geo.rows * geo.scale,
-      canvas:getPixelWidth(), canvas:getPixelHeight())
+    qx, qy = rect.x + geo.x0 + CROP_SAMPLE_BIAS, rect.y + geo.y0 + CROP_SAMPLE_BIAS
+    qw, qh = geo.cols * geo.scale, geo.rows * geo.scale
   else
     outW, outH = roundDim(srcW * renderScale), roundDim(srcH * renderScale)
-    quad = love.graphics.newQuad(rect.x, rect.y, rect.w, rect.h,
+    qx, qy, qw, qh = rect.x, rect.y, rect.w, rect.h
+  end
+  -- One quad per layer, re-aimed each frame rather than allocated.  A quad
+  -- without setViewport (a test double) is simply rebuilt.
+  local quad = cropQuadCache[layer]
+  if quad and quad.setViewport then
+    quad:setViewport(qx, qy, qw, qh, canvas:getPixelWidth(), canvas:getPixelHeight())
+  else
+    quad = love.graphics.newQuad(qx, qy, qw, qh,
       canvas:getPixelWidth(), canvas:getPixelHeight())
+    cropQuadCache[layer] = quad
   end
   local out
   local cached = cropCanvasCache[layer]
@@ -1173,7 +1279,7 @@ end
 -- `opts.layer` names a second chain of the same frame (its own canvases);
 -- `opts.mask` composites that layer over what is already on screen, keyed
 -- by `canvas`'s own alpha, instead of replacing the screen with it.
-function ShaderFX.render(canvas, rect, source, dpiX, dpiY, opts)
+local function renderImpl(canvas, rect, source, dpiX, dpiY, opts)
   if not autoActivateTried then tryAutoActivateFromEnv() end
   local layer = opts and opts.layer or "main"
   local masked = opts and opts.mask and maskedDraw() or nil
@@ -1290,6 +1396,17 @@ function ShaderFX.render(canvas, rect, source, dpiX, dpiY, opts)
     main = slots.main.state and slots.main.state.lastAccelPacked,
     secondary = slots.secondary.state and slots.secondary.state.lastAccelPacked,
   }
+end
+
+-- Wrapper so the profiler push/pop pairs across renderImpl's early returns.
+local function popShaderFX(...)
+  FrameProfiler.pop("shaderfx")
+  return ...
+end
+
+function ShaderFX.render(...)
+  FrameProfiler.push("shaderfx")
+  return popShaderFX(renderImpl(...))
 end
 
 return ShaderFX

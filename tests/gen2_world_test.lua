@@ -679,15 +679,20 @@ eq(ashWorld:useSacredAsh(), "nowhere", "no Sacred Ash from inside a battle")
 ashWorld.battleActive = nil
 end
 
--- Ho-Oh's own end: BATTLETYPE_FORCEITEM (InitEnemyMon's `.WildItem`) is what
--- actually puts a SACRED_ASH on the mon the player catches -- the effect
--- above is reachable only once something stamps the held item on, and until
--- this the port never did.  The general 25%/8% wild-item roll stays
--- unmodeled (Mon.new's own note); only the unconditional FORCEITEM path is.
+-- Ho-Oh's own end: BATTLETYPE_FORCEITEM (InitEnemyMon's `.WildItem`,
+-- ../pokecrystal/engine/battle/core.asm:6014-6018) is what puts a SACRED_ASH
+-- on the mon the player catches.  The scripted-battle arm hands the forced
+-- flag to Mon.new, and the stub below runs the same `.WildItem` roll off it
+-- with a NO_ITEM byte so only the forced path can stamp anything.
 do
 local Mon = require("src.battle.gen2.Mon")
 local realMonNew = Mon.new
-Mon.new = function(_, id, level) return { species = id, level = level } end
+Mon.new = function(data, id, level, opts)
+  local def = data and data.pokemon and data.pokemon[id]
+  return { species = id, level = level,
+    item = opts and opts.wild
+      and Mon.wildItem(def, opts.forceItem, function() return 0 end) or nil }
+end
 
 local forceWorld, forceGame = fakeWorld({}, fakePlayer(5, 5, "down"))
 forceGame.data = { pokemon = {
@@ -2666,19 +2671,17 @@ musicWorld.game.data.audio.songs = { Music_NewBarkTown = {} }
 local Music = require("src.core.Music")
 local realFadeOut, realPlay = Music.fadeOut, Music.play
 local started = {}
-Music.fadeOut = function(control) started.control = control end
+Music.fadeOut = function(control, pending)
+  started.control, started.pending = control, pending
+end
 Music.play = function(_, name) started.song = name end
 musicWorld:fadeOutMusic(1, 4)
 eq(started.control, 4, "the ramp is handed the control byte")
-check(musicWorld.pendingMusic ~= nil, "the label is queued")
-eq(musicWorld.pendingMusic.left, 28, "for control * 7 frames of ramp")
-for _ = 1, 27 do musicWorld:updateMusicFade() end
-check(musicWorld.pendingMusic ~= nil, "and is still waiting one frame short")
-musicWorld:updateMusicFade()
-check(musicWorld.pendingMusic == nil, "then starts")
-eq(started.song, "Music_NewBarkTown", "with the label the id named")
+check(started.pending ~= nil, "the label is queued under it")
+eq(started.pending.song, "Music_NewBarkTown", "with the label the id named")
+eq(started.pending.data, musicWorld.game.data, "over the game's data")
 musicWorld:fadeOutMusic(0, 4)
-check(musicWorld.pendingMusic == nil, "MUSIC_NONE queues nothing behind it")
+check(started.pending == nil, "MUSIC_NONE queues nothing behind it")
 -- tests/run_tests.lua dofiles every suite into ONE process, so a patched module
 -- table would follow this file into the next one.
 Music.fadeOut, Music.play = realFadeOut, realPlay

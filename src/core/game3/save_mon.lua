@@ -88,6 +88,24 @@ local function healIdFor(w)
   return false
 end
 
+-- pokeemerald/include/global.h:956
+function M.boxFlags(save)
+  local md = type(save) == "table" and type(save.modData) == "table" and save.modData or {}
+  local ci, gift = md.cartImport, md.boxGift
+  if type(ci) == "table" and tonumber(ci.boxFlags) then return tonumber(ci.boxFlags) % 256 end
+  if type(gift) == "table" and tonumber(gift.flags) then return tonumber(gift.flags) % 256 end
+  return nil
+end
+
+function M.setBoxFlags(save, value)
+  value = (tonumber(value) or 0) % 256
+  save.modData = type(save.modData) == "table" and save.modData or {}
+  local ci = save.modData.cartImport
+  if type(ci) == "table" and ci.boxFlags ~= nil then ci.boxFlags = value end
+  if type(save.modData.boxGift) ~= "table" then save.modData.boxGift = {} end
+  save.modData.boxGift.flags = value
+end
+
 function M.finishCartImport(save)
   local ci = type(save.modData) == "table" and save.modData.cartImport
   if type(ci) ~= "table" or not Pokemon.isInternalSpecies(1) then return end
@@ -103,7 +121,7 @@ function M.finishCartImport(save)
     if sp then dex.owned[sp], dex.caught[sp] = true, true end
   end
   ci.dexSeen, ci.dexOwned = nil, nil
-  local dc = save.modData.firered_daycare
+  local dc = save.modData[require("src.core.game3.daycare").saveKey(save)]
   if type(dc) == "table" then
     for _, mon in pairs(type(dc.daycare) == "table" and dc.daycare or {}) do
       if type(mon) == "table" and mon.cartImport then M.normalize(mon) end
@@ -119,6 +137,11 @@ function M.finishCartImport(save)
     if id ~= nil then ci.lastHealLocation = nil end
   else
     ci.lastHealLocation = nil
+  end
+  if tonumber(ci.boxFlags) then
+    local flags = M.boxFlags(save)
+    ci.boxFlags = nil
+    M.setBoxFlags(save, flags)
   end
   if ci.lastHealLocation == nil then save.modData.cartImport = nil end
 end

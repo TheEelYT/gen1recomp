@@ -154,8 +154,9 @@ M.BLUES_HOUSE = {
       { "show_text", "_BluesHouseDaisyOfferMapText" },
       -- _GotMapText: "{PLAYER} got a\n{RAM:wStringBuffer}!" -- the
       -- buffer supplies "TOWN MAP" (scripts/BluesHouse.asm GotMapText)
-      { "give_item", "TOWN_MAP", 1, "_GotMapText" },
+      { "give_item", "TOWN_MAP", 1, false, "_BluesHouseDaisyBagFullText" },
       { "hide_object", "BLUES_HOUSE", "BLUESHOUSE_TOWN_MAP" },
+      { "show_text", "_GotMapText" },
       { "set_flag", "EVENT_GOT_TOWN_MAP" },
       { "jump", "end" },
       { "label", "got_map" },
@@ -339,6 +340,11 @@ M.VERMILION_CITY = {
     local puz = game.save.trashPuzzle or {}
     game.save.trashPuzzle = puz
     puz.first = love.math.random(0, 7) * 2
+    -- pokeyellow scripts/VermilionCity.asm:20
+    if require("src.core.GameVersion").isYellow()
+       and game.save.flags.EVENT_RECEIVED_BIKE_VOUCHER then
+      game.save.flags.EVENT_LEFT_FANCLUB_AFTER_BIKE_VOUCHER = true
+    end
   end,
   -- VermilionCityDefaultScript's per-frame SSAnneTicketCheckCoords check:
   -- the unguarded cell (18,30) just west of the sailor leads straight
@@ -468,7 +474,9 @@ M.SS_ANNE_CAPTAINS_ROOM = {
       { "show_text", "_SSAnneCaptainsRoomCaptainIFeelMuchBetterText" },
       -- give-then-print like scripts/SSAnneCaptainsRoom.asm (GiveItem
       -- fills wStringBuffer; the received text reads it)
-      { "give_item", "HM_CUT", 1, false },
+      -- scripts/SSAnneCaptainsRoom.asm:77
+      { "give_item", "HM_CUT", 1, false,
+        "_SSAnneCaptainsRoomCaptainHM01NoRoomText", "Get_Key_Item" },
       { "show_text", "_SSAnneCaptainsRoomCaptainReceivedHM01Text" },
       { "set_flag", "EVENT_GOT_HM01" },
       -- pokeyellow scripts/SSAnneCaptainsRoom.asm:32-33
@@ -482,10 +490,10 @@ M.SS_ANNE_CAPTAINS_ROOM = {
 do
   local rows = M.SS_ANNE_CAPTAINS_ROOM.talk.TEXT_SSANNECAPTAINSROOM_CAPTAIN
   if not require("src.core.GameVersion").isYellow() then
-    for i, row in ipairs(rows) do
+    for _, row in ipairs(rows) do
       if row[1] == "give_item" then
         -- pokered scripts/SSAnneCaptainsRoom.asm:34-37
-        table.insert(rows, i, { "no_npc_face_player", true })
+        row[7] = true
         break
       end
     end
@@ -561,6 +569,9 @@ M.POKEMON_TOWER_7F = {
         Commands.hide_object(ctx, "POKEMON_TOWER_7F", r.name)
       end
     end
+    if game.save.flags.EVENT_RESCUED_MR_FUJI then
+      Commands.hide_object(ctx, "POKEMON_TOWER_7F", "POKEMONTOWER7F_MR_FUJI")
+    end
   end,
   -- runVictoryHook fires after every trainer win on the map (both the sight
   -- and talk paths route through engageTrainer -> checkVictoryRewards), so
@@ -596,6 +607,8 @@ M.POKEMON_TOWER_7F = {
       { "show_object", "MR_FUJIS_HOUSE", "MRFUJISHOUSE_MR_FUJI" },   -- 5
       { "hide_object", "SAFFRON_CITY", "SAFFRONCITY_ROCKET8" },      -- 6
       { "show_object", "SAFFRON_CITY", "SAFFRONCITY_ROCKET9" },      -- 7
+      -- scripts/PokemonTower7F.asm:70-72
+      { "hide_object", "POKEMON_TOWER_7F", "POKEMONTOWER7F_MR_FUJI" }, -- 8
       -- pokered warps to wDestinationWarpID $1 (0-based) -- the house's
       -- SECOND warp, the door mat at (3,7) -- facing UP
       -- (PokemonTower7FWarpToMrFujiHouseScript: SPRITE_FACING_UP +
@@ -606,7 +619,7 @@ M.POKEMON_TOWER_7F = {
       -- collected and the Route 16 SNORLAX sealed the map. The arrival
       -- mat itself is inert until stepped off (warpEntryCell), which is
       -- what makes the vanilla coordinates safe.
-      { "warp", "MR_FUJIS_HOUSE", 3, 7, "up" },           -- 8
+      { "warp", "MR_FUJIS_HOUSE", 3, 7, "up", true },     -- 9
     },
   },
 }
@@ -629,7 +642,8 @@ M.MR_FUJIS_HOUSE = {
       { "jump_if_false", 14 },                                          -- 5
       { "show_text", "_MrFujisHouseMrFujiIThinkThisMayHelpYourQuestText" }, -- 6
       -- give-then-print like scripts/MrFujisHouse.asm
-      { "give_item", "POKE_FLUTE", 1, false },                          -- 7
+      { "give_item", "POKE_FLUTE", 1, false,
+        "_MrFujisHouseMrFujiPokeFluteNoRoomText" },                     -- 7
       { "show_text", "_MrFujisHouseMrFujiReceivedPokeFluteText" },      -- 8
       { "set_flag", "EVENT_GOT_POKE_FLUTE" },                           -- 9
       { "show_text", "_MrFujisHouseMrFujiPokeFluteExplanationText" },   -- 10
@@ -645,26 +659,14 @@ M.MR_FUJIS_HOUSE = {
 -- Snorlax (scripts/Route12.asm, Route16.asm)
 -- -------------------------------------------------------------------
 
--- each route has its own strings (text/Route12.asm, text/Route16.asm;
--- Route 16's sleeping line is the unnamed _Route16Text7).  Talking to
--- Snorlax before it's beaten always just shows the sleeping line --
--- Route12DefaultScript/Route16DefaultScript only special-case
--- EVENT_FIGHT_ROUTEnn_SNORLAX, which ItemUsePokeFlute sets when the
--- player USES the POKé FLUTE from the item-use menu while standing next
--- to Snorlax (see ItemEffects.lua's POKE_FLUTE branch); merely talking
--- to it with the flute in the bag does nothing.  From the woke-up text
--- on, snorlaxWake below mirrors Route12DefaultScript's fight branch /
--- Route12SnorlaxPostBattleScript (scripts/Route12.asm, Route16.asm):
--- HideObject runs BEFORE the battle (so Snorlax is gone even after a
--- blackout), then the battle, then the calmed-down/returned line only
--- when it was NOT caught (`ld a, [wBattleResult] / cp $2` skips it),
--- and EVENT_BEAT_ROUTEnn_SNORLAX on any non-blackout result.
+-- pokered/scripts/Route12.asm:24
+-- pokered/scripts/Route16.asm:24
 local function snorlaxWake(mapId, objName, beatFlag, wokeUpText, calmedText)
   return {
     { "show_text", wokeUpText },                    -- 1
     { "hide_object", mapId, objName },              -- 2 HideObject pre-battle
     { "static_battle", "SNORLAX", 30, beatFlag },   -- 3
-    { "check_battle_result", "win", "run" },        -- 4 not caught, not blackout
+    { "check_battle_result", "win" },
     { "jump_if_false", 7 },                         -- 5 end (skip calmed-down)
     { "show_text", calmedText },                    -- 6
   }
@@ -727,7 +729,8 @@ M.SAFARI_ZONE_SECRET_HOUSE = {
       { "jump_if_true", 9 },                                                 -- 3
       { "show_text", "_SafariZoneSecretHouseFishingGuruYouHaveWonText" },    -- 4
       -- give-then-print like scripts/SafariZoneSecretHouse.asm
-      { "give_item", "HM_SURF", 1, false },                                  -- 5
+      { "give_item", "HM_SURF", 1, false,
+        "_SafariZoneSecretHouseFishingGuruHM03NoRoomText" },                 -- 5
       { "show_text", "_SafariZoneSecretHouseFishingGuruReceivedHM03Text" },  -- 6
       { "set_flag", "EVENT_GOT_HM03" },                                      -- 7
       { "jump", 10 },                                                        -- 8
@@ -890,6 +893,8 @@ M.SILPH_CO_11F = {
       or "Ah {PLAYER}!\nSo we meet again!",
       function()
         ow:scriptMove(gio, "down", 3, function()
+          -- scripts/SilphCo11F.asm:244-255
+          ow.player.facing = (x == 7 and y == 12) and "up" or "left"
           gio:facePlayer(ow.player)
           ow:engageTrainer(gio, function()
             -- SilphCo11FGiovanniAfterBattleScript: the "Blast it all!"
@@ -926,7 +931,8 @@ M.SILPH_CO_11F = {
       { "jump_if_true", 9 },                                                 -- 3
       { "show_text", "_SilphCo11FSilphPresidentText" },                      -- 4
       -- give-then-print like scripts/SilphCo11F.asm
-      { "give_item", "MASTER_BALL", 1, false },                              -- 5
+      { "give_item", "MASTER_BALL", 1, false,
+        "_SilphCo11FSilphPresidentNoRoomText", "Get_Key_Item" },             -- 5 scripts/SilphCo11F.asm:322
       { "show_text", "_SilphCo11FSilphPresidentReceivedMasterBallText" },    -- 6
       { "set_flag", "EVENT_GOT_MASTER_BALL" },                               -- 7
       { "jump", "end" },                                                     -- 8
@@ -1070,7 +1076,8 @@ M.VICTORY_ROAD_3F = {
 -- pokered forces the fight on map entry: Agatha's victory arms
 -- SCRIPT_CHAMPIONSROOM_PLAYER_ENTERS (scripts/AgathasRoom.asm), and
 -- ChampionsRoomPlayerEntersScript then runs RivalEntrance_RLEMovement
--- (up 1, right 1, up 3) before ChampionsRoomRivalReadyToBattleScript.
+-- (played back to front: up 3, right 1, up 1) before
+-- ChampionsRoomRivalReadyToBattleScript.
 -- The rival object has no trainer header / sight range, so without that
 -- entrance script the player can walk past (issue #99).  We arm on the
 -- run flag instead of Agatha's victory bit: same observable effect for
@@ -1099,6 +1106,7 @@ local championsRoomRivalScript = {
   -- playBattle("final") then no-ops on the same song, so the theme stays
   -- continuous into the fight
   { "play_music", "Music_FinalBattle" },                    -- 5
+  { "save_end_battle_text", "_RivalDefeatedText" },         -- scripts/ChampionsRoom.asm:65
   { "rival_battle", "OPP_RIVAL3", 1 },                      -- 6
   -- losing halts here; the numeric target this replaced pointed at the
   -- closing warp, which inducted a player who had just lost the fight (#704)
@@ -1107,8 +1115,7 @@ local championsRoomRivalScript = {
   { "set_flag", "EVENT_BEAT_CHAMPION_RIVAL" },              -- 9
   -- ChampionsRoomRivalDefeatedScript re-displays TEXT_CHAMPIONSROOM_RIVAL,
   -- whose text_asm takes the EVENT_BEAT_CHAMPION_RIVAL branch =
-  -- _ChampionsRoomRivalAfterBattleText (the in-battle _RivalDefeatedText
-  -- is the port's generic "<PLAYER> defeated BLUE!" engine line instead).
+  -- _ChampionsRoomRivalAfterBattleText.
   { "show_text", "_ChampionsRoomRivalAfterBattleText" },    -- 10
   -- ChampionsRoomOakArrivesScript: Music_Cities1AlternateTempo
   -- (Cities1, kept into HALL_OF_FAME like BIT_NO_MAP_MUSIC after
@@ -1126,6 +1133,8 @@ local championsRoomRivalScript = {
   { "show_object", "CHAMPIONS_ROOM", "CHAMPIONSROOM_OAK" },  -- 15
   { "move_npc", 2, "up", 5 },                               -- 16 OakEntranceAfterVictoryMovement
   -- OakCongratulatesPlayerScript: rival faces left, Oak faces down
+  -- scripts/ChampionsRoom.asm:142-143
+  { "face_player_dir", "left" },
   { "face_object", 1, "left" },                             -- 17
   { "face_object", 2, "down" },                             -- 18
   { "load_player_starter_name" },
@@ -1162,10 +1171,11 @@ M.CHAMPIONS_ROOM = {
     end
     -- RivalEntrance_RLEMovement, then the battle/Oak script (queued
     -- separately so talk-script jump indices stay 1-based as written).
+    -- home/overworld.asm:1844
     ow:queueScript({
-      { "move_player", "up", 1 },
-      { "move_player", "right", 1 },
       { "move_player", "up", 3 },
+      { "move_player", "right", 1 },
+      { "move_player", "up", 1 },
     })
     ow:queueScript(championsRoomRivalScript, { npc = rival })
   end,

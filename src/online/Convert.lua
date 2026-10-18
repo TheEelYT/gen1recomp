@@ -35,6 +35,26 @@ local function baseStatsOf(def)
   return (def and def.baseStats) or {}
 end
 
+local function speciesDefinition(data, species)
+  local def = data and data.pokemon and data.pokemon[species]
+  return def, def and species
+end
+
+local function counterpartDefinition(sourceDef, destinationData)
+  local dex = sourceDef and tonumber(sourceDef.dex)
+  if not dex then return nil end
+  for key, def in pairs(destinationData and destinationData.pokemon or {}) do
+    if tonumber(def.dex) == dex then return def, key end
+  end
+  return nil
+end
+
+local function destinationSpecies(sourceDef, species, destinationData)
+  local def, key = speciesDefinition(destinationData, species)
+  if def then return def, key end
+  return counterpartDefinition(sourceDef, destinationData)
+end
+
 local function copyStatExp(statExp)
   statExp = statExp or {}
   local special = statExp.special
@@ -97,13 +117,34 @@ local function levelOf(mon)
   return math.max(1, math.min(100, math.floor(tonumber(mon.level) or 1)))
 end
 
+-- engine/link/link.asm:1180 TimeCapsule_ReplaceTeruSama
+function Convert.heldItemFromCatchRate(byte, gen2Data)
+  byte = tonumber(byte)
+  if not byte or byte <= 0 or byte > 255 then return nil end
+  local items = gen2Data and gen2Data.items or {}
+  local replaced = type(items.timeCapsule) == "table" and items.timeCapsule[byte]
+  if replaced then return replaced end
+  for id, def in pairs(items) do
+    if type(def) == "table" and def.index == byte and def.id == id then return id end
+  end
+  return nil
+end
+
+-- engine/link/link.asm:823
+function Convert.catchRateFromHeldItem(item, gen2Data)
+  if item == nil or item == 0 then return 0 end
+  local def = gen2Data and gen2Data.items and gen2Data.items[item]
+  return type(def) == "table" and tonumber(def.index) or nil
+end
+
 -- engine/link/link.asm:930 Link_ConvertPartyStruct1to2
 
 function Convert.toGen2(mon, gen1Data, gen2Data)
   if type(mon) ~= "table" then return nil, "not_a_mon" end
-  local def2 = gen2Data and gen2Data.pokemon and gen2Data.pokemon[mon.species]
+  local def1 = speciesDefinition(gen1Data, mon.species)
+  if not def1 then return nil, "species_unknown" end
+  local def2, species2 = destinationSpecies(def1, mon.species, gen2Data)
   if not def2 then return nil, "species_unknown" end
-  local def1 = gen1Data and gen1Data.pokemon and gen1Data.pokemon[mon.species]
 
   local report = newReport()
   local level = levelOf(mon)
@@ -113,8 +154,7 @@ function Convert.toGen2(mon, gen1Data, gen2Data)
 
   local oldStats = mon.stats
   if not (oldStats and oldStats.hp) then
-    oldStats = Stats.calc(def1 or { baseStats = baseStatsOf(def2) }, level,
-      dvs, statExp)
+    oldStats = Stats.calc(def1, level, dvs, statExp)
   end
   local oldSpecial = oldStats.special
   if oldSpecial and (oldSpecial ~= stats.specialAttack
@@ -163,7 +203,7 @@ function Convert.toGen2(mon, gen1Data, gen2Data)
   end
 
   local out = {
-    species = mon.species,
+    species = def2.id or species2,
     name = def2.name or mon.species,
     nickname = mon.nickname,
     level = level,
@@ -175,7 +215,8 @@ function Convert.toGen2(mon, gen1Data, gen2Data)
     maxHp = stats.hp,
     types = def2.types,
     moves = moves,
-    item = nil,
+    -- engine/link/link.asm:1102
+    item = Convert.heldItemFromCatchRate(mon.catchRate or (def1 and def1.catchRate), gen2Data),
     status = status,
     -- engine/link/link.asm:1067
     happiness = Convert.DEFAULT_HAPPINESS,
@@ -188,14 +229,18 @@ function Convert.toGen2(mon, gen1Data, gen2Data)
     traded = mon.traded,
   }
   out.shiny = Mon.isShiny(dvs,
-    { species = mon.species, def = def2, level = level })
-  out.gender = Mon.gender(def2, dvs, { species = mon.species, level = level })
+    { species = def2.id or species2, def = def2, level = level })
+  out.gender = Mon.gender(def2, dvs, { species = def2.id or species2, level = level })
 
   entry(report.changed, "happiness",
     ("FRIENDSHIP SET TO %d"):format(Convert.DEFAULT_HAPPINESS),
     { to = Convert.DEFAULT_HAPPINESS })
   entry(report.changed, "caught_level",
     ("MET AT LEVEL %d"):format(level), { to = level })
+  if out.item then
+    entry(report.changed, "item",
+      ("HOLDS %s"):format(displayName(gen2Data and gen2Data.items, out.item)), { to = out.item })
+  end
 
   return out, report
 end
@@ -204,7 +249,11 @@ end
 function Convert.refusalFor(mon, gen2Data, gen1Data)
   if type(mon) ~= "table" then return "not_a_mon", {} end
   if mon.isEgg then return "is_egg", {} end
-  local species1 = gen1Data and gen1Data.pokemon and gen1Data.pokemon[mon.species]
+  local species2 = speciesDefinition(gen2Data, mon.species)
+  if not species2 then
+    return "species_unknown", { species = mon.species }
+  end
+  local species1 = destinationSpecies(species2, mon.species, gen1Data)
   if not species1 then
     return "species_too_new", { species = mon.species }
   end
@@ -219,12 +268,32 @@ function Convert.refusalFor(mon, gen2Data, gen1Data)
   return nil
 end
 
-function Convert.toGen1(mon, gen2Data, gen1Data)
+function Convert.withMoves(mon, moves, gen1Data)
+  if type(mon) ~= "table" or type(moves) ~= "table" then return mon, false end
+  local list, seen = {}, {}
+  for _, id in ipairs(moves) do
+    if #list < 4 and not seen[id] and gen1Data and gen1Data.moves and gen1Data.moves[id] then
+      seen[id] = true
+      list[#list + 1] = { id = id, ppUps = 0 }
+    end
+  end
+  if #list == 0 then return mon, false end
+  local out = {}
+  for k, v in pairs(mon) do out[k] = v end
+  out.moves = list
+  return out, true
+end
+
+function Convert.toGen1(mon, gen2Data, gen1Data, opts)
+  local replaced, before = false, mon
+  if type(opts) == "table" and opts.moves then
+    mon, replaced = Convert.withMoves(mon, opts.moves, gen1Data)
+  end
   local reason, info = Convert.refusalFor(mon, gen2Data, gen1Data)
   if reason then return nil, reason, info end
 
-  local def1 = gen1Data.pokemon[mon.species]
-  local def2 = gen2Data and gen2Data.pokemon and gen2Data.pokemon[mon.species]
+  local def2 = speciesDefinition(gen2Data, mon.species)
+  local def1, species1 = destinationSpecies(def2, mon.species, gen1Data)
   local report = newReport()
   local level = levelOf(mon)
   local dvs = copyDVs(mon.dvs)
@@ -275,6 +344,15 @@ function Convert.toGen1(mon, gen2Data, gen1Data)
     }
   end
 
+  if replaced then
+    local was = {}
+    for _, mv in ipairs(before.moves or {}) do was[#was + 1] = mv.id end
+    local now = {}
+    for _, mv in ipairs(moves) do now[#now + 1] = mv.id end
+    entry(report.changed, "moves", "MOVES REPLACED WITH THE RECOMMENDED SET",
+      { from = was, to = now })
+  end
+
   local status = mon.status and Convert.STATUS_2TO1[mon.status] or nil
   if mon.status and status ~= mon.status then
     entry(report.changed, "status",
@@ -282,11 +360,11 @@ function Convert.toGen1(mon, gen2Data, gen1Data)
       { from = mon.status, to = status })
   end
 
+  local catchRate = Convert.catchRateFromHeldItem(mon.item, gen2Data) or 0
   if mon.item then
-    -- engine/link/link.asm:756, :1078 TimeCapsule_ReplaceTeruSama
-    entry(report.lost, "item",
-      ("HELD ITEM LOST: %s"):format(displayName(gen2Data and gen2Data.items,
-        mon.item)), { item = mon.item })
+    entry(report.changed, "item",
+      ("HELD ITEM KEPT AS CATCH RATE %d: %s"):format(catchRate, displayName(gen2Data and gen2Data.items,
+        mon.item)), { item = mon.item, to = catchRate })
   end
   if tonumber(mon.happiness) then
     entry(report.lost, "happiness", "FRIENDSHIP LOST",
@@ -301,14 +379,15 @@ function Convert.toGen1(mon, gen2Data, gen1Data)
   end
 
   local out = {
-    species = mon.species,
+    species = def1.id or species1,
     level = level,
     exp = exp,
     dvs = dvs,
     statExp = statExp,
     stats = stats,
     hp = hp,
-    catchRate = def1.catchRate,
+    -- engine/link/link.asm:823
+    catchRate = catchRate,
     status = status,
     moves = moves,
     nickname = mon.nickname,
@@ -321,14 +400,16 @@ end
 
 -- engine/link/time_capsule.asm:3 ValidateOTTrademon, :41 the type carve-out
 
-function Convert.validateArrival(mon, destData)
+function Convert.validateArrival(mon, destData, sourceData)
   if type(mon) ~= "table" then return false, "not_a_mon" end
-  local def = destData and destData.pokemon and destData.pokemon[mon.species]
+  local sourceDef = speciesDefinition(sourceData, mon.species)
+  if sourceData and not sourceDef then return false, "species_unknown" end
+  local def, species = destinationSpecies(sourceDef, mon.species, destData)
   if not def then return false, "species_unknown" end
   -- engine/link/time_capsule.asm:27
   local level = tonumber(mon.level)
   if not level or level < 1 or level > 100 then return false, "level" end
-  if Convert.TYPE_EXEMPT[mon.species] then return true end
+  if Convert.TYPE_EXEMPT[def.id or species] then return true end
   local claimed = mon.types
   if type(claimed) ~= "table" then return true end
   local want = def.types or {}
@@ -368,9 +449,9 @@ local function previewLines(mon, report, reason, info)
   return lines, true
 end
 
-local function convertOne(mon, toGen, fromData, toData)
+local function convertOne(mon, toGen, fromData, toData, opts)
   if toGen == 1 then
-    local out, second, info = Convert.toGen1(mon, fromData, toData)
+    local out, second, info = Convert.toGen1(mon, fromData, toData, opts)
     if out then return out, second end
     return nil, second, info or {}
   end
@@ -379,8 +460,8 @@ local function convertOne(mon, toGen, fromData, toData)
   return nil, second, { species = mon and mon.species }
 end
 
-function Convert.preview(mon, fromGen, toGen, fromData, toData)
-  local out, second, info = convertOne(mon, toGen, fromData, toData)
+function Convert.preview(mon, fromGen, toGen, fromData, toData, opts)
+  local out, second, info = convertOne(mon, toGen, fromData, toData, opts)
   if out then return previewLines(mon, second) end
   return previewLines(mon, nil, second, info)
 end

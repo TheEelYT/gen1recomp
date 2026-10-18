@@ -21,6 +21,7 @@
 -- itself at (0,0) from $46.
 
 local Chrome = require("src.ui.gen2.Chrome")
+local Buena = require("src.core.gen2.Buena")
 local FieldMoves = require("src.world.gen2.FieldMoves")
 local FlagNames = require("src.core.gen2.FlagNames")
 local GbcPalette = require("src.render.GbcPalette")
@@ -113,6 +114,7 @@ local RADIO_CHANNEL_SONGS = {
   POKE_FLUTE_RADIO = "Music_PokeFluteChannel",
   UNOWN_RADIO = "Music_RuinsOfAlphRadio",
   EVOLUTION_RADIO = "Music_LakeOfRageRocketRadio",
+  BUENAS_PASSWORD = "Music_BuenasPassword",
 }
 
 -- The station names LoadStation_* hands the tuner (the *Name labels at the
@@ -335,6 +337,7 @@ function Radio:tune(station)
   self.log = {}
   self.vars = {}
   self.music = nil
+  self.stationName = station == "BUENAS_PASSWORD" and "" or nil
 end
 
 -- StartRadioStation: on the first frame of a station only, clear the box and
@@ -385,7 +388,13 @@ function Radio:step()
   -- comparison is against the id, so mid-show segments (all $0a and up) never
   -- trigger it -- the takeover can only happen between shows.
   local id = RADIO_ID[self.cur]
-  if id and id < RADIO_ID.POKE_FLUTE_RADIO
+  local fluteId = RADIO_ID.POKE_FLUTE_RADIO
+  if self.data.crystal then
+    if self.cur == "BUENAS_PASSWORD" then id = 4
+    elseif id and id >= 4 then id = id + 1 end
+    fluteId = fluteId + 1
+  end
+  if id and id < fluteId
     and self.data.rocketsInRadioTower and self.data.inJohto then
     self.cur = "ROCKET_RADIO"
   end
@@ -819,6 +828,92 @@ for _, station in ipairs({ "POKE_FLUTE_RADIO", "UNOWN_RADIO",
   end
 end
 
+-- pokecrystal/engine/pokegear/radio.asm:1425
+local function buenaTime(R)
+  return (type(R.data.hour) == "function" and R.data.hour()
+    or R.data.hour or 0) >= 18
+end
+
+local function buenaLine(R, label, nextLine, word)
+  local body = R.data.buenaData and R.data.buenaData.text
+    and R.data.buenaData.text[label]
+  assert(type(body) == "string", "missing Crystal Buena radio text: " .. label)
+  body = CommonText.plain(body):gsub("^\n", "")
+  body = body:gsub("{STRBUF}", function() return word or "" end)
+  R:nextLine(body, nextLine)
+end
+
+local function clearBuena(R)
+  Buena.clearListening(R.data.buenaSave, R.data.buenaData)
+end
+
+RadioJumptable.BUENAS_PASSWORD = function(R)
+  if not buenaTime(R) then
+    R.cur = R.printed == 0 and "BUENAS_PASSWORD_20" or "BUENAS_PASSWORD_8"
+    RadioJumptable[R.cur](R)
+    return
+  end
+  R:startStation()
+  local metadata = Buena.metadata(R.data.buenaData)
+  R.stationName = metadata and metadata.stationName or ""
+  buenaLine(R, "_BuenaRadioText1", "BUENAS_PASSWORD_2")
+end
+
+RadioJumptable.BUENAS_PASSWORD_2 = function(R)
+  buenaLine(R, "_BuenaRadioText2", "BUENAS_PASSWORD_3")
+end
+
+for _, segment in ipairs({ 3, 7 }) do
+  RadioJumptable["BUENAS_PASSWORD_" .. segment] = function(R)
+    local nextLine = segment == 3 and "BUENAS_PASSWORD_4" or "BUENAS_PASSWORD"
+    if not buenaTime(R) then clearBuena(R); nextLine = "BUENAS_PASSWORD_8" end
+    buenaLine(R, "_BuenaRadioText" .. segment, nextLine)
+  end
+end
+
+RadioJumptable.BUENAS_PASSWORD_4 = function(R)
+  if not buenaTime(R) then
+    R.cur = "BUENAS_PASSWORD_8"
+    RadioJumptable[R.cur](R)
+    return
+  end
+  local word = Buena.broadcast(R.data.buenaSave, R.data.buenaData,
+    function(pick) return R:sample(pick) end)
+  if not word then return end
+  buenaLine(R, "_BuenaRadioText4", "BUENAS_PASSWORD_5", word)
+end
+
+for _, segment in ipairs({ 5, 6 }) do
+  RadioJumptable["BUENAS_PASSWORD_" .. segment] = function(R)
+    buenaLine(R, "_BuenaRadioText" .. segment, "BUENAS_PASSWORD_" .. (segment + 1))
+  end
+end
+
+RadioJumptable.BUENAS_PASSWORD_8 = function(R)
+  clearBuena(R)
+  buenaLine(R, "_BuenaRadioMidnightText10", "BUENAS_PASSWORD_9")
+end
+
+for segment = 9, 19 do
+  local line = segment <= 17 and segment - 8 or 10
+  RadioJumptable["BUENAS_PASSWORD_" .. segment] = function(R)
+    buenaLine(R, "_BuenaRadioMidnightText" .. line,
+      "BUENAS_PASSWORD_" .. (segment + 1))
+  end
+end
+
+RadioJumptable.BUENAS_PASSWORD_20 = function(R)
+  R.music, R.stationName, R.printed = false, "", 0
+  clearBuena(R)
+  buenaLine(R, "_BuenaOffTheAirText", "BUENAS_PASSWORD_21")
+end
+
+RadioJumptable.BUENAS_PASSWORD_21 = function(R)
+  R.cur, R.printed = "BUENAS_PASSWORD", 0
+  if buenaTime(R) then RadioJumptable.BUENAS_PASSWORD(R); return end
+  buenaLine(R, "_BuenaOffTheAirText", "BUENAS_PASSWORD_21")
+end
+
 -- ------------------------------------------------------------- the tuner
 --
 -- RadioChannels (engine/pokegear/pokegear.asm) is the dial: a tuning-knob
@@ -843,6 +938,10 @@ local RADIO_CHANNELS = {
     end },
   { knob = 32, frequency = "08.5", signal = function(ctx)
       return ctx.inJohto and "LUCKY_CHANNEL" or nil
+    end },
+  -- pokecrystal/engine/pokegear/pokegear.asm:1458
+  { knob = 40, frequency = "10.5", crystal = true, signal = function(ctx)
+      return ctx.crystal and ctx.inJohto and "BUENAS_PASSWORD" or nil
     end },
   -- .RuinsOfAlphRadio is a one-landmark station: the static only resolves
   -- standing in the Ruins of Alph themselves.
@@ -926,8 +1025,8 @@ function Pokegear.new(game, opts)
   self.cards = self:visibleCards()
   self.cardIndex = 1
   self.mode = "strip" -- strip | card
-  self.tuningKnob = game and game.radioTuningSave == self.save
-    and game.radioTuningKnob or 0
+  self.tuningKnob = (type(self.save) == "table" and tonumber(self.save.radioTuningKnob))
+    or (game and game.radioTuningSave == self.save and game.radioTuningKnob) or 0
   -- wPokegearPhoneCursorPosition / wPokegearPhoneScrollPosition, both of which
   -- are ZERO based on the cart: the cursor runs 0..PHONE_DISPLAY_HEIGHT - 1
   -- inside the visible window and the scroll runs 0..CONTACT_LIST_SIZE -
@@ -969,7 +1068,11 @@ function Pokegear.new(game, opts)
     -- FlyMap's defaults: the Johto map opens on JOHTO_FLYPOINT (New Bark
     -- Town) and the Kanto one on NUM_FLYPOINTS - 1 (Indigo Plateau), not on
     -- wherever the player is standing.
-    self.flyIndex = (self:region() == "kanto") and #self.fly or 1
+    self.flyRegion = opts.flyRegion
+      or ((self:region() == "kanto"
+        and FieldMoves.hasVisitedSpawn(self.save, "SPAWN_INDIGO"))
+        and "kanto" or "johto")
+    self.flyIndex = (self.flyRegion == "kanto") and #self.fly or 1
   end
 
   -- _TownMap (../pokecrystal/engine/pokegear/pokegear.asm:1757): the same map,
@@ -1264,6 +1367,7 @@ function Pokegear:radioContext()
   local flags = self:flags()
   local world = self.game and self.game.world
   return {
+    crystal = save.version == "crystal",
     inJohto = self:region() == "johto",
     landmark = self.currentLandmark,
     -- wTimeOfDay: MORN is 0, which is the only value that swaps Oak's
@@ -1291,6 +1395,10 @@ function Pokegear:stationName(station)
     local record = rows[station]
     return record and record.name or nil
   end
+  if station == "BUENAS_PASSWORD" then
+    local metadata = Buena.metadata(data)
+    return metadata and metadata.stationName
+  end
   return STATION_NAMES[station]
 end
 
@@ -1299,12 +1407,14 @@ end
 function Pokegear:stations()
   local ctx = self:radioContext()
   local out = {}
-  for index, row in ipairs(RADIO_CHANNELS) do
-    local station = row.signal(ctx)
-    out[index] = {
-      knob = row.knob, frequency = row.frequency, station = station,
-      name = self:stationName(station),
-    }
+  for _, row in ipairs(RADIO_CHANNELS) do
+    if not row.crystal or ctx.crystal then
+      local station = row.signal(ctx)
+      out[#out + 1] = {
+        knob = row.knob, frequency = row.frequency, station = station,
+        name = self:stationName(station),
+      }
+    end
   end
   return out
 end
@@ -1325,6 +1435,7 @@ function Pokegear:tuneRadio()
     self.game.radioTuningKnob = self.tuningKnob
     self.game.radioTuningSave = self.save
   end
+  if type(self.save) == "table" then self.save.radioTuningKnob = self.tuningKnob end
   local row = self:currentStation()
   local station = row and row.station
   self.radioTuned = true
@@ -1376,11 +1487,16 @@ end
 
 function Pokegear:playRadioMusic()
   local song = self.radio and self.radio.music
-  if not song or song == self.radioSong then return end
+  if song == nil or song == self.radioSong then return end
   self.radioSong = song
   self.radioMusicPlaying = Pokegear.radioPlayingValue(song)
   local data = self.game and self.game.data
   if not data then return end
+  if song == false then
+    self.radioMusicPlaying = "enterMap"
+    pcall(require("src.core.Music").stop)
+    return
+  end
   pcall(require("src.core.Music").play, data, song)
 end
 
@@ -1394,6 +1510,9 @@ function Pokegear:radioData()
   local data = (self.game and self.game.data) or {}
   local save = self.save or {}
   local out = { inJohto = self:region() == "johto" }
+  out.crystal = save.version == "crystal"
+  out.buenaData, out.buenaSave = data, save
+  out.hour = function() return self:clockParts() end
 
   -- Landmarks by index, which is how GetLandmarkName and GetWorldMapLocation
   -- both address them.
@@ -1919,6 +2038,10 @@ end
 local SPACE_TILE = 0x7f
 
 function Pokegear:tile(id, tx, ty)
+  -- A flat cell draws under the caller's shader, not a batched tile palette.
+  if (id == SPACE_TILE or id == BLANK_TILE) and self.sheet then
+    self.sheet:suspend()
+  end
   if id == SPACE_TILE then
     local paper = self:paperColor()
     local G = love.graphics
@@ -1938,8 +2061,7 @@ function Pokegear:tile(id, tx, ty)
   if self.sheet then self.sheet:draw(id, tx, ty) end
 end
 
-function Pokegear:drawTilemap(cells)
-  if not cells then return end
+local function drawTilemapCells(self, cells)
   for index = 1, SCREEN_W * SCREEN_H do
     local tile = cells[index]
     if tile then
@@ -1947,6 +2069,18 @@ function Pokegear:drawTilemap(cells)
         math.floor((index - 1) / SCREEN_W))
     end
   end
+end
+
+-- 360 cells a frame: batched so the palette shader is set once per run of
+-- same-palette tiles rather than once per tile (TileSheet:begin).
+function Pokegear:drawTilemap(cells)
+  if not cells then return end
+  local sheet = self.sheet
+  if not sheet then return drawTilemapCells(self, cells) end
+  sheet:begin()
+  local ok, err = pcall(drawTilemapCells, self, cells)
+  sheet:finish()
+  if not ok then error(err, 0) end
 end
 
 -- Pokegear_FinishTilemap.
@@ -2178,6 +2312,7 @@ function Pokegear:drawMap()
   -- PokegearMap_CheckRegion); the name box follows the CURSOR, which the
   -- d-pad may have walked somewhere else entirely.
   local region = self:region()
+  if self.fly and self.flyRegion then region = self.flyRegion end
   local current = self:mapLandmark()
   self:drawTilemap(self.gfx and self.gfx.maps and self.gfx.maps[region])
   local G = love.graphics
@@ -2217,6 +2352,8 @@ function Pokegear:drawMap()
   -- landmark macro stores x + 8 / y + 16, which is OAM space; the extractor
   -- already took the offsets back off, so these coordinates are screen ones.
   local player = self:playerLandmark()
+  -- engine/pokegear/pokegear.asm:2264
+  if self.fly and region ~= self:region() then player = nil end
   if player and player.x and player.y then
     if not self:drawPlayerIcon(player.x, player.y) then
       G.setColor(0, 0, 0, 1)
@@ -2356,7 +2493,8 @@ function Pokegear:drawRadio()
   local station = self:currentStation()
   -- UpdateRadioStation prints the tuned channel's name at (2,9).  Dead air
   -- prints nothing: NoRadioStation clears the box and leaves it clear.
-  self:text(station and station.name or "", 2, 9)
+  self:text(self.radio and self.radio.stationName
+    or (station and station.name) or "", 2, 9)
   -- The show owns the bottom text box's two lines.  PrintRadioLine fills them
   -- from the top the first time round and CopyBottomLineToTopLine scrolls
   -- afterwards, so `top` is always the line before `bottom`.
@@ -2384,9 +2522,7 @@ function Pokegear:drawPhone()
   -- A call in progress replaces the prompt with what the caller is saying;
   -- otherwise the box holds PokegearAskWhoCallText the whole time.
   if self.call then
-    local lines = Chrome.wrap(self.call.text
-      or self:phoneText("GearEllipse"), 18)
-    for i = 1, math.min(#lines, 3) do self:text(lines[i], 1, 13 + i) end
+    self:printBoxText(self.call.text or self:phoneText("GearEllipse"))
   else
     self:printBoxText(self:phoneText("AskWhoCall"))
   end
@@ -2473,7 +2609,7 @@ function Pokegear:drawPlain()
     Chrome.box(0, 4, 20, 14)
     local row = self:currentStation()
     Chrome.print(row.frequency, 2, 6)
-    Chrome.print(row.name or "", 2, 9)
+    Chrome.print(self.radio and self.radio.stationName or row.name or "", 2, 9)
     Chrome.textbox(0, 12, 18, 4)
     if row.station and self.radio then
       Chrome.print(self.radio.top or "", 1, 14)
@@ -2493,8 +2629,8 @@ function Pokegear:drawPlain()
     end
     Chrome.cursor(1, 4 + self.phoneCursor * 2)
     Chrome.textbox(0, 12, 18, 4)
-    Chrome.printWrapped(self.call and (self.call.text or "")
-      or self:phoneText("AskWhoCall"), 1, 14, 18, 3)
+    self:printBoxText(self.call and (self.call.text or "")
+      or self:phoneText("AskWhoCall"))
     self:drawPhoneSubmenu()
   else
     Chrome.box(0, 4, 20, 14)
@@ -2540,7 +2676,7 @@ function Pokegear:drawPanel()
   if Pokegear.CUSTOM_RAMP_FILM and GbcPalette.customRamp
       and GbcPalette.available() then
     if not self.filmCanvas then
-      self.filmCanvas = G.newCanvas(SCREEN_W * 8, SCREEN_H * 8)
+      self.filmCanvas = require("src.render.PixelCanvas").new(SCREEN_W * 8, SCREEN_H * 8)
       self.filmCanvas:setFilter("nearest", "nearest")
     end
     local previousCanvas = G.getCanvas()

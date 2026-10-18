@@ -1,3 +1,9 @@
+local function lazyReq(name)
+  local m = package.loaded[name]
+  if type(m) == "table" then return m end
+  return require(name)
+end
+
 local VoidFill = {}
 
 VoidFill.MODES = { "map", "trees", "water", "black" }
@@ -37,20 +43,62 @@ function VoidFill.label(mode)
 end
 
 function VoidFill.invalidate()
+  VoidFill._revision = (VoidFill._revision or 0) + 1
   VoidFill._borders = {}
   local FieldView = package.loaded["src.core.game3.field_view"]
   if FieldView then FieldView._nativeDirty = true end
 end
 
-VoidFill.PRIMARY = "general"
--- pokefirered/include/fieldmap.h:8
-VoidFill.PRIMARY_MIDS = 640
-VoidFill.SOURCES = { trees = "FR_PALLET_TOWN", water = "FR_CINNABAR_ISLAND" }
+VoidFill.FAMILY = {
+  frlg = { primary = "general", sources = { trees = "FR_PALLET_TOWN", water = "FR_CINNABAR_ISLAND" } },
+  rse = { primary = "general", sources = { trees = "EM_LITTLEROOT_TOWN", water = "EM_ROUTE105" } },
+}
 VoidFill._borders = {}
+
+local function family()
+  local ok, Family = pcall(lazyReq, "src.import.gba.family")
+  return ok and Family.active() or nil
+end
+
+local function config()
+  local F = family()
+  local name = F and F.name or "frlg"
+  local row = VoidFill.FAMILY[name] or VoidFill.FAMILY.frlg
+  local okP, Profile = pcall(lazyReq, "src.core.game3.profile")
+  local okR, prof = false, nil
+  if okP and F then okR, prof = pcall(Profile.of, F.game) end
+  local over = okR and type(prof) == "table" and type(prof.map) == "table" and prof.map.voidFill or nil
+  return name, over or row, F
+end
+
+-- pokefirered/include/fieldmap.h:8, pokeemerald/include/fieldmap.h:4
+local DYNAMIC = {
+  PRIMARY = function() local _, c = config(); return c.primary end,
+  PRIMARY_MIDS = function() local _, _, F = config(); return F and F.numPrimaryMetatiles or 640 end,
+  SOURCES = function() local _, c = config(); return c.sources end,
+}
+
+setmetatable(VoidFill, {
+  __index = function(_, k)
+    local fn = DYNAMIC[k]
+    if fn then return fn() end
+    return nil
+  end,
+})
+
+local function bordersFor()
+  local name = config()
+  local b = VoidFill._borders[name]
+  if not b then
+    b = {}
+    VoidFill._borders[name] = b
+  end
+  return b
+end
 
 function VoidFill.primaryFor(pair)
   if type(pair) ~= "string" then return nil end
-  local okV, Versions = pcall(require, "src.import.gba.versions")
+  local okV, Versions = pcall(lazyReq, "src.import.gba.versions")
   local spec = okV and Versions and Versions.TILESET_PAIRS and Versions.TILESET_PAIRS[pair]
   if spec and spec.primary then return spec.primary end
   return pair:match("^(.-)__")
@@ -83,12 +131,13 @@ function VoidFill.borderFor(mode)
   mode = VoidFill.normalize(mode)
   local mapId = VoidFill.SOURCES[mode]
   if not mapId then return nil end
-  local b = VoidFill._borders[mode]
+  local cache = bordersFor()
+  local b = cache[mode]
   if b ~= nil then return b or nil end
   local layout, pending = VoidFill.layoutFor(mapId)
   if pending then return nil end
   b = VoidFill.borderFromLayout(layout)
-  VoidFill._borders[mode] = b or false
+  cache[mode] = b or false
   return b
 end
 

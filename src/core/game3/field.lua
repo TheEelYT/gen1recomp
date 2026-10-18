@@ -1,16 +1,73 @@
 -- Game3 field loop coordinator (scripts, player input, heal/respawn).
 
+local function lazyReq(name)
+  local m = package.loaded[name]
+  if type(m) == "table" then return m end
+  return require(name)
+end
+
 local Player = require("src.core.game3.player")
 local ModRuntime = require("src.mods.Runtime")
 local RomText = require("src.core.game3.rom_text")
 
 local Field = {}
 
+local _locks = {}
+Field._locks = _locks
+
+function Field.isLocked()
+  if not Field._locks then return false end
+  return next(Field._locks) ~= nil
+end
+
+function Field.lock(tag)
+  tag = tag or "default"
+  Field._locks = Field._locks or {}
+  Field._locks[tag] = true
+end
+
+function Field.unlock(tag)
+  if Field._flyLanding then return end
+  -- pokefirered/src/field_effect.c:1274 FallWarpEffect_7
+  if Field._fallWarp then return end
+  -- pokefirered/src/field_effect.c:2532 TeleportInFieldEffectTask3
+  if Field._fieldCallback then return end
+  -- pokefirered/src/map_preview_screen.c:439
+  local MapPreviewScreen = package.loaded["src.ui.game3.map_preview_screen"]
+  if MapPreviewScreen and MapPreviewScreen.isForestActive() then return end
+
+  Field._locks = Field._locks or {}
+  if tag then
+    Field._locks[tag] = nil
+  else
+    Field._locks["default"] = nil
+  end
+end
+
+setmetatable(Field, {
+  __index = function(t, k)
+    if k == "locked" then
+      return Field.isLocked()
+    end
+    return rawget(t, k)
+  end,
+  __newindex = function(t, k, v)
+    if k == "locked" then
+      if v then
+        Field.lock("default")
+      else
+        Field.unlock("default")
+      end
+      return
+    end
+    rawset(t, k, v)
+  end,
+})
+
 Field.running = false
 Field._mod = nil
 Field._game = nil
 Field._session = nil
-Field.locked = false
 Field.weather = 0
 Field.metatileOverrides = {}
 Field._overrideLayouts = {}
@@ -35,21 +92,34 @@ function Field.metatileOverrideAt(mapId, x, y)
   return bucket and bucket[y * 1024 + x] or nil
 end
 
+Field._holdInput = false
+
+function Field.holdInput(on)
+  Field._holdInput = on == true
+end
+
 function Field.start(mod, game, session)
   if session and session._continueWarpDeferred then
-    require("src.core.game3.save_schema_firered").useContinueGameWarp(session)
+    lazyReq("src.core.game3.save_schema_firered").useContinueGameWarp(session)
   end
   Field._mod = mod
   Field._game = game
   Field._session = session
   Field.running = true
-  Field.locked = false
+  Field._locks = {}
   Field.weather = 0
   Field._waterfall = nil
   Field._fishing = nil
   Field._flyLanding = nil
   Field._fieldCallback = false
+  Field._holdInput = false
   if Player then Player.fishing = false end
+  local Dive = lazyReq("src.core.game3.dive")
+  Dive.reset()
+  if Dive.enabled(session) then
+    Dive.install()
+    Field.installRseFieldEffects()
+  end
   -- pokefirered/src/overworld.c:345
   Field._tempFlagMap = session and session.map
   Field.clearMetatiles()
@@ -68,8 +138,8 @@ function Field.start(mod, game, session)
   local mapId = session and session.map
   local data = game and game.data and game.data.maps
   local def = mapId and data and data[mapId]
-  local Collision = require("src.core.game3.collision")
-  local Objects = require("src.core.game3.objects")
+  local Collision = lazyReq("src.core.game3.collision")
+  local Objects = lazyReq("src.core.game3.objects")
   if def then
     Collision.bindMap(game, mapId, def)
     Objects.loadMap(game, mapId, def)
@@ -77,10 +147,12 @@ function Field.start(mod, game, session)
 end
 
 function Field.stop()
-  require("src.world.game3.Follower").reset()
+  local Stream = package.loaded["src.core.game3.asset_stream"]
+  if Stream then Stream.cancelPending() end
+  lazyReq("src.world.game3.Follower").reset()
   Field.running = false
   Field._session = nil
-  Field.locked = false
+  Field._locks = {}
   Field._waterfall = nil
   Field._fishing = nil
   Field._flyLanding = nil
@@ -106,7 +178,7 @@ function Field.update(_dt)
   if Compat and Compat.worldTick then Compat.worldTick(_dt) end
 
   -- pokefirered/src/field_tasks.c:66
-  require("src.core.game3.forced_movement").runStepCallback(game)
+  lazyReq("src.core.game3.forced_movement").runStepCallback(game)
 
   local Space = package.loaded["src.core.game3.scripting.space"]
   if Space and Space.vm then
@@ -122,7 +194,7 @@ function Field.update(_dt)
         local claiming = Space._pendingOnFrame
         Space._pendingOnFrame = false
         Space._deferOnFrameForFade = false
-        if claiming or not Field.locked then
+        if claiming or not Field.isLocked() then
           Space.runOnFrame()
           -- pokefirered/src/script.c:463 TryRunOnFrameMapScript
           if claiming and not Space.vm:isRunning() then
@@ -135,13 +207,18 @@ function Field.update(_dt)
 
   local PcAnim = package.loaded["src.core.game3.pc_anim"]
   if PcAnim then PcAnim.update() end
+  Field.runFrameTasks()
+  lazyReq("src.core.game3.ambient_cry").tick(Field, Space, Field._session)
 
   -- Game3 owns locomotion + EventObjects (host World:step is paused).
-  local Objects = require("src.core.game3.objects")
+  local Objects = lazyReq("src.core.game3.objects")
   Objects.update(game)
-  local Ghosts = require("src.core.game3.ghosts")
+  local Ghosts = lazyReq("src.core.game3.ghosts")
   Ghosts.sync()
   Ghosts.update(game)
+  -- Prepare nearby assets on a worker; share a main-thread texture budget.
+  local MapMod = package.loaded["src.core.game3.map"]
+  if MapMod and MapMod.stepWarm then MapMod.stepWarm(game) end
 
   Field.pollMapChange(game)
   -- pokefirered/src/safari_zone.c:60 CB2_EndSafariBattle
@@ -150,64 +227,67 @@ function Field.update(_dt)
   local input = game and game.input
   -- pokefirered/src/field_control_avatar.c:98
   local walkInput = input
-  if Field.forcedMovementPending() then walkInput = nil end
+  if Field.forcedMovementPending() or Field._holdInput then walkInput = nil end
+  -- pokeemerald/src/overworld.c:911
+  lazyReq("src.core.game3.dive").syncAvatar()
   -- pokefirered/src/overworld.c:1402
   local NativesEvents = package.loaded["src.core.game3.scripting.natives_events"]
   if NativesEvents and NativesEvents.pollWalkaway then
     NativesEvents.pollWalkaway(Space and Space.vm, input)
   end
+  lazyReq("src.core.game3.field_effects").stepSurfBob()
   Player.update(game, walkInput)
-  require("src.world.game3.Follower").update(game)
+  lazyReq("src.world.game3.Follower").update(game)
   Field.updateWaterfall(game)
   -- pokefirered/src/field_player_avatar.c:1691
   Field.updateFishing()
 
-  local Hud = require("src.ui.game3.hud")
+  local Hud = lazyReq("src.ui.game3.hud")
   local Runtime = package.loaded["src.core.game3.runtime"]
-    or require("src.core.game3.runtime")
+    or lazyReq("src.core.game3.runtime")
   local Message = package.loaded["src.ui.game3.message"]
 
-  -- A-button talk / signs / PC — owned here (host pollInput is no-op on Sevii).
+  -- A-button talk / signs / PC, owned here (host pollInput is no-op on Sevii).
   -- START / pause menu is owned by Hud.update (avoids same-frame open+close).
   if input and input.wasPressed and input:wasPressed("a") then
     if not Hud.busy() then
       Field.interact(game)
     end
   end
+  -- pokeemerald/src/field_control_avatar.c:153
+  if input and input.wasPressed and input:wasPressed("b") and not Hud.busy() then
+    lazyReq("src.core.game3.dive").tryEmerge()
+  end
 
   -- Pret General tileset anims (water / flower / sand edge).
-  local okA, TilesetAnim = pcall(require, "src.core.game3.tileset_anim")
+  local okA, TilesetAnim = pcall(lazyReq, "src.core.game3.tileset_anim")
   if okA and TilesetAnim and TilesetAnim.step then
     TilesetAnim.step()
   end
 
-  local okFx, FieldEffects = pcall(require, "src.core.game3.field_effects")
+  local okFx, FieldEffects = pcall(lazyReq, "src.core.game3.field_effects")
   if okFx and FieldEffects and FieldEffects.step then
     FieldEffects.step()
   end
 
-  local okD, Doors = pcall(require, "src.core.game3.doors")
+  local okD, Doors = pcall(lazyReq, "src.core.game3.doors")
   if okD and Doors and Doors.update then
     Doors.update()
   end
 
-  local okS, SpecialAnim = pcall(require, "src.core.game3.special_field_anim")
+  local okS, SpecialAnim = pcall(lazyReq, "src.core.game3.special_field_anim")
   if okS and SpecialAnim and SpecialAnim.update then
     SpecialAnim.update()
   end
 
-  local okStep, StepEvents = pcall(require, "src.core.game3.step_events")
+  local okStep, StepEvents = pcall(lazyReq, "src.core.game3.step_events")
   if okStep and StepEvents and StepEvents.update then
     StepEvents.update(_dt, game)
   end
 
   if Message and Message.tick then Message.tick() end
   Field.pollObtainSequence()
-  require("src.core.game3.itemfinder").update()
-end
-
-function Field.lock()
-  Field.locked = true
+  lazyReq("src.core.game3.itemfinder").update()
 end
 
 -- pokefirered/src/field_effect.c:1104 FieldCallback_FlyIntoMap
@@ -220,19 +300,14 @@ Field._fallWarp = false
 Field._fieldCallback = false
 
 function Field.callbackPending()
-  return (Field._fieldCallback or Field._flyLanding or Field._fallWarp) and true or false
-end
-
-function Field.unlock()
-  if Field._flyLanding then return end
-  -- pokefirered/src/field_effect.c:1274 FallWarpEffect_7
-  if Field._fallWarp then return end
-  -- pokefirered/src/field_effect.c:2532 TeleportInFieldEffectTask3
-  if Field._fieldCallback then return end
-  -- pokefirered/src/map_preview_screen.c:439
-  local MapPreviewScreen = package.loaded["src.ui.game3.map_preview_screen"]
-  if MapPreviewScreen and MapPreviewScreen.isForestActive() then return end
-  Field.locked = false
+  if Field._fieldCallback or Field._flyLanding or Field._fallWarp then return true end
+  local mapBlock = Field._session and lazyReq("src.core.game3.profile").forSession(Field._session).map
+  if mapBlock and mapBlock.onFrameAfterWarpExit then
+    local Warp = package.loaded["src.core.game3.warp"]
+    -- pokeemerald/src/field_screen_effect.c:317
+    if Warp and Warp.isBusy() then return true end
+  end
+  return false
 end
 
 local DELTA = { up = { 0, -1 }, down = { 0, 1 }, left = { -1, 0 }, right = { 1, 0 } }
@@ -244,8 +319,8 @@ end
 
 --- Object cell for talk (pret CheckFacingObject): double past COLL_COUNTER desks.
 local function facing_object_cell(fx, fy, facing)
-  local Collision = require("src.core.game3.collision")
-  local CollisionStd = require("src.core.game3.scripting.collision_std")
+  local Collision = lazyReq("src.core.game3.collision")
+  local CollisionStd = lazyReq("src.core.game3.scripting.collision_std")
   local coll = Collision.cell and Collision.cell(fx, fy)
   if CollisionStd.isCounter(coll) then
     local d = DELTA[facing or "down"] or DELTA.down
@@ -271,7 +346,7 @@ end
 local function bg_event_at(game, fx, fy, elevation, facingDir)
   local events = get_map_bg_events(game)
   for _, ev in ipairs(events) do
-    if ev.scriptKey and require("src.core.game3.scripting.interaction_scripts").backgroundMatches(ev,fx,fy,elevation,facingDir) then
+    if ev.scriptKey and lazyReq("src.core.game3.scripting.interaction_scripts").backgroundMatches(ev,fx,fy,elevation,facingDir) then
       return ev
     end
   end
@@ -291,7 +366,7 @@ end
 local function hidden_item_at(game, x, y, elevation)
   local session = Field._session
   local events = get_map_bg_events(game)
-  local Flags = require("src.core.game3.scripting.flags")
+  local Flags = lazyReq("src.core.game3.scripting.flags")
   local store = hidden_item_store(session)
   for _, ev in ipairs(events) do
     if (ev.type == "hidden_item" or ev.kind == 7) and ev.x == x and ev.y == y then
@@ -315,7 +390,7 @@ local POCKET_STDSTRING = {
 }
 
 local function std_string(id)
-  return require("src.core.game3.scripting.adapters").stdString(id)
+  return lazyReq("src.core.game3.scripting.adapters").stdString(id)
 end
 
 local function player_name(session)
@@ -326,7 +401,7 @@ Field._obtainSeq = nil
 
 -- pokefirered/data/scripts/obtain_item.inc:170
 local function message_then_after_fanfare(first, second, delay)
-  local Message = require("src.ui.game3.message")
+  local Message = lazyReq("src.ui.game3.message")
   Message.showStay(first, { session = Field._session })
   Field._obtainSeq = { second = second, delay = delay or 0 }
 end
@@ -360,7 +435,7 @@ local function set_hidden_item_flag(game, hidden)
   local store, Space = hidden_item_store(session)
   local flag = hidden_flag(hidden)
   if flag and store then
-    require("src.core.game3.scripting.flags").setFlag(store, nil, flag, true)
+    lazyReq("src.core.game3.scripting.flags").setFlag(store, nil, flag, true)
     if Space then Space.persistSession(nil, game or Field._game) end
   end
 end
@@ -368,11 +443,11 @@ end
 -- pokefirered/data/scripts/obtain_item.inc:197
 local function pick_up_hidden_coins(game, hidden, qty)
   local session = Field._session
-  local Bag = require("src.core.game3.bag")
-  local Flags = require("src.core.game3.scripting.flags")
-  local Corner = require("src.core.game3.scripting.natives_corner")
-  local Message = require("src.ui.game3.message")
-  local Audio = require("src.core.game3.audio")
+  local Bag = lazyReq("src.core.game3.bag")
+  local Flags = lazyReq("src.core.game3.scripting.flags")
+  local Corner = lazyReq("src.core.game3.scripting.natives_corner")
+  local Message = lazyReq("src.ui.game3.message")
+  local Audio = lazyReq("src.core.game3.audio")
   local store = hidden_item_store(session)
   local ctx = { playerName = player_name(session), stringVars = { tostring(qty), std_string(STDSTRING_COINS) } }
   local found = RomText.box("Text_FoundXCoins", ctx)
@@ -389,7 +464,7 @@ local function pick_up_hidden_coins(game, hidden, qty)
   end
   Bag.Coins.add(session, qty)
   set_hidden_item_flag(game, hidden)
-  Audio.playFanfare(257)
+  Audio.playFanfare("MUS_LEVEL_UP")
   message_then_after_fanfare(found, RomText.box("Text_PutCoinsAwayInCoinCase", ctx))
   return true
 end
@@ -397,11 +472,11 @@ end
 -- pokefirered/data/scripts/obtain_item.inc:158
 local function pick_up_hidden_item(game, hidden, qty, foundKey, delay)
   local session = Field._session
-  local Bag = require("src.core.game3.bag")
-  local Items = require("src.core.game3.items")
-  local ItemsData = require("src.core.game3.items_data")
-  local Message = require("src.ui.game3.message")
-  local Audio = require("src.core.game3.audio")
+  local Bag = lazyReq("src.core.game3.bag")
+  local Items = lazyReq("src.core.game3.items")
+  local ItemsData = lazyReq("src.core.game3.items_data")
+  local Message = lazyReq("src.ui.game3.message")
+  local Audio = lazyReq("src.core.game3.audio")
   local itemId = hidden.item
   local ctx = { playerName = player_name(session), stringVars = { "", Items.displayName(itemId) } }
   local found = RomText.box(foundKey, ctx)
@@ -414,7 +489,7 @@ local function pick_up_hidden_item(game, hidden, qty, foundKey, delay)
   end
   set_hidden_item_flag(game, hidden)
   -- pokefirered/data/scripts/obtain_item.inc:27
-  Audio.playFanfare(257)
+  Audio.playFanfare("MUS_LEVEL_UP")
   ctx.stringVars[3] = std_string(POCKET_STDSTRING[ItemsData.pocketOf(itemId)] or POCKET_STDSTRING.ITEMS)
   message_then_after_fanfare(found, RomText.box("Text_PutItemAway", ctx), delay)
   return true
@@ -424,13 +499,21 @@ end
 function Field.pickUpHiddenItem(game, hidden)
   if not hidden then return false end
   local session = Field._session
-  local Flags = require("src.core.game3.scripting.flags")
+  local Flags = lazyReq("src.core.game3.scripting.flags")
   local store = hidden_item_store(session)
   local flag = hidden_flag(hidden)
   if flag and Flags.getFlag(store, nil, flag) then
     return false
   end
   local qty = hidden.quantity or 1
+  if lazyReq("src.core.game3.profile").family(session) == "rse" then
+    -- pokeemerald/src/field_control_avatar.c:348
+    local Space = package.loaded["src.core.game3.scripting.space"]
+    local key = Space and Space.vm and Space.scriptKey("EventScript_HiddenItemScript")
+    if not key then return false end
+    Space.vm._presetSpecial = { [0x8004] = flag, [0x8005] = tonumber(hidden.item) or 0 }
+    return Space.startScript(key) == true
+  end
   if (tonumber(hidden.item) or 0) == 0 then
     return pick_up_hidden_coins(game, hidden, qty)
   end
@@ -439,8 +522,13 @@ end
 
 -- pokefirered/data/scripts/itemfinder.inc:1
 function Field.digUpUnderfootItem(game, hidden)
+  if lazyReq("src.core.game3.profile").family(Field._session) == "rse" then
+    -- pokeemerald/src/item_use.c:597
+    lazyReq("src.ui.game3.message").close()
+    return false
+  end
   if not hidden then return false end
-  local Flags = require("src.core.game3.scripting.flags")
+  local Flags = lazyReq("src.core.game3.scripting.flags")
   local flag = hidden_flag(hidden)
   if flag and Flags.getFlag(hidden_item_store(Field._session), nil, flag) then
     return false
@@ -457,10 +545,10 @@ function Field.useItemfinder(session, showOWMessage)
   local py = (session and (session.playerY or session.y)) or (P and (P.cellY or P.y)) or 0
   local game = Field._game
   local mapId = session and session.map
-  local Flags = require("src.core.game3.scripting.flags")
-  local Message = require("src.ui.game3.message")
-  local Itemfinder = require("src.core.game3.itemfinder")
-  local Map = require("src.core.game3.map")
+  local Flags = lazyReq("src.core.game3.scripting.flags")
+  local Message = lazyReq("src.ui.game3.message")
+  local Itemfinder = lazyReq("src.core.game3.itemfinder")
+  local Map = lazyReq("src.core.game3.map")
   local store = hidden_item_store(session)
   local layout = mapId and Map.ensureMidLayout(game, mapId)
   local result = Itemfinder.scan({
@@ -479,14 +567,14 @@ function Field.useItemfinder(session, showOWMessage)
   })
 
   if not result then
-    local text = RomText.box("gText_NopeTheresNoResponse")
+    local text = RomText.box(Itemfinder.textKey("nothing", session))
     if showOWMessage then
       -- pokefirered/src/itemfinder.c:150
       Message.show(text, { session = session, done = function() Message.close() end })
     end
     return false, "itemfinder", text, nil
   end
-  local key = result.underfoot and "gText_ItemfinderShakingWildly" or "gText_ItemfinderResponding"
+  local key = Itemfinder.textKey(result.underfoot and "onTop" or "nearby", session)
   local text = RomText.box(key)
   if showOWMessage then
     Field.lock()
@@ -519,7 +607,7 @@ function Field.tryCoordEvents(game, cx, cy)
   if Field.locked then return false end
 
   local Space = package.loaded["src.core.game3.scripting.space"]
-    or require("src.core.game3.scripting.space")
+    or lazyReq("src.core.game3.scripting.space")
   if not Space.active or not Space.startScript then return false end
   if Space.vm and Space.vm.isRunning and Space.vm:isRunning() then
     return false
@@ -536,16 +624,23 @@ function Field.tryCoordEvents(game, cx, cy)
   end
   if type(events) ~= "table" then return false end
 
-  local Flags = require("src.core.game3.scripting.flags")
-  local Ctx = require("src.core.game3.scripting.ctx")
+  local Flags = lazyReq("src.core.game3.scripting.flags")
+  local Ctx = lazyReq("src.core.game3.scripting.ctx")
   local store = Space.store
   local ctx = (Space.vm and Space.vm.ctx) or Ctx.new()
 
-  local P = require("src.core.game3.player")
+  local P = lazyReq("src.core.game3.player")
   local DIR_BY_FACING = { down = 1, up = 2, left = 3, right = 4 }
   local facingDir = DIR_BY_FACING[P.facing] or 1
 
+  local CoordWeather = lazyReq("src.core.game3.coord_weather")
+  local elevation = tonumber(P.currentElevation or P.elevation) or 0
   for _, ev in ipairs(events) do
+    -- pokeemerald/src/field_control_avatar.c:883
+    if ev.x == cx and ev.y == cy and CoordWeather.isWeatherEvent(ev)
+        and ((tonumber(ev.elevation) or 0) == 0 or tonumber(ev.elevation) == elevation) then
+      CoordWeather.run(ev.var)
+    end
     if ev.x == cx and ev.y == cy and ev.scriptKey then
       local var = tonumber(ev.var)
       if var then
@@ -554,10 +649,12 @@ function Field.tryCoordEvents(game, cx, cy)
         if cur ~= want then
           -- not this trigger
         else
+          lazyReq("src.core.game3.link.link_players").forceSeatFacing(cx, cy)
           Space.startScript(ev.scriptKey, nil, facingDir)
           return true
         end
       else
+        lazyReq("src.core.game3.link.link_players").forceSeatFacing(cx, cy)
         Space.startScript(ev.scriptKey, nil, facingDir)
         return true
       end
@@ -573,7 +670,7 @@ local MB_FALL_WARP = 0x66
 
 local function boulderCell(game, cx, cy)
   local Collision = package.loaded["src.core.game3.collision"]
-    or require("src.core.game3.collision")
+    or lazyReq("src.core.game3.collision")
   local beh = Collision.behavior and Collision.behavior(cx, cy)
   return beh, Collision
 end
@@ -591,13 +688,13 @@ local function boulderFallThroughHole(game, obj, cx, cy)
   if not hole then return false end
 
   pcall(function()
-    local Audio = require("src.core.game3.audio")
-    local SE = require("src.core.game3.se_ids")
+    local Audio = lazyReq("src.core.game3.audio")
+    local SE = lazyReq("src.core.game3.se_ids")
     if Audio.playSe and SE.SE_FALL then Audio.playSe(SE.SE_FALL) end
   end)
 
   -- pokefirered/src/event_object_movement.c:1520 RemoveObjectEventByLocalIdAndMap
-  require("src.core.game3.objects").removeObject(
+  lazyReq("src.core.game3.objects").removeObject(
     obj.localId or (obj.def and (obj.def.localId or obj.def.index)))
   obj.moving = false
 
@@ -607,7 +704,7 @@ local function boulderFallThroughHole(game, obj, cx, cy)
   if reveal > 0 and reveal ~= 0xFFFF then
     local Space = package.loaded["src.core.game3.scripting.space"]
     if Space and Space.store then
-      local Flags = require("src.core.game3.scripting.flags")
+      local Flags = lazyReq("src.core.game3.scripting.flags")
       Flags.setFlag(Space.store, Space.vm and Space.vm.ctx or nil, reveal, false)
     end
     local Objects = package.loaded["src.core.game3.objects"]
@@ -631,7 +728,7 @@ local function boulderActivateVictoryRoadSwitch(game, cx, cy)
   if not button then return false end
 
   local Space = package.loaded["src.core.game3.scripting.space"]
-    or require("src.core.game3.scripting.space")
+    or lazyReq("src.core.game3.scripting.space")
   if not Space.active or not Space.startScript then return false end
   if Space.vm and Space.vm.isRunning and Space.vm:isRunning() then return false end
 
@@ -646,7 +743,7 @@ local function boulderActivateVictoryRoadSwitch(game, cx, cy)
   end
   if type(events) ~= "table" then return false end
 
-  local P = require("src.core.game3.player")
+  local P = lazyReq("src.core.game3.player")
   local DIR_BY_FACING = { down = 1, up = 2, left = 3, right = 4 }
   local facingDir = DIR_BY_FACING[P.facing] or 1
 
@@ -702,14 +799,16 @@ local WALK_INTO_SIGN = {
 function Field.tryWalkIntoSign(game, dir, probe)
   game = game or Field._game
   if dir ~= "up" and dir ~= "down" then return false end
+  local FP = lazyReq("src.core.game3.profile").forSession(Field._session)
+  if FP and FP.field and FP.field.walkIntoSigns == false then return false end
   local input = game and game.input
   if input and input.isDown and (input:isDown("left") or input:isDown("right")) then return false end
   if not Field.running or Field.locked then return false end
   local Space = package.loaded["src.core.game3.scripting.space"]
   if not (Space and Space.vm) then return false end
   if Space.vm.isRunning and Space.vm:isRunning() then return false end
-  local P = require("src.core.game3.player")
-  local Collision = require("src.core.game3.collision")
+  local P = lazyReq("src.core.game3.player")
+  local Collision = lazyReq("src.core.game3.collision")
   local fx, fy = facing_cell(P.cellX, P.cellY, dir)
   local behavior = Collision.behavior(fx, fy)
   local key
@@ -746,6 +845,25 @@ function Field.tryWalkIntoSign(game, dir, probe)
   return true
 end
 
+Field._frameTasks = {}
+
+-- pokeemerald/src/task.c:110
+function Field.addFrameTask(fn)
+  Field._frameTasks = Field._frameTasks or {}
+  Field._frameTasks[#Field._frameTasks + 1] = fn
+end
+
+function Field.runFrameTasks()
+  local list = Field._frameTasks
+  if not list or #list == 0 then return end
+  local keep = {}
+  for _, fn in ipairs(list) do
+    local ok, done = pcall(fn)
+    if ok and not done then keep[#keep + 1] = fn end
+  end
+  Field._frameTasks = keep
+end
+
 function Field.interact(game)
   game = game or Field._game
   if not Field.running then return false end
@@ -764,37 +882,52 @@ function Field.interact(game)
   if Field.locked then return false end
 
   local Space = package.loaded["src.core.game3.scripting.space"]
-    or require("src.core.game3.scripting.space")
+    or lazyReq("src.core.game3.scripting.space")
   if Space.vm and Space.vm.isRunning and Space.vm:isRunning() then
     return false
   end
   if not Space.active or not Space.startScript then return false end
 
-  local P = require("src.core.game3.player")
+  local P = lazyReq("src.core.game3.player")
   if P.moving or P.boulderPush then return false end
 
-  local Objects = require("src.core.game3.objects")
-  local Collision = require("src.core.game3.collision")
-  local CollisionStd = require("src.core.game3.scripting.collision_std")
+  local Objects = lazyReq("src.core.game3.objects")
+  local Collision = lazyReq("src.core.game3.collision")
+  local CollisionStd = lazyReq("src.core.game3.scripting.collision_std")
 
   local fx, fy = facing_cell(P.cellX, P.cellY, P.facing)
   local DIR_BY_FACING = { down = 1, up = 2, left = 3, right = 4 }
   local facingDir = DIR_BY_FACING[P.facing] or 1
 
-  local FieldMoves = require("src.core.game3.field_moves")
+  local FieldMoves = lazyReq("src.core.game3.field_moves")
   local party = Field._session and Field._session.party
+
+  -- pokeemerald/src/overworld.c:2372
+  local LinkPlayers = package.loaded["src.core.game3.link.link_players"]
+  if LinkPlayers and LinkPlayers.tryInteract(fx, fy) then return true end
 
   -- 1) EventObject (nurse behind counter uses doubled cell; Cut tree / Rock / Boulder)
   local ox, oy = facing_object_cell(fx, fy, P.facing)
   local eo = Objects.at(ox, oy)
   if eo and eo.def then
     local gfx = eo.def.graphicsId or eo.def.gfx
+    local FP = lazyReq("src.core.game3.profile").forSession(Field._session)
+    local ramOnlyScript
+    local function hasNpcScript()
+      if eo.def.scriptKey then return true end
+      if not Space.vm or (FP.id ~= "ruby" and FP.id ~= "sapphire") then return false end
+      local lid = eo.localId or eo.def.localId or eo.def.index or 0
+      ramOnlyScript = require("src.core.game3.rs.ram_script").select(Field._session, Space.vm, lid, nil)
+      return ramOnlyScript ~= nil
+    end
+    -- pokeemerald/data/scripts/field_move_scripts.inc:60
+    if FP.field and FP.field.fieldMoveScripts and eo.def.scriptKey then gfx = nil end
     if gfx == FieldMoves.GFX_IDS.CUT_TREE then
       local ctx = { party = party, store = Space.store, session = Field._session, facingObject = eo }
       local res = FieldMoves.tryCutOW(ctx)
       if res.ask then
-        local Message = require("src.ui.game3.message")
-        local Choice = require("src.ui.game3.choice")
+        local Message = lazyReq("src.ui.game3.message")
+        local Choice = lazyReq("src.ui.game3.choice")
         Message.show(res.ask, function()
           Choice.yesNo(function(yes)
             if yes then Field.executeFieldMove(res) else Message.close() end
@@ -802,7 +935,7 @@ function Field.interact(game)
         end)
         return true
       elseif res.text then
-        local Message = require("src.ui.game3.message")
+        local Message = lazyReq("src.ui.game3.message")
         Message.show(res.text)
         return true
       end
@@ -810,8 +943,8 @@ function Field.interact(game)
       local ctx = { party = party, store = Space.store, session = Field._session, facingObject = eo }
       local res = FieldMoves.tryRockSmashOW(ctx)
       if res.ask then
-        local Message = require("src.ui.game3.message")
-        local Choice = require("src.ui.game3.choice")
+        local Message = lazyReq("src.ui.game3.message")
+        local Choice = lazyReq("src.ui.game3.choice")
         Message.show(res.ask, function()
           Choice.yesNo(function(yes)
             if yes then Field.executeFieldMove(res) else Message.close() end
@@ -819,7 +952,7 @@ function Field.interact(game)
         end)
         return true
       elseif res.text then
-        local Message = require("src.ui.game3.message")
+        local Message = lazyReq("src.ui.game3.message")
         Message.show(res.text)
         return true
       end
@@ -827,8 +960,8 @@ function Field.interact(game)
       local ctx = { party = party, store = Space.store, session = Field._session, facingObject = eo }
       local res = FieldMoves.tryStrengthOW(ctx)
       if res.ask then
-        local Message = require("src.ui.game3.message")
-        local Choice = require("src.ui.game3.choice")
+        local Message = lazyReq("src.ui.game3.message")
+        local Choice = lazyReq("src.ui.game3.choice")
         Message.show(res.ask, function()
           Choice.yesNo(function(yes)
             if yes then Field.executeFieldMove(res) else Message.close() end
@@ -836,11 +969,11 @@ function Field.interact(game)
         end)
         return true
       elseif res.text then
-        local Message = require("src.ui.game3.message")
+        local Message = lazyReq("src.ui.game3.message")
         Message.show(res.text)
         return true
       end
-    elseif eo.def.scriptKey then
+    elseif hasNpcScript() then
       local lid = eo.localId or eo.def.localId or eo.def.index or 0
       local talkTo = Compat and Compat.talkToWrapper and Compat.talkToWrapper()
       if talkTo and talkTo(Compat.resolve("src.world.OverworldController"), eo) then
@@ -850,7 +983,9 @@ function Field.interact(game)
       local function talk()
         Objects.freeze(lid)
         Objects.facePlayer(lid, game)
-        Space.startScript(eo.def.scriptKey, lid, facingDir)
+        local script = eo.def.scriptKey or ramOnlyScript
+        if eo.def.scriptKey and Space.vm then script = require("src.core.game3.rs.ram_script").select(Field._session, Space.vm, lid, script) end
+        Space.startScript(script, lid, facingDir)
       end
       if ModRuntime.wantsHook("world.talk") then
         ModRuntime.call("world.talk", talk, game, eo)
@@ -862,7 +997,7 @@ function Field.interact(game)
     end
   end
 
-  -- 2) Extracted bgEvents (signs) — face cell only, not doubled
+  -- 2) Extracted bgEvents (signs), face cell only, not doubled
   local layout=Collision._mapDef and Collision._mapDef.midLayout
   local elevation=layout and layout:elevAt(P.cellX,P.cellY) or 0
   if elevation==0 then elevation=P.elevation or 0 end
@@ -872,6 +1007,13 @@ function Field.interact(game)
       interacted(fx, fy, "sign", sign)
       return true
     end
+  end
+
+  -- pokeemerald/src/field_control_avatar.c:354
+  if FieldMoves.isRse() and lazyReq("src.core.game3.rse.init").call("secretBase", "interactBg", nil, nil, fx, fy,
+      P.facing, elevation) then
+    interacted(fx, fy, "secret_base", nil)
+    return true
   end
 
   -- pokefirered/src/field_control_avatar.c:498
@@ -885,11 +1027,23 @@ function Field.interact(game)
 
   -- 3) Original metatile interactions follow objects and map-specific scripts.
   local behavior=Collision.behavior(fx,fy)
-  local key=require("src.core.game3.scripting.interaction_scripts").scriptFor(behavior,P.facing)
+  local key=lazyReq("src.core.game3.scripting.interaction_scripts").scriptFor(behavior,P.facing,
+    layout and layout:elevAt(fx,fy)==elevation)
   if behavior==nil then key=CollisionStd.scriptFor(Collision.cell(fx,fy)) end
   if key and Space.startScript(key,nil,facingDir) then
     interacted(fx, fy, "script", key)
     return true
+  end
+
+  -- pokeemerald/src/field_control_avatar.c:448 GetInteractedWaterScript
+  if FieldMoves.isRse() then
+    local key = Field.rseWaterScript(fx, fy, behavior)
+    if key and Space.startScript(Space.scriptKey(key), nil, facingDir) then
+      interacted(fx, fy, "script", key)
+      return true
+    end
+    -- pokeemerald/src/field_control_avatar.c:180
+    return lazyReq("src.core.game3.dive").tryDiveDown() == true
   end
 
   -- 4) Water / Surf interact on facing water tile
@@ -897,8 +1051,8 @@ function Field.interact(game)
     local ctx = { party = party, store = Space.store, session = Field._session, isFacingWater = true }
     local res = FieldMoves.trySurfOW(ctx)
     if res.ask then
-      local Message = require("src.ui.game3.message")
-      local Choice = require("src.ui.game3.choice")
+      local Message = lazyReq("src.ui.game3.message")
+      local Choice = lazyReq("src.ui.game3.choice")
       Message.show(res.ask, function()
         Choice.yesNo(function(yes)
           if yes then Field.executeFieldMove(res) else Message.close() end
@@ -915,9 +1069,9 @@ function Field.interact(game)
       isSurfing = P.surfing == true, isFacingWaterfall = true, facing = P.facing,
     }
     local res = FieldMoves.tryWaterfallOW(ctx)
-    local Message = require("src.ui.game3.message")
+    local Message = lazyReq("src.ui.game3.message")
     if res.ask then
-      local Choice = require("src.ui.game3.choice")
+      local Choice = lazyReq("src.ui.game3.choice")
       Message.show(res.ask, function()
         Choice.yesNo(function(yes)
           if yes then Field.executeFieldMove(res) else Message.close() end
@@ -933,13 +1087,92 @@ function Field.interact(game)
   return false
 end
 
+-- pokeemerald/src/field_control_avatar.c:448
+function Field.rseWaterScript(fx, fy, behavior)
+  local P = lazyReq("src.core.game3.player")
+  local Collision = lazyReq("src.core.game3.collision")
+  local FieldMoves = lazyReq("src.core.game3.field_moves")
+  local Space = package.loaded["src.core.game3.scripting.space"]
+  local ctx = { store = Space and Space.store, session = Field._session }
+  local party = Field._session and Field._session.party
+  if FieldMoves.hasBadge(ctx, "SURF") and FieldMoves.partyMoveUser(party, "SURF")
+      and not P.surfing and not P.underwater and Collision.isWater(fx, fy) then
+    return "EventScript_UseSurf"
+  end
+  if FieldMoves.isWaterfallBehavior(behavior) then
+    if FieldMoves.hasBadge(ctx, "WATERFALL") and P.surfing and P.facing == "up" then
+      return "EventScript_UseWaterfall"
+    end
+    return "EventScript_CannotUseWaterfall"
+  end
+  return nil
+end
+
+local function deferUntilScriptEnds(fn)
+  Field.locked = true
+  Field.holdInput(true)
+  lazyReq("src.core.game3.task").spawn(function()
+    local Space = package.loaded["src.core.game3.scripting.space"]
+    if Space and Space.vm and Space.vm:isRunning() then return false end
+    Field.holdInput(false)
+    fn()
+    return true
+  end)
+end
+
+local function partyMon(slot)
+  local party = Field._session and Field._session.party
+  return party and party[(tonumber(slot) or 0) + 1] or nil
+end
+
+function Field.installRseFieldEffects()
+  local FieldEffects = lazyReq("src.core.game3.field_effects")
+  local H = FieldEffects.HANDLERS
+  -- pokeemerald/src/field_effect.c:2985
+  H.FLDEFF_USE_SURF = H.FLDEFF_USE_SURF or function()
+    local mon = partyMon(FieldEffects.fieldEffectArgument(0, 0))
+    deferUntilScriptEnds(function() Field.executeFieldMove({ action = "surf", mon = mon }) end)
+    return true
+  end
+  -- pokeemerald/src/field_effect.c:1828
+  H.FLDEFF_USE_WATERFALL = H.FLDEFF_USE_WATERFALL or function()
+    local mon = partyMon(FieldEffects.fieldEffectArgument(0, 0))
+    deferUntilScriptEnds(function() Field.executeFieldMove({ action = "waterfall", mon = mon }) end)
+    return true
+  end
+end
+
+-- pokeemerald/src/fldeff_cut.c:138
+local function rseCutPlan(mon)
+  local P = lazyReq("src.core.game3.player")
+  local Collision = lazyReq("src.core.game3.collision")
+  local FieldMoves = lazyReq("src.core.game3.field_moves")
+  local Pokemon = lazyReq("src.core.game3.pokemon")
+  local hyper = false
+  if mon and mon.species then
+    local okA, ab = pcall(Pokemon.abilityId, mon.species, mon.personality)
+    local C = lazyReq("src.core.game3.constants").of(lazyReq("src.core.game3.profile").forSession(nil).id)
+    hyper = okA and ab ~= nil and ab == C.abilities.byName.ABILITY_HYPER_CUTTER
+  end
+  local elev = Collision.elevationAt(P.cellX, P.cellY)
+  return FieldMoves.cutGrassPlan({
+    x = P.cellX, y = P.cellY, elevation = elev,
+    behavior = function(x, y) return Collision.behavior(x, y) end,
+    elevationAt = function(x, y) return Collision.elevationAt(x, y) end,
+    impassable = function(x, y)
+      return not (Collision.isWalkable(x, y) or Collision.isWater(x, y))
+    end,
+  }, hyper)
+end
+Field.rseCutPlan = rseCutPlan
+
 function Field.executeFieldMove(payload)
   if not payload then return end
-  local Message = require("src.ui.game3.message")
-  local Audio = require("src.core.game3.audio")
-  local FieldEffects = require("src.core.game3.field_effects")
-  local P = require("src.core.game3.player")
-  local Objects = require("src.core.game3.objects")
+  local Message = lazyReq("src.ui.game3.message")
+  local Audio = lazyReq("src.core.game3.audio")
+  local FieldEffects = lazyReq("src.core.game3.field_effects")
+  local P = lazyReq("src.core.game3.player")
+  local Objects = lazyReq("src.core.game3.objects")
 
   local act = payload.action
   -- pokefirered/data/scripts/field_moves.inc:12
@@ -957,49 +1190,81 @@ function Field.executeFieldMove(payload)
     flash="UsedFlash",rock_smash="UsedRockSmash",dig="UsedDigInLocation",
     teleport="UsedTeleportToLocation",sweet_scent="UsedSweetScent"}
   local key=questKeys[act]
-  if key and Field._session then
-    local Q=require("src.core.game3.quest_log_recorder")
+  if key and Field._session and lazyReq("src.core.game3.field_modules").enabled("questLog", Field._session) then
+    local Q=lazyReq("src.core.game3.quest_log_recorder")
     -- pokefirered/src/party_menu.c:4154
     local where=act=="teleport" and {map=Field._session.healMap} or Field._session
-    Q.event(Field._session,key,{require("src.core.game3.pokemon").displayMonName(payload.mon),
+    Q.event(Field._session,key,{lazyReq("src.core.game3.pokemon").displayMonName(payload.mon),
       Q.location(Field._game,where)})
   end
   -- pokefirered/src/fldeff_rocksmash.c:39
   local function showMon(fn, opts)
     opts = opts or {}
-    require("src.core.game3.field_move_show_mon").start(payload.mon, {
+    lazyReq("src.core.game3.field_move_show_mon").start(payload.mon, {
       pose = opts.pose ~= false, noDuck = opts.noDuck,
     }, fn)
+  end
+  local function removeObstacle(target, action, onDone)
+    local lid = target and (target.localId or (target.def and (target.def.localId or target.def.index)))
+    if not lid then return onDone() end
+    local Movement = lazyReq("src.core.game3.scripting.movement")
+    Objects.startTrack(lid, { Movement.decodeAction(action) }, function()
+      Objects.removeObject(lid)
+      onDone()
+    end)
   end
   if act == "cut_tree" then
     Field.locked = true
     -- pokefirered/src/fldeff_cut.c:183
     showMon(function()
       if payload.se then Audio.playSe(payload.se) end
-      local target = payload.target
-      local tx = target and (target.cellX or target.x or (target.def and target.def.x)) or P.cellX
-      local ty = target and (target.cellY or target.y or (target.def and target.def.y)) or P.cellY
-
-      FieldEffects.startCutTree(target, tx, ty, function()
-        if target then
-          local lid = target.localId or (target.def and (target.def.localId or target.def.index))
-          if lid then Objects.removeObject(lid) end
-        end
+      -- pokefirered/data/scripts/field_moves.inc:27
+      removeObstacle(payload.target, 0x69, function()
         Field.locked = false
       end)
     end)
+  elseif act == "cut_grass" and lazyReq("src.core.game3.field_moves").isRse() then
+    Field.locked = true
+    -- pokeemerald/src/fldeff_cut.c:316
+    showMon(function()
+      local FieldMoves = lazyReq("src.core.game3.field_moves")
+      local plan = payload.cutPlan or rseCutPlan(payload.mon)
+      if payload.se then Audio.playSe(payload.se) end
+      local Map = lazyReq("src.core.game3.map")
+      local def = Map.currentDef()
+      local layout = def and def.midLayout
+      if plan and layout then
+        local function getMid(x, y) return layout:midAt(x, y) end
+        local function setMid(x, y, mid) Field.setMetatile(x, y, mid, false) end
+        for _, c in ipairs(plan.cells) do
+          local mid = getMid(c.x, c.y)
+          local to = mid and FieldMoves.cutGrassMetatile(mid)
+          if to then setMid(c.x, c.y, to) end
+        end
+        -- pokeemerald/src/fldeff_cut.c:338
+        FieldMoves.fixLongGrass(P.cellX - plan.reach, P.cellY - (1 + plan.reach), plan.side, getMid, setMid)
+        local Collision = lazyReq("src.core.game3.collision")
+        if not Collision.isGrass(P.cellX, P.cellY) then FieldEffects.clearTallGrass() end
+      end
+      FieldEffects.startCutGrass(P.cellX, P.cellY, function()
+        Field.locked = false
+      end)
+    end)
+  elseif act == "dive" then
+    -- pokeemerald/src/party_menu.c:3910 FieldCallback_Dive
+    lazyReq("src.core.game3.dive").useDive(payload.slot, payload.mon)
   elseif act == "cut_grass" then
     Field.locked = true
     -- pokefirered/src/fldeff_cut.c:169
     showMon(function()
       if payload.se then Audio.playSe(payload.se) end
-      local Map = require("src.core.game3.map")
+      local Map = lazyReq("src.core.game3.map")
       local def = Map.currentDef()
       local layout = def and def.midLayout
       if layout then
-        local FieldMoves = require("src.core.game3.field_moves")
+        local FieldMoves = lazyReq("src.core.game3.field_moves")
         local w, h = layout.width or 0, layout.height or 0
-        local Collision = require("src.core.game3.collision")
+        local Collision = lazyReq("src.core.game3.collision")
         -- pokefirered/src/fldeff_rocksmash.c:31
         local elev = P.elevation or 0
         FieldMoves.mowGrass3x3(P.cellX, P.cellY, function(x, y) return layout:midAt(x, y) end,
@@ -1025,29 +1290,66 @@ function Field.executeFieldMove(payload)
         Field.openDottedHoleDoor()
       end)
     end)
+  elseif act == "fly" and lazyReq("src.core.game3.profile").family(Field._session) == "rse" then
+    Field.locked = true
+    local RseMap = lazyReq("src.ui.game3.rse.region_map")
+    -- pokeemerald/src/region_map.c:1647 CB2_OpenFlyMap
+    RseMap.show({
+      session = Field._session,
+      mode = "fly",
+      onPick = function(sec, info)
+        info = info or {}
+        info.dest = RseMap.flyWarpDestination(Field._session, sec, info.posWithinMapSec)
+        Field.flyTo(sec, payload.mon, info)
+      end,
+      onClose = function(picked)
+        if not picked then Field.locked = false end
+      end,
+    })
   elseif act == "fly" then
     -- pokefirered/src/region_map.c:3873 CB2_OpenFlyMap
     Field.locked = true
-    require("src.ui.game3.region_map").show({
+    lazyReq("src.ui.game3.region_map").show({
       session = Field._session,
       mode = "fly",
       onPick = function(section) Field.flyTo(section, payload.mon) end,
       onClose = function() Field.locked = false end,
     })
+  elseif act == "braille_rs_strength" or act == "braille_rs_fly" then
+    Field.locked = true
+    showMon(function()
+      local session = Field._session
+      local Braille = lazyReq("src.core.game3.braille_field_rs")
+      if Braille.isRs(session) then
+        -- fldeff_strength.c:91
+        if act == "braille_rs_strength" then
+          if Braille.shouldDoStrength(session) then Braille.doStrength(session) end
+        else
+          Braille.doFly(session)
+        end
+      end
+      Field.locked = false
+    end)
+  elseif act == "braille_regirock" or act == "braille_registeel" then
+    Field.locked = true
+    -- pokeemerald/src/braille_puzzles.c:264
+    showMon(function()
+      local session = Field._session
+      if lazyReq("src.core.game3.constants").versionOf(session) == "emerald" then
+        local BrailleField = lazyReq("src.core.game3.braille_field")
+        local valid = act == "braille_regirock" and BrailleField.shouldDoRegirock(session)
+          or act == "braille_registeel" and BrailleField.shouldDoRegisteel(session)
+        if valid then BrailleField.doRegiEffect(session) end
+      end
+      Field.locked = false
+    end)
   elseif act == "rock_smash" then
     Field.locked = true
     -- pokefirered/src/fldeff_rocksmash.c:123
     showMon(function()
       if payload.se then Audio.playSe(payload.se) end
-      local target = payload.target
-      local tx = target and (target.cellX or target.x or (target.def and target.def.x)) or P.cellX
-      local ty = target and (target.cellY or target.y or (target.def and target.def.y)) or P.cellY
-
-      FieldEffects.startRockSmash(target, tx, ty, function()
-        if target then
-          local lid = target.localId or (target.def and (target.def.localId or target.def.index))
-          if lid then Objects.removeObject(lid) end
-        end
+      -- pokefirered/data/scripts/field_moves.inc:85
+      removeObstacle(payload.target, 0x68, function()
         Field.locked = false
         -- pokefirered/data/scripts/field_moves.inc:88
         Field.tryRockSmashEncounter()
@@ -1059,7 +1361,7 @@ function Field.executeFieldMove(payload)
     showMon(function()
       if payload.flag then
         local Space = package.loaded["src.core.game3.scripting.space"]
-        local Flags = require("src.core.game3.scripting.flags")
+        local Flags = lazyReq("src.core.game3.scripting.flags")
         if Space and Space.store then
           Flags.setFlag(Space.store, nil, payload.flag, true)
         end
@@ -1107,24 +1409,51 @@ function Field.executeFieldMove(payload)
       if payload.se then Audio.playSe(payload.se) end
       if payload.flag then
         local Space = package.loaded["src.core.game3.scripting.space"]
-        local Flags = require("src.core.game3.scripting.flags")
+        local Flags = lazyReq("src.core.game3.scripting.flags")
         if Space and Space.store then
           Flags.setFlag(Space.store, nil, payload.flag, true)
         end
       end
-      FieldEffects.startFlash(function()
-        Field.locked = false
-      end)
+      local profile = lazyReq("src.core.game3.profile").forSession(Field._session)
+      local script = profile.field and profile.field.flashScript
+      if script then
+        local Space = lazyReq("src.core.game3.scripting.space")
+        local key = assert(Space.scriptKey(script), "ROM Flash script is not in the script cache: " .. script)
+        assert(Space.vm, "Flash requires the field script VM")
+        -- pokeruby/src/script.c:230
+        Space.vm.ctx.fieldControlsLocked = true
+        assert(Space.startScript(key), "ROM Flash script could not start: " .. script)
+      else
+        FieldEffects.startFlash(function()
+          Field.locked = false
+        end)
+      end
     end)
-  elseif act == "dig" then
+  elseif act == "dig" or act == "braille_rs_dig" then
     Field.locked = true
     -- pokefirered/src/fldeff_dig.c:32
     showMon(function()
       local Session = Field._session
+      -- pokeruby/src/rom6.c:202
+      local RsBraille = lazyReq("src.core.game3.braille_field_rs")
+      if RsBraille.isRs(Session) and RsBraille.shouldDoDig(Session) then
+        RsBraille.doDig(Session)
+        Field.locked = false
+        return
+      end
+      -- pokeemerald/src/fldeff_dig.c:54
+      if lazyReq("src.core.game3.constants").versionOf(Session) == "emerald" then
+        local BrailleField = lazyReq("src.core.game3.braille_field")
+        if BrailleField.shouldDoDig(Session) then
+          BrailleField.doDig(Session)
+          Field.locked = false
+          return
+        end
+      end
       local warp = type(payload.warp) == "table" and payload.warp or {}
       local dest = warp.map or (Session and Session.healMap)
       -- pokefirered/src/fldeff_dig.c:39 StartDigFieldEffect
-      require("src.core.game3.warp").startEscapeRope(Field._game, dest, warp.x, warp.y, function(m, x, y)
+      lazyReq("src.core.game3.warp").startEscapeRope(Field._game, dest, warp.x, warp.y, function(m, x, y)
         Field.respawnAtHeal({ fieldMove = true, warp = { map = m, x = x, y = y } })
       end)
     end)
@@ -1135,8 +1464,8 @@ function Field.executeFieldMove(payload)
       if payload.se then Audio.playSe(payload.se) end
       FieldEffects.startTeleportOut(function()
         local Session = Field._session
-        local Warp = require("src.core.game3.warp")
-        local Fade = require("src.ui.game3.fade")
+        local Warp = lazyReq("src.core.game3.warp")
+        local Fade = lazyReq("src.ui.game3.fade")
         local dest = type(payload.warp) == "table" and payload.warp.map
           or (Session and Session.healMap)
         local toMode, fromMode = Warp.fadeModes(Fade, Field._game, dest)
@@ -1168,19 +1497,98 @@ function Field.executeFieldMove(payload)
     showMon(function()
       if payload.se then Audio.playSe(payload.se) end
       FieldEffects.startSweetScent(function()
-        Field.locked = false
-        local okE, Encounters = pcall(require, "src.core.game3.encounters")
-        if okE and Encounters and Encounters.tryBattle then
-          Encounters.tryBattle(Field._game, true)
-        end
+        Field.finishSweetScent(payload)
       end)
     end)
   end
 end
 
+-- pokefirered/src/fldeff_sweetscent.c:62
+function Field.finishSweetScent(payload)
+  local Encounters = lazyReq("src.core.game3.encounters")
+  local Runtime = package.loaded["src.core.game3.runtime"]
+  local session = Field._session
+  local mapId = session and session.map
+  if not mapId then
+    local Map = package.loaded["src.core.game3.map"]
+    mapId = Map and Map.current
+  end
+
+  local function showFailMessage()
+    local RomText = lazyReq("src.core.game3.rom_text")
+    local Message = lazyReq("src.ui.game3.message")
+    local failText = payload and payload.failText
+    local failKey = payload and payload.failKey
+    local textToShow
+    if type(failText) == "table" then
+      textToShow = failText
+    elseif failKey and RomText and RomText.has and RomText.has(failKey) then
+      textToShow = RomText.box(failKey)
+    elseif type(failText) == "string" and RomText and RomText.has and RomText.has(failText) then
+      textToShow = RomText.box(failText)
+    elseif type(failText) == "string" and #failText > 0 and not failText:match("^Text_") and not failText:match("^gText_") then
+      textToShow = failText
+    else
+      local FieldMoves = lazyReq("src.core.game3.field_moves")
+      local k = FieldMoves and FieldMoves.textKey and FieldMoves.textKey("NO_SWEET_SCENT_MONS")
+      if k and RomText and RomText.has and RomText.has(k) then
+        textToShow = RomText.box(k)
+      else
+        textToShow = "Looks like there's nothing here…"
+      end
+    end
+
+    local ok, err = pcall(function()
+      Message.show(textToShow, {
+        session = session,
+        done = function()
+          Field.locked = false
+          Message.close()
+        end,
+      })
+    end)
+    if not ok then
+      Field.locked = false
+      print("[game3/field] sweet scent fail message error: " .. tostring(err))
+    end
+  end
+
+  local rules = Encounters.rules()
+  if rules.sweetScentFacility then
+    local handled = rules.sweetScentFacility(mapId)
+    if handled == true then return end
+    if handled == false then
+      showFailMessage()
+      return
+    end
+  end
+
+  -- Weather suppression check: heavy precipitation (rain, downpour, snow) & fog suppress sweet scent
+  local Weather = lazyReq("src.core.game3.weather")
+  local curWeather = Weather and Weather.get and Weather.get()
+  local weatherSuppressed = curWeather == Weather.RAIN
+    or curWeather == Weather.SNOW
+    or curWeather == Weather.RAIN_THUNDERSTORM
+    or curWeather == Weather.DOWNPOUR
+    or curWeather == Weather.FOG_HORIZONTAL
+    or curWeather == Weather.FOG_DIAGONAL
+
+  local px, py = (Player and Player.cellX) or 0, (Player and Player.cellY) or 0
+  local terrain = not weatherSuppressed and Encounters.terrainAt(px, py) or nil
+  local enc = (terrain == "land" or terrain == "water") and Encounters.rollSweetScent(mapId, terrain) or nil
+  if enc then
+    local BattleBridge = lazyReq("src.core.game3.battle_bridge")
+    local ok, err = BattleBridge.startWild(Runtime and Runtime._mod, Field._game, enc, {})
+    if ok then return end
+    print("[game3/field] sweet scent startWild failed: " .. tostring(err))
+  end
+
+  showFailMessage()
+end
+
 -- pokefirered/src/wild_encounter.c:446
 function Field.tryRockSmashEncounter()
-  local Encounters = require("src.core.game3.encounters")
+  local Encounters = lazyReq("src.core.game3.encounters")
   local session = Field._session
   local mapId = session and session.map
   if not mapId then
@@ -1190,7 +1598,7 @@ function Field.tryRockSmashEncounter()
   local enc = Encounters.rollRocks(mapId)
   if not enc then return false end
   local Runtime = package.loaded["src.core.game3.runtime"]
-  local BattleBridge = require("src.core.game3.battle_bridge")
+  local BattleBridge = lazyReq("src.core.game3.battle_bridge")
   local ok, err = BattleBridge.startWild(Runtime and Runtime._mod, Field._game, enc, {})
   if not ok then
     print("[game3/field] rock smash startWild failed: " .. tostring(err))
@@ -1228,7 +1636,7 @@ end
 function Field.fishingPose()
   local f = Field._fishing
   if not (f and Player.fishing) then return nil end
-  local OwSprites = require("src.core.game3.ow_sprites")
+  local OwSprites = lazyReq("src.core.game3.ow_sprites")
   local facing = Player.facing or "down"
   local g = OwSprites.fishingFrame(facing, f.anim, f.animT)
   local x2, y2 = OwSprites.fishingOffset(OwSprites.fishingAbsFrame(facing, g), facing)
@@ -1244,7 +1652,7 @@ end
 
 -- pokefirered/src/wild_encounter.c:519 FishingWildEncounter
 function Field.tryFishingEncounter(rod)
-  local okE, Encounters = pcall(require, "src.core.game3.encounters")
+  local okE, Encounters = pcall(lazyReq, "src.core.game3.encounters")
   if not (okE and Encounters and Encounters.rollFishing) then return false end
   local session = Field._session
   local mapId = session and session.map
@@ -1252,10 +1660,21 @@ function Field.tryFishingEncounter(rod)
     local Map = package.loaded["src.core.game3.map"]
     mapId = Map and Map.current
   end
-  local enc = Encounters.rollFishing(mapId, tonumber(rod) or 0)
+  local fishOpts
+  if lazyReq("src.core.game3.field_moves").isRse() then
+    -- pokeemerald/src/wild_encounter.c:124
+    local fx, fy = facing_cell(Player.cellX, Player.cellY, Player.facing)
+    fishOpts = { x = fx, y = fy }
+  end
+  local enc = Encounters.rollFishing(mapId, tonumber(rod) or 0, fishOpts)
   if not enc then return false end
+  if lazyReq("src.core.game3.field_moves").isRse() then
+    -- pokeemerald/src/wild_encounter.c:796
+    lazyReq("src.core.game3.rse.init").call("tv", "setPokemonAnglerSpecies", "SetPokemonAnglerSpecies", nil,
+      tonumber(enc.species or enc.id) or 0)
+  end
   local Runtime = package.loaded["src.core.game3.runtime"]
-  local BattleBridge = require("src.core.game3.battle_bridge")
+  local BattleBridge = lazyReq("src.core.game3.battle_bridge")
   local ok, err = BattleBridge.startWild(Runtime and Runtime._mod, Field._game, enc, {})
   if not ok then
     print("[game3/field] fishing startWild failed: " .. tostring(err))
@@ -1276,13 +1695,13 @@ end
 function Field.updateFishing()
   local f = Field._fishing
   if not f then return false end
-  local Message = require("src.ui.game3.message")
-  local Rng = require("src.core.game3.rng")
+  local Message = lazyReq("src.ui.game3.message")
+  local Rng = lazyReq("src.core.game3.rng")
   f.timer = f.timer + 1
   f.animT = (f.animT or 0) + 1
 
   if f.step == "result" and f.anim == "putaway" and Player.fishing then
-    local OwSprites = require("src.core.game3.ow_sprites")
+    local OwSprites = lazyReq("src.core.game3.ow_sprites")
     local _, ended = OwSprites.fishingFrame(Player.facing, f.anim, f.animT)
     -- pokefirered/src/field_player_avatar.c:1918 Fishing15
     if ended then Player.fishing = false end
@@ -1320,14 +1739,20 @@ function Field.updateFishing()
   elseif f.step == "bite" then
     -- pokefirered/src/field_player_avatar.c:1777 Fishing6
     f.step = "result"
-    local okE, Encounters = pcall(require, "src.core.game3.encounters")
+    local okE, Encounters = pcall(lazyReq, "src.core.game3.encounters")
     local hasMons = okE and Encounters and Encounters.hasFishingMons
       and Encounters.hasFishingMons(fishingMapId()) or false
     if (not hasMons) or (Rng.Random() % 2 == 1) then
       -- pokefirered/src/field_player_avatar.c:1890 Fishing12
       f.anim, f.animT = "putaway", 0
       -- pokefirered/src/field_player_avatar.c:1895
-      Message.show(RomText.box("gText_NotEvenANibble"), function() fishingStop() end)
+      Message.show(RomText.box("gText_NotEvenANibble"), function()
+        fishingStop()
+        if lazyReq("src.core.game3.field_moves").isRse() then
+          -- pokeemerald/src/field_player_avatar.c:2035
+          lazyReq("src.core.game3.rse.init").call("tv", "recordFishingAttempt", "RecordFishingAttemptForTV", nil, false)
+        end
+      end)
     else
       -- pokefirered/src/field_player_avatar.c:1791
       f.anim, f.animT = "hooked", 0
@@ -1336,6 +1761,10 @@ function Field.updateFishing()
       Message.show(RomText.box("gText_PokemonOnHook"), function()
         fishingStop()
         Field.tryFishingEncounter(rod)
+        if lazyReq("src.core.game3.field_moves").isRse() then
+          -- pokeemerald/src/field_player_avatar.c:1975
+          lazyReq("src.core.game3.rse.init").call("tv", "recordFishingAttempt", "RecordFishingAttemptForTV", nil, true)
+        end
       end)
     end
   end
@@ -1344,15 +1773,15 @@ end
 
 -- pokefirered/src/field_specials.c:2310 CutMoveOpenDottedHoleDoor
 function Field.openDottedHoleDoor()
-  local FieldMoves = require("src.core.game3.field_moves")
+  local FieldMoves = lazyReq("src.core.game3.field_moves")
   local RV = FieldMoves.RUIN_VALLEY
   Field.setMetatile(RV.doorX, RV.doorY, RV.doorOpen, false)
   pcall(function()
-    local Audio = require("src.core.game3.audio")
-    local SE = require("src.core.game3.se_ids")
+    local Audio = lazyReq("src.core.game3.audio")
+    local SE = lazyReq("src.core.game3.se_ids")
     Audio.playSe(SE.SE_BANG)
   end)
-  local Flags = require("src.core.game3.scripting.flags")
+  local Flags = lazyReq("src.core.game3.scripting.flags")
   local Space = package.loaded["src.core.game3.scripting.space"]
   if Space and Space.store then
     Flags.setFlag(Space.store, Space.vm and Space.vm.ctx or nil, RV.flag, true)
@@ -1368,7 +1797,7 @@ Field._flyBaked = nil
 Field._flyBakedRoot = nil
 
 local function fly_default_root()
-  return require("src.import.gba.extract_island1").CACHE_ROOT
+  return lazyReq("src.import.gba.extract_island1").CACHE_ROOT
 end
 
 local function fly_row(key, row)
@@ -1396,7 +1825,7 @@ function Field.installFlyDestinations(pack, root)
 end
 
 function Field.loadFlyDestinations(cache, root)
-  cache = cache or require("src.core.game3.dataset").cache()
+  cache = cache or lazyReq("src.core.game3.dataset").cache()
   root = root or fly_default_root()
   local rel = root .. "/" .. Field.FLY_BAKED_REL
   local src = assert(cache and cache:read(rel), "missing cache file " .. rel)
@@ -1407,7 +1836,7 @@ end
 function Field.flyDestinationsMounted()
   local root = fly_default_root()
   if Field._flyBaked ~= nil and Field._flyBakedRoot == root then return true end
-  local cache = require("src.core.game3.dataset").cache()
+  local cache = lazyReq("src.core.game3.dataset").cache()
   if not (cache and cache:read(root .. "/" .. Field.FLY_BAKED_REL)) then return false end
   Field.loadFlyDestinations(cache, root)
   return true
@@ -1429,26 +1858,72 @@ function Field.flyDestination(section)
   local hit = baked[section] or (num and baked[num])
   if hit then return hit end
   if not num then return nil end
-  local okS, MapSections = pcall(require, "src.import.gba.map_sections_extract")
+  local okS, MapSections = pcall(lazyReq, "src.import.gba.map_sections_extract")
   local info = okS and MapSections and MapSections.SECTIONS and MapSections.SECTIONS[num]
   local id = info and info.id
   if not id then return nil end
   return baked[id]
 end
 
+-- pokefirered/src/overworld.c:289
+local function resetCyclingRoadAfterTravel()
+  local session = Field._session
+  if not session then return end
+  local Profile = lazyReq("src.core.game3.profile")
+  local Flags = lazyReq("src.core.game3.scripting.flags")
+  local Runtime = package.loaded["src.core.game3.runtime"]
+  local Space = package.loaded["src.core.game3.scripting.space"]
+  local profile = Profile.forSession(session)
+  local defs = Flags.forVersion(profile.id)
+  local roadName = profile.family == "rse"
+    and "FLAG_SYS_CYCLING_ROAD" or "FLAG_SYS_ON_CYCLING_ROAD"
+  local road = assert(defs.IDS[roadName])
+  local scene = profile.family ~= "rse" and assert(defs.VAR_IDS.VAR_MAP_SCENE_ROUTE16)
+  local live = Runtime and Runtime.getSession and Runtime.getSession()
+  local seen = {}
+  for _, store in ipairs({ session, session.store or false, Space and Space.store or false,
+      live or false, live and live.store or false }) do
+    if store and not seen[store] then
+      seen[store] = true
+      Flags.setFlag(store, nil, road, false)
+      if store.flags then store.flags[roadName] = nil end
+      if scene then
+        Flags.setVar(store, nil, scene, 0)
+        if store.vars then
+          store.vars[tostring(scene)] = nil
+          store.vars[string.format("0x%X", scene)] = nil
+          store.vars.VAR_MAP_SCENE_ROUTE16 = nil
+        end
+      end
+    end
+  end
+  Player.biking, Player.bikeType = false, nil
+  Player.surfing, Player.surfHopping = false, false
+  for _, s in ipairs({ session, live or false }) do
+    if s then s.biking, s.bikeType = false, nil end
+  end
+  local save = Field._game and Field._game.save
+  if save then
+    save.biking, save.bikeType = false, nil
+    if save.position then save.position.biking = false end
+  end
+end
+
 -- pokefirered/src/field_effect.c:1065 ReturnToFieldFromFlyMapSelect
-function Field.flyTo(section, mon)
-  local dest = assert(Field.flyDestination(section), "no fly destination for mapsec " .. tostring(section))
-  if dest.healLocation then
+function Field.flyTo(section, mon, info)
+  local dest = (info and info.dest)
+    or assert(Field.flyDestination(section), "no fly destination for mapsec " .. tostring(section))
+  if dest.healLocation and lazyReq("src.core.game3.field_modules").enabled("questLog", Field._session) then
     -- pokefirered/src/region_map.c:4029 SetUsedFlyQuestLogEvent
-    local Q = require("src.core.game3.quest_log_recorder")
-    Q.event(Field._session, "UsedFly", { require("src.core.game3.pokemon").displayMonName(mon),
+    local Q = lazyReq("src.core.game3.quest_log_recorder")
+    Q.event(Field._session, "UsedFly", { lazyReq("src.core.game3.pokemon").displayMonName(mon),
       Q.location(Field._game, { map = dest.map }) })
   end
   Field.locked = true
-  local FieldEffects = require("src.core.game3.field_effects")
+  local FieldEffects = lazyReq("src.core.game3.field_effects")
   local function land()
-    local Map = require("src.core.game3.map")
+    local Map = lazyReq("src.core.game3.map")
+    resetCyclingRoadAfterTravel()
     Map.load(Field._mod, Field._game, dest.map, {
       x = dest.x, y = dest.y, facing = "down", depth1Connections = true,
     })
@@ -1457,8 +1932,8 @@ function Field.flyTo(section, mon)
     Player.setVisible(true)
   end
   if love and love.graphics then
-    local Fade = require("src.ui.game3.fade")
-    local Warp = require("src.core.game3.warp")
+    local Fade = lazyReq("src.ui.game3.fade")
+    local Warp = lazyReq("src.core.game3.warp")
     local function flyOut()
       local toMode = Warp.fadeModes(Fade, Field._game, dest.map)
       -- pokefirered/src/field_effect.c:3324 FlyOutFieldEffect_WaitFlyOff
@@ -1482,7 +1957,7 @@ function Field.flyTo(section, mon)
     -- pokefirered/src/field_effect.c:1073 FieldCallback_UseFly
     Fade.begin(Fade.MODE.FROM_BLACK, 1, function()
       -- pokefirered/src/field_effect.c:3241
-      require("src.core.game3.field_move_show_mon").start(mon, { pose = true }, function()
+      lazyReq("src.core.game3.field_move_show_mon").start(mon, { pose = true }, function()
         FieldEffects.startFlyOut(flyOut)
       end)
     end)
@@ -1498,8 +1973,8 @@ end
 function Field.forcedMovementPending()
   if Field._waterfall then return false end
   if not Player.surfing then return false end
-  local Collision = require("src.core.game3.collision")
-  local FieldMoves = require("src.core.game3.field_moves")
+  local Collision = lazyReq("src.core.game3.collision")
+  local FieldMoves = lazyReq("src.core.game3.field_moves")
   local x, y = Player.cellX, Player.cellY
   if Player.moving then x, y = Player.targetX, Player.targetY end
   if not FieldMoves.isWaterfallBehavior(Collision.behavior(x, y)) then return false end
@@ -1519,7 +1994,7 @@ function Field.pollSafariBalls(game)
   if Space and Space.vm and Space.vm.isRunning and Space.vm:isRunning() then return false end
   local Warp = package.loaded["src.core.game3.warp"]
   if Warp and Warp.isBusy and Warp.isBusy() then return false end
-  local okS, Safari = pcall(require, "src.core.game3.safari")
+  local okS, Safari = pcall(lazyReq, "src.core.game3.safari")
   if not (okS and Safari and Safari.isActive) then return false end
   local session = Field._session
   if not Safari.isActive(session) then return false end
@@ -1530,12 +2005,11 @@ end
 
 -- pokefirered/src/event_data.c:49
 function Field.clearTempFieldEventData(game, mapId)
-  local FieldMoves = require("src.core.game3.field_moves")
-  local Flags = require("src.core.game3.scripting.flags")
+  local FieldMoves = lazyReq("src.core.game3.field_moves")
+  local Flags = lazyReq("src.core.game3.scripting.flags")
   local Space = package.loaded["src.core.game3.scripting.space"]
   local session = Field._session
-  local ids = {}
-  for i = 1, #FieldMoves.TEMP_SYS_FLAGS do ids[i] = FieldMoves.TEMP_SYS_FLAGS[i] end
+  local ids = FieldMoves.tempSysFlags()
   local data = game and game.data and game.data.maps
   local def = mapId and data and data[mapId]
   -- pokefirered/src/overworld.c:803
@@ -1568,8 +2042,8 @@ end
 -- pokefirered/src/field_effect.c:1613
 -- pokefirered/src/field_player_avatar.c:246
 function Field.updateWaterfall(game)
-  local Collision = require("src.core.game3.collision")
-  local FieldMoves = require("src.core.game3.field_moves")
+  local Collision = lazyReq("src.core.game3.collision")
+  local FieldMoves = lazyReq("src.core.game3.field_moves")
   local onWaterfall = FieldMoves.isWaterfallBehavior(Collision.behavior(Player.cellX, Player.cellY))
 
   local st = Field._waterfall
@@ -1628,17 +2102,24 @@ end
 function Field.respawnAtHeal(opts)
   local session = Field._session
   if not session then return end
-  local HealLocations = require("src.core.game3.heal_locations")
+  resetCyclingRoadAfterTravel()
+  local HealLocations = lazyReq("src.core.game3.heal_locations")
   HealLocations.normalizeSession(session)
   local whiteOut = not (opts and opts.fieldMove)
+  local healRow = HealLocations.model() == "heal_row"
   if whiteOut then
     -- pokefirered/src/overworld.c:1556
     local Space = package.loaded["src.core.game3.scripting.space"]
     if Space and Space.vm and Space.vm:isRunning() then Space.vm:halt(true) end
-    -- pokefirered/src/overworld.c:252
-    Field.resetEliteFour()
+    if healRow then
+      -- pokeemerald/src/overworld.c:360
+      if Space and Space.runImmediately then Space.runImmediately("EventScript_WhiteOut") end
+    else
+      -- pokefirered/src/overworld.c:252
+      Field.resetEliteFour()
+    end
     -- pokefirered/src/overworld.c:1553 CB2_WhiteOut
-    local okS, Safari = pcall(require, "src.core.game3.safari")
+    local okS, Safari = pcall(lazyReq, "src.core.game3.safari")
     if okS and Safari and Safari.reset then Safari.reset(session) end
   end
   if not (opts and opts.fieldMove) and ModRuntime.wants("world.blacked_out") then
@@ -1649,13 +2130,14 @@ function Field.respawnAtHeal(opts)
   end
   if not (opts and opts.fieldMove) then
     -- pokefirered/src/overworld.c:1553 CB2_WhiteOut
-    local Party = require("src.core.game3.party")
+    local Party = lazyReq("src.core.game3.party")
     Party.healAll(session.party)
   end
-  local Map = require("src.core.game3.map")
-  local mapId = session.healMap or "FR_PLAYERS_HOUSE_1F"
-  local hx = session.healX or 8
-  local hy = session.healY or 5
+  local Map = lazyReq("src.core.game3.map")
+  local start = lazyReq("src.core.game3.map_ids").newGameStart(session.version)
+  local mapId = session.healMap or start.healMap or start.map
+  local hx = session.healX or start.healX or start.x
+  local hy = session.healY or start.healY or start.y
   local warp = opts and opts.warp
   if type(warp) == "string" then warp = { map = warp } end
   if type(warp) == "table" and type(warp.map) == "string" then
@@ -1665,7 +2147,7 @@ function Field.respawnAtHeal(opts)
     hy = tonumber(warp.y) or hy
   end
   -- pokefirered/src/overworld.c:1555
-  local facing = whiteOut and "up" or "down"
+  local facing = (whiteOut and not healRow) and "up" or "down"
   Map.load(Field._mod, Field._game, mapId, {
     x = hx,
     y = hy,
@@ -1680,15 +2162,20 @@ function Field.respawnAtHeal(opts)
   if healerId and not (opts and opts.fieldMove) then
     local Space = package.loaded["src.core.game3.scripting.space"]
     if Space and Space.store then
-      local Flags = require("src.core.game3.scripting.flags")
-      local Ctx = require("src.core.game3.scripting.ctx")
+      local Flags = lazyReq("src.core.game3.scripting.flags")
+      local Ctx = lazyReq("src.core.game3.scripting.ctx")
       Flags.setVar(Space.store, Space.vm and Space.vm.ctx or nil, Ctx.VAR_LAST_TALKED, healerId)
     end
   end
-  if whiteOut then
+  if whiteOut and healRow then
+    -- pokeemerald/src/overworld.c:1563
+    local Fade = lazyReq("src.ui.game3.fade")
+    if Fade.active or (Fade.t or 0) > 0 then Fade.begin(Fade.MODE.FROM_BLACK, 1) end
+  end
+  if whiteOut and not healRow then
     -- pokefirered/src/overworld.c:1558
     local home = HealLocations.get(1)
-    require("src.ui.game3.whiteout_rush").start(Field._game, session, {
+    lazyReq("src.ui.game3.whiteout_rush").start(Field._game, session, {
       home = home and home.map == mapId,
       healerLocalId = healerId,
     })
@@ -1703,7 +2190,7 @@ function Field.resetEliteFour()
   local Space = package.loaded["src.core.game3.scripting.space"]
   local store = Space and Space.store
   if not store then return end
-  local Flags = require("src.core.game3.scripting.flags")
+  local Flags = lazyReq("src.core.game3.scripting.flags")
   local ctx = Space.vm and Space.vm.ctx or nil
   for _, name in ipairs({ "FLAG_DEFEATED_LORELEI", "FLAG_DEFEATED_BRUNO", "FLAG_DEFEATED_AGATHA",
       "FLAG_DEFEATED_LANCE", "FLAG_DEFEATED_CHAMP" }) do
@@ -1727,25 +2214,25 @@ end
 function Field.setRespawn(healLocationId)
   local session = Field._session
   if not session then return false end
-  local HealLocations = require("src.core.game3.heal_locations")
+  local HealLocations = lazyReq("src.core.game3.heal_locations")
   return HealLocations.applyToSession(session, healLocationId)
 end
 
 function Field.setWeather(id)
   Field.weather = tonumber(id) or 0
-  local Weather = require("src.core.game3.weather")
+  local Weather = lazyReq("src.core.game3.weather")
   Weather.apply(Field.weather)
 end
 
 local function passableColl(mapDef, pair, mid)
-  local Interaction = require("src.core.game3.scripting.interaction_scripts")
+  local Interaction = lazyReq("src.core.game3.scripting.interaction_scripts")
   local behaviors = pair and Interaction.behaviors and Interaction.behaviors[pair]
   local beh = behaviors and behaviors[mid]
   if beh ~= nil then
-    local ScriptColl = require("src.core.game3.scripting.collision")
+    local ScriptColl = lazyReq("src.core.game3.scripting.collision")
     return (ScriptColl.fromCell(mid, 0, beh, mapDef.kind))
   end
-  local okR, Register = pcall(require, "src.import.gba.register")
+  local okR, Register = pcall(lazyReq, "src.import.gba.register")
   local midIndex = okR and Register and Register._midIndex
   local row = midIndex and pair and midIndex[pair] and midIndex[pair][mid]
   return row and row.coll or 0x00
@@ -1781,10 +2268,17 @@ function Field.setMetatile(x, y, metatile, isImpassable)
     -- pokefirered/src/fieldmap.c:407
     layout:applyOverride(x, y, mid, coll, layout:elevAt(x, y))
     Field._overrideLayouts[mapId] = layout
-    local Collision = require("src.core.game3.collision")
-    Collision.bindMap(game, mapId, mapDef)
+    local Collision = lazyReq("src.core.game3.collision")
+    if not (Collision.patchCell and Collision.patchCell(mapId, mapDef, x, y)) then
+      Collision.bindMap(game, mapId, mapDef)
+    end
+    -- applyOverride already invalidated the view cell (FieldView.invalidateLayoutCell).
     local FieldView = package.loaded["src.core.game3.field_view"]
-    if FieldView then FieldView._nativeDirty = true end
+    local LayoutNative = package.loaded["src.core.game3.layout_native"]
+    if FieldView and not (FieldView.invalidateLayoutCell and LayoutNative
+        and layout.applyOverride == LayoutNative.applyOverride) then
+      FieldView._nativeDirty = true
+    end
   end
   local world = game and (game.overworld or game.world)
   if world and world.map and world.map.setBlock then

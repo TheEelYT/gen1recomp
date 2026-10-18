@@ -325,6 +325,7 @@ function Kit.beginFrame(mx, my, clicked, wheel)
   Kit.mouseX, Kit.mouseY = mx or 0, my or 0
   Kit.mouseClicked = clicked and true or false
   Kit.wheelY = wheel or 0
+  Kit._fieldHit, Kit._focusDrawn = false, false
   local down = false
   if love and love.mouse and love.mouse.isDown then
     down = love.mouse.isDown(1) and true or false
@@ -333,6 +334,7 @@ function Kit.beginFrame(mx, my, clicked, wheel)
   if not down then Kit._drag = nil end
   Kit.resetClip()
   Kit.blockClicks = false
+  Kit.occlude(nil)
   if love and love.timer and love.timer.getTime then
     Kit.time = love.timer.getTime()
   end
@@ -351,8 +353,12 @@ local function getNavLayer(slot)
   local id = tostring(slot.id or "")
   local y = slot.y or 0
 
-  -- Layer 1: Top Bar (Settings / Gear, Close / Quit)
-  if id == "gear" or id == "settings" or id == "close" or id == "quit" or (y < 45 * Kit.scale and not id:match("^tab%-")) then
+  -- Layer 1: Top Bar (Settings / Gear, Close / Quit, Save Sync).  tab-sync
+  -- rides the gear's cluster; by its tab- prefix alone it fell into layer 2,
+  -- so Right from it found nothing and Up jumped sideways to the gear.
+  if id == "gear" or id == "settings" or id == "close" or id == "quit"
+      or id == "tab-sync"
+      or (y < 45 * Kit.scale and not id:match("^tab%-")) then
     return 1
   end
 
@@ -376,6 +382,7 @@ end
 -- Anything typed while no field had focus is dropped here rather than
 -- replayed into the next field that gets clicked.
 function Kit.endFrame()
+  if Kit.focus and ((Kit.mouseClicked and not Kit._fieldHit) or not Kit._focusDrawn) then Kit.blur() end
   for i = #edits, 1, -1 do edits[i] = nil end
   Kit.wheelY = 0
   Kit._activateId = nil
@@ -517,6 +524,31 @@ function Kit._resolveNav()
     end
     return
   elseif dir == "up" or dir == "down" then
+    -- Within the layer first: the nearest control above/below in the same
+    -- layer wins, so Down from the cart reaches the Scan / Import button under
+    -- it instead of jumping over it to the footer.  The horizontal gap weighs
+    -- double so a control straight below beats one off to the side.
+    do
+      local best, bestScore
+      for i = 1, n do
+        local c = Kit._nav[i]
+        if c.id ~= cur.id and getNavLayer(c) == curLayer then
+          local dy = (c.y + c.h / 2) - cy
+          local forward = dir == "down" and dy or -dy
+          if forward > 1 then
+            local gap = math.max(0, c.x - (cur.x + cur.w), cur.x - (c.x + c.w))
+            local score = forward + gap * 2
+            if not bestScore or score < bestScore then
+              best, bestScore = c, score
+            end
+          end
+        end
+      end
+      if best then
+        Kit.focusId = best.id
+        return
+      end
+    end
     -- VERTICAL LAYER NAVIGATION (Up/Down steps between layers: 1 <-> 2 <-> 3 <-> 4)
     local targetLayer = dir == "up" and (curLayer - 1) or (curLayer + 1)
     targetLayer = math.max(1, math.min(4, targetLayer))
@@ -567,6 +599,10 @@ function Kit.keypressed(key)
     if key == "backspace" then edits[#edits + 1] = "\b" return true
     elseif key == "return" or key == "kpenter" or key == "escape" then
       edits[#edits + 1] = "\r" return true
+    elseif key == "tab" or key == "up" or key == "down" then
+      Kit.blur()
+      Kit.navigate(key == "up" and "up" or "down")
+      return true
     end
     -- printable keys arrive through textinput; everything else falls through
     return false
@@ -591,6 +627,7 @@ function Kit.gamepadpressed(button)
   if FileBrowser.active then
     return FileBrowser.gamepadpressed(action)
   end
+  if Kit.focus and action == "b" then Kit.blur() return true end
   if action == "dpup" then Kit.navigate("up") return true
   elseif action == "dpdown" then Kit.navigate("down") return true
   elseif action == "dpleft" then Kit.navigate("left") return true
@@ -605,24 +642,38 @@ function Kit.blur()
 end
 
 -- -------------------------------------------------------------- hit testing
-local occluderBox = { x = 0, y = 0, w = 0, h = 0 }
+local occluderBoxes = {}
+Kit._occluders = 0
 Kit._occluder = nil
 Kit._overlay = false
 
 function Kit.occlude(x, y, w, h)
   if x == nil then
+    Kit._occluders = 0
     Kit._occluder = nil
     return
   end
-  occluderBox.x, occluderBox.y, occluderBox.w, occluderBox.h = x, y, w, h
-  Kit._occluder = occluderBox
+  local n = Kit._occluders + 1
+  local o = occluderBoxes[n]
+  if not o then
+    o = {}
+    occluderBoxes[n] = o
+  end
+  o.x, o.y, o.w, o.h = x, y, w, h
+  Kit._occluders = n
+  Kit._occluder = occluderBoxes[1]
 end
 
 function Kit.occluded()
-  local o = Kit._occluder
-  if not o or Kit._overlay then return false end
-  return Kit.mouseX >= o.x and Kit.mouseX <= o.x + o.w
-    and Kit.mouseY >= o.y and Kit.mouseY <= o.y + o.h
+  if Kit._occluders == 0 or Kit._overlay then return false end
+  local mx, my = Kit.mouseX, Kit.mouseY
+  for i = 1, Kit._occluders do
+    local o = occluderBoxes[i]
+    if mx >= o.x and mx <= o.x + o.w and my >= o.y and my <= o.y + o.h then
+      return true
+    end
+  end
+  return false
 end
 
 -- A widget inside a clip region can sit at coordinates outside the visible
@@ -634,7 +685,7 @@ function Kit.hit(x, y, w, h)
       and Kit.mouseY >= c.y and Kit.mouseY <= c.y + c.h) then
     return false
   end
-  if Kit._occluder and Kit.occluded() then return false end
+  if Kit._occluders > 0 and Kit.occluded() then return false end
   return Kit.mouseX >= x and Kit.mouseX <= x + w
      and Kit.mouseY >= y and Kit.mouseY <= y + h
 end
@@ -707,17 +758,9 @@ end
 -- Primary actions carry color; secondary and destructive actions use a quiet
 -- surface and an outline. All faces share an inset hover/press highlight and
 -- a solid keyboard focus border, so controls never grow into their neighbors.
-local KINDS = {
-  primary  = { fill = PAL.green,  ink = PAL.inverse },
-  good     = { fill = PAL.green,  ink = PAL.inverse },
-  accent   = { fill = PAL.buttonBlue, ink = PAL.heading },
-  warn     = { fill = PAL.yellow, ink = PAL.inverse },
-  danger   = { fill = PAL.surface, ink = PAL.red, stroke = PAL.red },
-  ghost    = { fill = PAL.surface, ink = PAL.text, stroke = PAL.line },
-  disabled = { fill = PAL.surface, ink = PAL.muted, stroke = PAL.line },
-}
-Kit.KINDS = KINDS
+local Button = require("src.ui.kit.Button")
 local Icons = require("src.ui.kit.Icons")
+Kit.KINDS = Button.KINDS
 local NO_OPTS = {}
 
 function Kit.button(x, y, w, h, label, opts)
@@ -727,148 +770,7 @@ function Kit.button(x, y, w, h, label, opts)
   local focused = enabled and opts.id
     and Kit.focusable(opts.id, x, y, w, h) or false
   local hot = enabled and Kit.hover(x, y, w, h)
-  local face = opts.face or "fill"
-  local B = Theme.BUTTON
-  local radius = opts.radius or B.radius
-  local active = opts.active or opts.on
-  local invert = false
-  local fill, ink, stroke, strokeA, doEmboss, doRing, glowA
-  if face == "invert" then
-    invert = false
-    fill = (hot or focused) and PAL.raised or (opts.fill or PAL.surface)
-    ink = opts.ink or PAL.heading
-    stroke = opts.stroke or PAL.line
-    strokeA = (hot or focused) and Theme.A.focus or Theme.A.hairline
-    doRing = focused or hot
-  elseif face == "tab" then
-    invert = active and true or false
-    local tint = opts.color or opts.fill or PAL.ink
-    fill = invert and tint or PAL.surface
-    ink = invert and PAL.inverse or (opts.color or PAL.text)
-    if not invert then
-      stroke = tint
-      strokeA = (focused or hot) and Theme.A.focus
-        or (opts.color and Theme.A.hover or Theme.A.hairline)
-    end
-    doRing = focused or hot
-  elseif face == "chip" then
-    local c = opts.color or PAL.line
-    invert = active and true or false
-    if active then
-      fill = c
-      ink = PAL.inverse
-      doEmboss = true
-    else
-      fill = PAL.bg
-      ink = c
-      stroke = c
-      strokeA = (focused or hot) and Theme.A.focus or Theme.A.hover
-    end
-    doRing = focused or hot
-  else
-    local kind = KINDS[enabled and (opts.kind or "ghost") or "disabled"]
-    fill = (enabled and opts.fill) or kind.fill
-    ink = (enabled and opts.ink) or kind.ink
-    doEmboss = (opts.kind == "primary" or opts.kind == "good" or opts.kind == "accent")
-    stroke = kind.stroke
-    strokeA = stroke and Theme.A.hover or nil
-    doRing = hot or focused
-    if opts.glow and enabled and not doRing then
-      glowA = B.glowBase + B.glowAmp * (0.5 + 0.5 * math.sin(Kit.time * B.glowHz))
-    end
-  end
-  if opts.emboss ~= nil then doEmboss = opts.emboss end
-  if opts.ring ~= nil then doRing = opts.ring end
-  if G then
-    Theme.fillRounded(x, y, w, h, fill, enabled and 1 or B.disabledA, radius)
-    if doEmboss then
-      local es = enabled and ((hot or focused) and B.embossHot or B.embossRest)
-        or B.embossDisabled
-      Theme.emboss(x, y, w, h, es)
-    end
-    if strokeA then
-      Theme.strokeRounded(x, y, w, h, stroke, strokeA, 1, radius)
-    end
-    if doRing then
-      Theme.fillRounded(x, y, w, h, PAL.ink,
-        Kit.mouseDown and hot and 0.04 or 0.09, radius)
-      Theme.strokeRounded(x, y, w, h, PAL.ink,
-        focused and 1 or 0.7, focused and 2 or 1, radius)
-    elseif glowA then
-      Theme.strokeRounded(x - B.ringPad, y - B.ringPad,
-        w + 2 * B.ringPad, h + 2 * B.ringPad, PAL.lineStrong,
-        glowA, B.ringWidth, radius + B.ringPad)
-    end
-    local fname = opts.font or ((face == "chip") and "micro" or "button")
-    local ty = y + (h - Kit.textHeight(fname)) / 2
-    local image = opts.image
-    local drawFn = opts.drawFn
-    local letter = opts.letter
-    local hasLabel = label and label ~= ""
-    local bold = opts.bold
-    if bold == nil then bold = face ~= "tab" end
-    if opts.icon then
-      local box = math.min(w, h)
-      local size = math.floor(box * (hasLabel and 0.42 or 0.5))
-      local gap = math.floor(7 * Kit.scale)
-      local shown = hasLabel and Kit.ellipsize(fname, label,
-        w - size - gap - 2 * B.labelPad * Kit.scale) or ""
-      local groupW = size + (hasLabel and gap + Kit.textWidth(fname, shown) or 0)
-      local ix = opts.align == "left" and x + B.labelPad * Kit.scale or x + (w - groupW) / 2
-      Icons.draw(opts.icon, ix, y + (h - size) / 2, size, ink,
-        enabled and 1 or B.disabledA)
-      if hasLabel then
-        if bold then Kit.textBold(fname, shown, ix + size + gap, ty, ink)
-        else Kit.text(fname, shown, ix + size + gap, ty, ink) end
-      end
-    elseif image then
-      local box = h
-      local boxX, boxY = x, y
-      if not hasLabel then
-        box = math.min(w, h)
-        boxX = x + (w - box) / 2
-        boxY = y + (h - box) / 2
-      end
-      local iw, ih = image:getDimensions()
-      local pad = math.floor(box * (opts.iconPad or B.iconPad))
-      local s = math.min((box - 2 * pad) / iw, (box - 2 * pad) / ih)
-      Theme.col(ink, enabled and 1 or B.disabledA)
-      G.draw(image, Theme.snap(boxX + (box - iw * s) / 2),
-        Theme.snap(boxY + (box - ih * s) / 2), 0, s, s)
-      if hasLabel then
-        local lx = x + h + B.letterGap * Kit.scale
-        if bold then Kit.textBold(fname, label, lx, ty, ink)
-        else Kit.text(fname, label, lx, ty, ink) end
-      end
-    elseif drawFn then
-      drawFn(x, y, w, h, invert)
-    elseif letter then
-      if opts.letterBold then Kit.textCenterBold(fname, letter, x, ty, h, ink)
-      else Kit.textCenter(fname, letter, x, ty, h, ink) end
-      if hasLabel then
-        local lx = x + h + B.letterGap * Kit.scale
-        if bold then Kit.textBold(fname, label, lx, ty, ink)
-        else Kit.text(fname, label, lx, ty, ink) end
-      end
-    elseif hasLabel then
-      local shown = Kit.ellipsize(fname, label, w - B.labelInset * Kit.scale
-        - (opts.trailingIcon and h * 0.65 or 0))
-      if opts.align == "left" then
-        local lx = x + B.labelPad * Kit.scale
-        if bold then Kit.textBold(fname, shown, lx, ty, ink)
-        else Kit.text(fname, shown, lx, ty, ink) end
-      elseif bold then
-        Kit.textCenterBold(fname, shown, x, ty, w, ink)
-      else
-        Kit.textCenter(fname, shown, x, ty, w, ink)
-      end
-    end
-  end
-  if opts.trailingIcon and G then
-    local size = math.floor(h * 0.4)
-    Icons.draw(opts.trailingIcon, x + w - size - B.labelPad * Kit.scale,
-      y + (h - size) / 2, size, ink, enabled and 1 or B.disabledA)
-  end
+  Button.draw(Kit, x, y, w, h, label, opts, hot, focused)
   if not enabled then return false end
   return Kit.press(x, y, w, h)
     or (not Kit.blockClicks and opts.id ~= nil
@@ -1063,6 +965,7 @@ function Kit.textfield(id, x, y, w, h, value, placeholder)
     value = VirtualKeyboard.text
   end
 
+  if Kit.press(x, y, w, h) then Kit._fieldHit = true end
   if Kit.press(x, y, w, h) or (Kit._activateId == id) then Kit.focus = id end
   local focused = (Kit.focus == id)
   if focused then
@@ -1077,6 +980,7 @@ function Kit.textfield(id, x, y, w, h, value, placeholder)
         value = value .. e
       end
     end
+    if focused then Kit._focusDrawn = true end
   end
   if G then
     Theme.fillRounded(x, y, w, h, PAL.bg, 1)
@@ -1114,11 +1018,11 @@ function Kit.pager(x, y, w, page, total, perPage, idPrefix, compact)
   local gap = 8 * Kit.scale
   idPrefix = idPrefix or "pager"
 
-  if Kit.button(x, y, bw, h, "< Prev", { kind = "ghost", font = "small",
+  if Kit.button(x, y, bw, h, "Prev", { kind = "ghost", font = "small", icon = "chevron-left",
       enabled = page > 1, id = idPrefix .. ":prev" }) then
     page = math.max(1, page - 1)
   end
-  if Kit.button(x + bw + gap, y, bw, h, "Next >", { kind = "ghost",
+  if Kit.button(x + bw + gap, y, bw, h, "Next", { kind = "ghost", icon = "chevron-right",
       font = "small", enabled = page < pages, id = idPrefix .. ":next" }) then
     page = math.min(pages, page + 1)
   end

@@ -79,6 +79,10 @@ end
 -- to the A/B path once the cry is over -- see TextBox's opts.auto.wait
 -- (#247, #251).
 function Commands.show_text(ctx, textId, subs, extraOpts)
+  -- home/window.asm:289
+  if ctx.overworld and ctx.overworld.applyPendingFace then
+    ctx.overworld:applyPendingFace()
+  end
   local text = ctx.game.data.text[textId]
   if not text and ctx.overworld then
     text = ctx.game.data:resolveText(ctx.overworld.map.def.label, textId)
@@ -235,7 +239,7 @@ function Commands.jump_if_false(ctx, target)
   if not ctx.lastCheck then return target end
 end
 
--- give_item <itemId> [count] [gotText] [fullText]: adds to the bag, plays
+-- give_item <itemId> [count] [gotText] [fullText] [sound] [fullNoFace]: adds to the bag, plays
 -- the gift jingle and shows the "got item!" box.  pokered's GiveItem (home/
 -- give.asm) copies the item name to wStringBuffer and every gift script
 -- then prints a text ending "<PLAYER> got\n<item>!" with
@@ -243,7 +247,8 @@ end
 -- text (label or literal; {RAM:wStringBuffer} becomes the item name);
 -- pass false when the script shows its own received-text row.  fullText
 -- picks the refusal text (scripts/BillsHouse.asm:184-186).
-function Commands.give_item(ctx, itemId, count, gotText, fullText)
+function Commands.give_item(ctx, itemId, count, gotText, fullText, sound,
+                             fullNoFace)
   -- the bag can refuse at its configured capacity (20 in vanilla): halt
   -- the script, so later set_flag rows don't burn the gift -- make
   -- room and talk again, like the original (pokered's `jr nc, .bag_full`
@@ -252,6 +257,10 @@ function Commands.give_item(ctx, itemId, count, gotText, fullText)
       ctx.save, itemId, count or 1, ctx.game.data) then
     Commands.show_text(ctx, fullText or (ctx.game.data.text
       and ctx.game.data.text._BagFullText) or Strings("You can't carry\nany more items!"))
+    if fullNoFace then
+      -- scripts/SSAnneCaptainsRoom.asm:36-37
+      Commands.no_npc_face_player(ctx, true)
+    end
     return math.huge
   end
   local def = ctx.game.data.items[itemId]
@@ -261,7 +270,8 @@ function Commands.give_item(ctx, itemId, count, gotText, fullText)
   -- the jingle rides the box -- Sound.play routes fanfares through
   -- Music.duckForFanfare, like PlaySoundWaitForCurrent
   local Sound = require("src.core.Sound")
-  local jingle = (def and def.keyItem) and "Get_Key_Item" or "Get_Item1"
+  local jingle = sound
+    or ((def and def.keyItem) and "Get_Key_Item" or "Get_Item1")
   if gotText ~= false then
     -- the gift texts carry the jingle as a trailing text command
     -- (sound_get_item_1 / sound_get_key_item -> home/text.asm
@@ -382,8 +392,9 @@ function Commands.start_battle(ctx, kind, a, b)
   runner:yield()
 end
 
-function Commands.warp(ctx, mapId, x, y, facing)
+function Commands.warp(ctx, mapId, x, y, facing, door)
   local runner = ctx.runner
+  if door then ctx.overworld.doorWarp = true end
   ctx.overworld:startWarpTo(mapId, x, y, facing, function()
     runner:resume()
   end)
@@ -831,6 +842,10 @@ function Commands.give_pokemon(ctx, species, level, skipNickname, gotText)
   -- engine/events/give_pokemon.asm:46
   if gotText and ctx.runner then
     Commands.text_sound(ctx, "Get_Item1")
+    -- engine/events/give_pokemon.asm:71-74
+    if not gift.nickname and not skipNickname then
+      ctx.textOpts.auto.wait = false
+    end
     Commands.show_text(ctx, "_GotMonText", { RAM = species })
   end
   -- AskName: both AddPartyMon and SendNewMonToBox; skip mod-set nicks
@@ -856,6 +871,12 @@ function Commands.give_pokemon(ctx, species, level, skipNickname, gotText)
         function() end))
     end
   end
+end
+
+-- pokeyellow scripts/OaksLab.asm:1037
+function Commands.set_catch_rate(ctx, slot, value)
+  local mon = ctx.save.party and ctx.save.party[slot]
+  if mon then mon.catchRate = value end
 end
 
 function Commands.give_money(ctx, amount)
@@ -1158,6 +1179,16 @@ function Commands.trade(ctx, tradeIndex, doneFlag)
     onDone = function() runner:resume() end,
   })
   runner:yield()
+  -- pokeyellow engine/events/in_game_trades.asm:236
+  if require("src.core.GameVersion").isYellow() then
+    local Evolution = require("src.pokemon.Evolution")
+    local evolved = Evolution.pendingFor(ctx.game, newMon, { kind = "trade" })
+    if evolved then
+      Evolution.evolve(ctx.game, newMon, evolved,
+        function() runner:resume() end, "TRADE")
+      runner:yield()
+    end
+  end
   -- TradedForText carries sound_get_key_item after the text, so the jingle
   -- rides the box and blocks it (home/text.asm TextCommand_SOUND), then the
   -- dialogset's thanks

@@ -264,6 +264,9 @@ function Handshake.checkCompat(localHello, remoteHello)
   if major(remoteHello.engineVersion) ~= major(localHello.engineVersion) then
     return "refused", "engine_mismatch"
   end
+  if tonumber(remoteHello.protocol) ~= tonumber(localHello.protocol) then
+    return "refused", "protocol_mismatch"
+  end
   -- A lockstep battle needs the same engine RELEASE, not just the same
   -- major: the fingerprint only covers the data/mod link surface, and
   -- battle logic changes between minor releases (parity fixes, move
@@ -366,6 +369,24 @@ function Handshake.describe(localHello, remoteHello, verdict, mode)
   local lines = {}
   local peerName = remoteHello and remoteHello.name
   local peer = type(peerName) == "string" and peerName or "THEY"
+  if type(localHello) == "table" and type(localHello.game3) == "table"
+      and type(remoteHello) == "table" and type(remoteHello.game3) == "table" then
+    local Game3Link = require("src.link.Game3Link")
+    if Game3Link.crossFamily(localHello, remoteHello) then
+      local GameVersion = require("src.core.GameVersion")
+      local info = GameVersion.info(Game3Link.peerVersionOf(localHello, remoteHello))
+      wrap(lines, "The other game is")
+      wrap(lines, tostring(info and info.label or "another game"):upper() .. ".")
+      if mode == "battle" then
+        wrap(lines, "Link battles need")
+        wrap(lines, "the same game.")
+      else
+        wrap(lines, "Trading works")
+        wrap(lines, "between them.")
+      end
+      return lines
+    end
+  end
   if verdict == "refused" then
     -- checked before the v1 arm for the same reason checkCompat checks it
     -- first: a Gen 1 peer meeting a Gen 2 one has no `protocol` to read yet
@@ -386,6 +407,12 @@ function Handshake.describe(localHello, remoteHello, verdict, mode)
       wrap(lines, "with no mods.")
       wrap(lines, "Your mods can't")
       wrap(lines, "link with it.")
+    elseif tonumber(remoteHello.protocol)
+           ~= tonumber(localHello and localHello.protocol) then
+      wrap(lines, "The other game's")
+      wrap(lines, "link version")
+      wrap(lines, "differs. Update")
+      wrap(lines, "both games.")
     else
       wrap(lines, "The two games are")
       wrap(lines, "different engine")

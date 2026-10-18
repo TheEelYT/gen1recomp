@@ -27,9 +27,12 @@ table.insert(package.searchers or package.loaders, 1, function(modname)
   end
 end)
 
+require("src.import.ImportGc").tune()
+
 local version, prefix, romData, progressName, resultName, romSha1, isVita = ...
 
 _G.POKEPORT_VITA = isVita == true
+if isVita then require("src.import.ImportGc").tune() end
 
 local progressChannel = love.thread and love.thread.getChannel and love.thread.getChannel(progressName)
 local resultChannel = love.thread and love.thread.getChannel and love.thread.getChannel(resultName)

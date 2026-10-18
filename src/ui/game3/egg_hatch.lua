@@ -9,13 +9,11 @@ local Oam = require("src.core.game3.oam")
 local SE = require("src.core.game3.se_ids")
 local RomText = require("src.core.game3.rom_text")
 local BattleChrome = require("src.ui.game3.battle_chrome")
+local CacheBlob = require("src.import.CacheBlob")
 
 local EggHatch = {}
 
 local STACK_ID = "egg_hatch"
-local MUS_EVOLUTION_INTRO = 263 -- pokefirered/include/constants/songs.h:270
-local MUS_EVOLUTION = 264 -- pokefirered/include/constants/songs.h:271
-local MUS_EVOLVED = 259 -- pokefirered/include/constants/songs.h:266
 
 EggHatch.open = false
 EggHatch._mon = nil
@@ -73,13 +71,13 @@ local function read_bytes(path)
   if love and love.filesystem and love.filesystem.getInfo then
     local info = love.filesystem.getInfo(path)
     if info then
-      local data = love.filesystem.read(path)
+      local data = CacheBlob.readFs(path)
       if data and #data > 0 then return data end
     end
   end
   local f = io.open(path, "rb")
   if f then
-    local d = f:read("*a")
+    local d = CacheBlob.decode(path, f:read("*a"))
     f:close()
     if d and #d > 0 then return d end
   end
@@ -160,7 +158,7 @@ EggHatch._finish = finish_scene
 local function hatched_pic()
   local mon = EggHatch._mon
   return Pokemon.frontPic(Pokemon.picSpecies(EggHatch._species, mon and mon.personality), nil,
-    Pokemon.isShiny(mon), mon and mon.personality)
+    Pokemon.isShiny(mon), mon and mon.personality, "hatch")
 end
 
 function EggHatch.start(mon, opts)
@@ -189,12 +187,13 @@ function EggHatch.start(mon, opts)
   EggHatch._fade = 1
   EggHatch._shards = {}
   EggHatch._shardVelocityId = 0
+  EggHatch._monAnim = nil
   EggHatch.open = true
   if Oam and Oam.destroyAll then Oam.destroyAll() end
   if not BattleChrome._installed then BattleChrome.install(nil) end
   if Message.setFrame then Message.setFrame("battle") end
   pcall(hatched_pic)
-  pcall(Pokemon.frontPic, Pokemon.SPECIES_EGG)
+  pcall(Pokemon.frontPic, Pokemon.SPECIES_EGG, nil, nil, nil, "hatch")
   Stack.push(STACK_ID, EggHatch, { hideBelow = true, fullscreen = true })
   return true
 end
@@ -205,9 +204,9 @@ local function bgm_tick()
   if t == 0 then
     song(0)
   elseif t == 1 then
-    song(MUS_EVOLUTION_INTRO, { loop = false })
+    song(require("src.core.game3.song_ids").MUS_EVOLUTION_INTRO, { loop = false })
   elseif t == 61 then
-    song(MUS_EVOLUTION, { restart = true, loop = true })
+    song(require("src.core.game3.song_ids").MUS_EVOLUTION, { restart = true, loop = true })
   end
   if t <= 61 then EggHatch._bgmTimer = t + 1 end
 end
@@ -256,7 +255,16 @@ local function shake_tick()
         se(SE.SE_EGG_HATCH or 106)
         EggHatch._state = "cry"
         EggHatch._timer = 0
-        pcall(Audio.playCry, EggHatch._species)
+        local MonAnim = require("src.core.game3.mon_anim")
+        if MonAnim.enabled() then
+          -- pokeemerald/src/egg_hatch.c:643
+          local sp = tonumber(EggHatch._species) or 0
+          EggHatch._monAnim = MonAnim.run(MonAnim.newSprite(sp, { data = { [2] = sp } }), { tasksFirst = true })
+          MonAnim.doFront(EggHatch._monAnim, sp, false, 1, {
+            cry = function(s, pan) pcall(Audio.playCry, s, 0, pan) end })
+        else
+          pcall(Audio.playCry, EggHatch._species)
+        end
       end
     end
     return
@@ -350,6 +358,8 @@ function EggHatch.update(dt)
     EggHatch._timer = EggHatch._timer + 1
     -- pokefirered/src/daycare.c:1920 IsCryFinished
     local done = Audio.isCryFinished and Audio.isCryFinished()
+    local MonAnim = require("src.core.game3.mon_anim")
+    if EggHatch._monAnim then done, EggHatch._timer = MonAnim.done(EggHatch._monAnim), 0 end
     if EggHatch._timer >= 40 or done then
       EggHatch._state = "hatched_msg"
       EggHatch._timer = 0
@@ -357,7 +367,7 @@ function EggHatch.update(dt)
       Message.show(RomText.box("gText_HatchedFromEgg", { stringVars = { EggHatch._name } }), { stay = true, frame = "battle" })
       if Message.skipReveal then Message.skipReveal() end
       -- pokefirered/src/daycare.c:1929 PlayFanfare(MUS_EVOLVED)
-      pcall(Audio.playFanfare, MUS_EVOLVED)
+      pcall(Audio.playFanfare, require("src.core.game3.song_ids").MUS_EVOLVED)
     end
 
   elseif st == "hatched_msg" then
@@ -365,11 +375,13 @@ function EggHatch.update(dt)
     -- pokefirered/src/daycare.c:1935 IsFanfareTaskInactive
     local quiet = (not Audio.isFanfareFinished) or Audio.isFanfareFinished()
     if quiet and EggHatch._timer > 1 then
+      -- pokefirered/src/daycare.c:1944 gText_NickHatchPrompt, pokeemerald/src/egg_hatch.c:673
+      local key = require("src.core.game3.profile").family(EggHatch._session) == "rse"
+        and "gText_NicknameHatchPrompt" or "gText_NickHatchPrompt"
+      local text = RomText.box(key, { stringVars = { EggHatch._name } })
       EggHatch._state = "nickname_msg"
       EggHatch._timer = 0
-      -- pokefirered/src/daycare.c:1944 gText_NickHatchPrompt
-      Message.show(RomText.box("gText_NickHatchPrompt", { stringVars = { EggHatch._name } }),
-        { stay = true, frame = "battle" })
+      Message.show(text, { stay = true, frame = "battle" })
     end
 
   elseif st == "nickname_msg" then
@@ -416,14 +428,21 @@ function EggHatch.draw()
       local quad = eggs.quads[EggHatch._eggFrame or 0] or eggs.quads[0]
       love.graphics.draw(eggs.image, quad, x, EGG_Y, 0, 1, 1, HATCH_W / 2, HATCH_H / 2)
     else
-      local eggPic = Pokemon.frontPic(Pokemon.SPECIES_EGG)
+      local eggPic = Pokemon.frontPic(Pokemon.SPECIES_EGG, nil, nil, nil, "hatch")
       if eggPic and eggPic.image then
         love.graphics.draw(eggPic.image, x, EGG_Y, 0, 1, 1, 32, 32)
       end
     end
   else
     local pic = hatched_pic()
-    if pic and pic.image then
+    local ma = EggHatch._monAnim
+    if ma and pic and pic.image then
+      local MonAnim = require("src.core.game3.mon_anim")
+      local mon = EggHatch._mon
+      local f = MonAnim.framePic(Pokemon.picSpecies(EggHatch._species, mon and mon.personality), ma.frame,
+        Pokemon.isShiny(mon)) or pic
+      MonAnim.draw(ma, f.image, MON_X, MON_Y)
+    elseif pic and pic.image then
       love.graphics.draw(pic.image, MON_X, MON_Y, 0, 1, 1, 32, 32)
     end
   end

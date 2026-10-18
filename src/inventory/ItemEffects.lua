@@ -13,6 +13,7 @@
 local Flags = require("src.script.Flags")
 local Strings = require("src.core.Strings")
 local romText = require("src.core.RomText")
+local Status = require("src.battle.Status")
 
 local ItemEffects = {}
 
@@ -93,14 +94,11 @@ function ItemEffects.healsHP(id)
       or id == "REVIVE" or id == "MAX_REVIVE"
 end
 
--- .useRareCandy prints over the still-drawn party menu
--- (engine/items/item_effects.asm:1392-1418); .useVitamin ends at
--- RemoveUsedItem the same way (engine/items/item_effects.asm:1315-1322);
--- stones keep the menu on screen (engine/items/item_effects.asm:772-793,
+-- engine/items/item_effects.asm:1223-1237, :1392-1418, :1315-1322, :772-793
 -- engine/pokemon/evos_moves.asm:120-128
--- (engine/items/item_effects.asm:2022-2039)
+-- engine/items/item_effects.asm:2022-2039
 function ItemEffects.keepsPartyMenuOpen(id)
-  return ItemEffects.healsHP(id) or id == "RARE_CANDY"
+  return ItemEffects.isBattleMedicine(id) or id == "RARE_CANDY"
       or VITAMINS[id] ~= nil or ItemEffects.isStone(id)
       or id == "ELIXER" or id == "MAX_ELIXER"
       or id == "ETHER" or id == "MAX_ETHER" or id == "PP_UP"
@@ -110,6 +108,20 @@ function ItemEffects.isBattleMedicine(id)
   return HEAL_AMOUNT[id] ~= nil or STATUS_HEAL[id] ~= nil
       or id == "MAX_POTION" or id == "FULL_RESTORE"
       or id == "REVIVE" or id == "MAX_REVIVE"
+end
+
+-- engine/items/item_effects.asm:803
+function ItemEffects.notTimeInBattle(id, itemDef)
+  return (VITAMINS[id] or STONES[id] or id == "PP_UP"
+          or id == "RARE_CANDY" or id == "COIN_CASE"
+          or REPELS[id] or (itemDef and itemDef.machine)) and true or false
+end
+
+-- engine/items/item_effects.asm:805-808
+function ItemEffects.usesMedicineMenu(id)
+  return HEAL_AMOUNT[id] or STATUS_HEAL[id] or id == "MAX_POTION"
+      or id == "FULL_RESTORE" or id == "REVIVE" or id == "MAX_REVIVE"
+      or id == "RARE_CANDY" or VITAMINS[id] or false
 end
 
 -- Does this item need a party-member target?
@@ -145,6 +157,12 @@ local function cureActiveToxic(battle, target)
   if not battle then return end
   for _, b in ipairs({ battle.player, battle.enemy }) do
     if b and b.mon == target then b.toxicCounter = nil end
+  end
+end
+
+local function activeBattler(battle, target)
+  if battle and battle.player and battle.player.mon == target then
+    return battle.player
   end
 end
 
@@ -234,10 +252,7 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
   -- ItemUseVitamin / ItemUsePPUp / ItemUseEvoStone / ItemUseCoinCase /
   -- ItemUseTMHM / ItemUseRepelCommon all refuse mid-battle
   -- (jp nz, ItemUseNotTime)
-  if battle and (VITAMINS[itemId] or STONES[itemId] or itemId == "PP_UP"
-                 or itemId == "RARE_CANDY" or itemId == "COIN_CASE"
-                 or REPELS[itemId]
-                 or (itemDef and itemDef.machine)) then
+  if battle and ItemEffects.notTimeInBattle(itemId, itemDef) then
     return "failed", { notTime(data, save) }
   end
 
@@ -327,7 +342,7 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
       local stat = X_ITEMS[itemId]
       local cur = b.stages[stat] or 0
       -- ItemUseXStat: PrintItemUseTextAndRemoveItem, then StatModifierUpEffect
-      if cur >= 6 then
+      if cur >= 6 or require("src.battle.Damage").statAtCap(battle, b, stat) then
         return "consumed", { used }, {
           useJingle = true,
           afterMessages = { romText(data, "_NothingHappenedText",
@@ -345,6 +360,8 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
       end
       return "consumed", { used }, {
         useJingle = true,
+        -- engine/items/item_effects.asm:1657
+        battleAnim = "XSTATITEM_ANIM",
         afterMessages = { Strings("%s's\n%s rose!", b.name,
                                   Strings(STAT_LABEL[stat])) },
       }
@@ -380,8 +397,9 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
     local allMoves = itemId == "ELIXER" or itemId == "MAX_ELIXER"
     local function restore(mv)
       local mdef = data.moves[mv.id]
-      local maxPP = mdef and (mdef.pp + (mv.ppUps or 0) * math.floor(mdef.pp / 5))
-      if maxPP and mv.pp < maxPP then
+      local maxPP = mdef and require("src.pokemon.Pokemon").maxPP(mdef.pp, mv.ppUps)
+      -- engine/items/item_effects.asm:2078
+      if maxPP and (mv.pp < maxPP or (full and (mv.ppUps or 0) > 0)) then
         mv.pp = full and maxPP or math.min(maxPP, mv.pp + 10)
         return true
       end
@@ -425,6 +443,7 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
        and target.hp >= target.stats.hp and target.status then
       target.status = nil
       cureActiveToxic(battle, target)
+      Status.dropPenaltyOnCure(battle, activeBattler(battle, target))
       require("src.core.Sound").play(data, "Heal_Ailment")
       return "consumed", { romText(data, CURE_TEXT.FULL_HEAL,
         "%s's\nstatus returned\nto normal!", monName(data, target)) }
@@ -447,10 +466,14 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
     local msgs = { romText(data, "_PotionText", "%s's HP\nwas restored!",
                      monName(data, target), target.hp - before) }
     if itemId == "FULL_RESTORE" then
+      -- engine/items/item_effects.asm:1172
+      Status.keepPenaltyOnCure(battle, activeBattler(battle, target))
       target.status = nil
-      cureActiveToxic(battle, target)
+      if not Status.toxicSurvivesCure(battle) then cureActiveToxic(battle, target) end
     end
-    require("src.core.Sound").play(data, "Heal_HP")
+    local Sound = require("src.core.Sound")
+    if battle then Sound.stopLoop("Low_Health_Alarm") end
+    Sound.play(data, "Heal_HP")
     return "consumed", msgs, { healedFrom = before }
   end
 
@@ -461,6 +484,7 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
     end
     target.status = nil
     cureActiveToxic(battle, target)
+    Status.dropPenaltyOnCure(battle, activeBattler(battle, target))
     require("src.core.Sound").play(data, "Heal_Ailment")
     return "consumed", { romText(data, CURE_TEXT[itemId],
       "%s's\nstatus returned\nto normal!", monName(data, target)) }
@@ -568,8 +592,7 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
     local mdef = mv and data.moves[mv.id]
     if mdef and (mv.ppUps or 0) < 3 then
       mv.ppUps = (mv.ppUps or 0) + 1
-      -- each PP UP adds maxPP/5 uses on top of the base maximum
-      mv.pp = mv.pp + math.floor(mdef.pp / 5)
+      mv.pp = mv.pp + require("src.pokemon.Pokemon").ppUpBonus(mdef.pp)
       return "consumed", { romText(data, "_PPIncreasedText",
         "%s's PP\nincreased!", mdef.name) }
     end
@@ -623,6 +646,11 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
     if ow and ow.player and ow.player.surfing then
       return "failed", { notTime(data, save) }
     end
+    -- FishingInit's `ret c` -> ItemUseNotTime -> ItemUseFailed, so a rod
+    -- away from water leaves the bag up (item_effects.asm:1893-1901)
+    if ow and ow.facingIsShoreOrWater and not ow:facingIsShoreOrWater() then
+      return "failed", { notTime(data, save) }
+    end
     return "fish", itemId
   end
 
@@ -658,6 +686,10 @@ function ItemEffects.use(data, save, itemId, target, battle, moveIndex, ow)
       return "failed", { notTime(data, save) }
     end
     return "itemfinder"
+  end
+  if itemId == "OAKS_PARCEL" then
+    -- engine/items/item_effects.asm:1918-1919
+    return "failed", { data.text._ItemUseNotYoursToUseText }
   end
   if itemId == "COIN_CASE" then
     return "failed", { romText(data, "_CoinCaseNumCoinsText",

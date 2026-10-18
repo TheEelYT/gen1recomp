@@ -6,7 +6,6 @@
 -- rather than a Gen 1 learnset table.
 --
 -- Stat formula is unchanged from Gen 1 (data/pokemon/base_stats + DVs):
---   stat = floor((base * 2 + DV * 2 + floor(sqrt(statExp) / 4)) * level / 100) + 5
 --   HP is the same but + level + 10
 -- with the Gen 2 twist that a mon's SpA and SpD share one Special DV, which is
 -- why a high-Special DV raises both.
@@ -19,6 +18,7 @@
 
 local GameVersion = require("src.core.GameVersion")
 local Unown = require("src.core.gen2.Unown")
+local Gender = require("src.core.gen2.Gender")
 -- The mod event bus.  pokemon.level_up and pokemon.move_learned are the SAME
 -- names src/battle/Experience.lua and src/battle/BattleState.lua raise on
 -- Gen 1, with the same payload keys: a mod that watches a Red party watches a
@@ -136,6 +136,21 @@ local function rand(a, b)
   return math.random(a, b)
 end
 
+-- ../pokecrystal/macros/data.asm:23
+local function percent(n) return math.floor(n * 255 / 100) end
+Mon.WILD_NO_ITEM_THRESHOLD = percent(75) + 1
+Mon.WILD_ITEM2_THRESHOLD = percent(8)
+
+-- ../pokecrystal/engine/battle/core.asm:6009-6039
+function Mon.wildItem(def, forceItem, random)
+  local items = (def and def.items) or {}
+  if forceItem then return items[1] end
+  random = random or function(n) return rand(0, n - 1) end
+  if random(256) < Mon.WILD_NO_ITEM_THRESHOLD then return nil end
+  if random(256) < Mon.WILD_ITEM2_THRESHOLD then return items[2] end
+  return items[1]
+end
+
 function Mon.randomDVs()
   return {
     hp = nil, -- derived below
@@ -155,8 +170,13 @@ function Mon.hpDV(dvs)
     + bit(dvs.speed) * 2 + bit(dvs.special)
 end
 
+-- engine/math/get_square_root.asm:3
+local function statExpBonus(statExp)
+  return math.floor(math.min(255, math.ceil(math.sqrt(math.max(0, statExp or 0)))) / 4)
+end
+
 local function statValue(base, dv, level, statExp)
-  local exp = math.floor(math.sqrt(statExp or 0) / 4)
+  local exp = statExpBonus(statExp)
   return math.floor((((base or 1) * 2 + (dv or 0) * 2 + exp) * level) / 100) + 5
 end
 
@@ -176,7 +196,7 @@ function Mon.stats(baseStats, dvs, level, statExp)
     speed = dvs.speed, special = specialDv,
   })
   local hp = math.floor((((baseStats.hp or 1) * 2 + hpDv * 2
-    + math.floor(math.sqrt(statExp.hp or 0) / 4)) * level) / 100)
+    + statExpBonus(statExp.hp)) * level) / 100)
     + level + 10
   return {
     hp = hp,
@@ -499,6 +519,10 @@ function Mon.new(data, species, level, opts)
   local def = data and data.pokemon and data.pokemon[species]
   if not def then return nil end
   level = math.max(1, math.min(Mon.MAX_LEVEL, level or 5))
+  local item = opts.item
+  if opts.wild then
+    item = Mon.wildItem(def, opts.forceItem, opts.random)
+  end
   local dvs = opts.dvs or Mon.randomDVs()
   dvs.hp = Mon.hpDV(dvs)
   local statExp = opts.statExp or Mon.newStatExp()
@@ -522,9 +546,7 @@ function Mon.new(data, species, level, opts)
     maxHp = stats.hp,
     types = def.types,
     moves = opts.moves or Mon.movesAtLevel(def, level, data.moves),
-    -- Held item; wild mons roll one from BaseData's two item slots on the cart,
-    -- which is not modeled yet, so only scripted gifts carry one.
-    item = opts.item,
+    item = item,
     status = nil,
     -- 70 for a caught mon, 120 for a gift/hatched one.
     happiness = opts.happiness or 70,
@@ -606,16 +628,9 @@ function Mon.isShiny(dvs, ctx)
   return shiny and true or false
 end
 
--- Gender comes from the Attack DV against the species' ratio threshold: an
--- Attack DV *below* the threshold is female (BaseData's `db GENDER_F12_5` is
--- already scaled out of 256).
+-- pokecrystal/engine/pokemon/mon_stats.asm:124
 function Mon.vanillaGender(def, dvs)
-  local ratio = def and def.genderRatio
-  if not ratio then return "unknown" end
-  if ratio == 0xff then return "unknown" end
-  -- The DV is 0..15; the threshold is out of 256 in steps of 16.
-  local threshold = math.floor(ratio / 16)
-  return ((dvs and dvs.attack or 0) < threshold) and "female" or "male"
+  return Gender.of(def and def.genderRatio, dvs)
 end
 
 local GENDERS = { male = true, female = true, unknown = true }

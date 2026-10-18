@@ -3,6 +3,7 @@
 
 local Logger = require("src.core.Logger")
 local Runtime = require("src.mods.Runtime")
+local GameVersion = require("src.core.GameVersion")
 
 local Gen3Compat = {}
 
@@ -90,6 +91,14 @@ end
 
 local MAP_PREFIX = "FR_"
 
+Gen3Compat.FAMILIES = { frlg = true }
+
+function Gen3Compat.appliesTo(version)
+  if type(version) ~= "string" then return true end
+  if not GameVersion.VERSIONS[version] then return true end
+  return Gen3Compat.FAMILIES[GameVersion.layout(version)] == true
+end
+
 function Gen3Compat.gen1MapId(id)
   if type(id) ~= "string" then return id end
   if id:sub(1, #MAP_PREFIX) == MAP_PREFIX then return id:sub(#MAP_PREFIX + 1) end
@@ -132,6 +141,7 @@ function Gen3Compat.speciesName(sp)
   sp = tonumber(sp)
   if not sp then return nil end
   local P = g3("pokemon")
+  if P and P.picBaseSpecies then sp = P.picBaseSpecies(sp) or sp end
   if P and P.keyName then
     local key = P.keyName(sp)
     if key then return key end
@@ -299,7 +309,10 @@ local function flagId(name)
   local n = tonumber(name)
   if n then return n end
   local Flags = g3("scripting.flags")
-  return Flags and Flags.IDS and Flags.IDS[name] or nil
+  if not Flags then return nil end
+  local ok, t = pcall(Flags.active, session())
+  local ids = ok and t and t.IDS or Flags.IDS
+  return ids and ids[name] or nil
 end
 
 local function varId(name)
@@ -308,7 +321,10 @@ local function varId(name)
   local n = tonumber(name)
   if n then return n end
   local Flags = g3("scripting.flags")
-  return Flags and Flags.VAR_IDS and Flags.VAR_IDS[name] or nil
+  if not Flags then return nil end
+  local ok, t = pcall(Flags.active, session())
+  local ids = ok and t and t.VAR_IDS or Flags.VAR_IDS
+  return ids and ids[name] or nil
 end
 
 function Gen3Compat.getFlag(name)
@@ -768,7 +784,11 @@ local function buildGame()
     return function()
       local g = live()
       if not (g and g.saveGame) then return end
-      if g.saveOffered and not g:saveOffered() then return false end
+      if g.quickSaveAllowed then
+        if not g:quickSaveAllowed() then return false end
+      elseif g.saveOffered and not g:saveOffered() then
+        return false
+      end
       return g:saveGame()
     end
   end
@@ -2065,15 +2085,22 @@ Gen3Compat.centredSprite = centredEntry
 
 local function samePath(path) return path end
 
-local function hookedEntry(side, species, form, vanilla)
-  if not Runtime.wantsHook("pokemon.sprite") then return vanilla end
+local function unownLetterIndex(species)
   local P = g3("pokemon")
+  if not (P and P.picBaseSpecies) then return nil end
+  local _, letter = P.picBaseSpecies(species)
+  return letter and letter + 1 or nil
+end
+
+local function hookedEntry(side, species, form, vanilla, kind, shiny)
+  if not Runtime.wantsHook("pokemon.sprite") then return vanilla end
   local path = spriteOverrides[side][species]
     or ("data/generated/gba/pokemon/" .. side .. "/" .. species .. ".rgba")
   local g = live()
   local ctx = { data = g and dataProxy(g.data), species = Gen3Compat.speciesName(species),
-                gen3Species = species, form = form, side = side, kind = "battle",
-                trueColor = true, path = path }
+                gen3Species = species, form = form, side = side, kind = kind or "battle",
+                trueColor = true, path = path, letter = unownLetterIndex(species),
+                shiny = shiny }
   local hooked = Runtime.call("pokemon.sprite", samePath, path, ctx)
   if type(hooked) ~= "string" or hooked == path or isVanillaPic(hooked) then
     return vanilla
@@ -2081,31 +2108,125 @@ local function hookedEntry(side, species, form, vanilla)
   return centredEntry(hooked) or vanilla
 end
 
+local iconCache = {}
+local blankIcons = {}
+
+local function iconQuads(w, h, frames, sheetH)
+  local quads = {}
+  for f = 0, frames - 1 do
+    quads[f] = love.graphics.newQuad(0, f * h, w, h, w, sheetH)
+  end
+  if not quads[1] then quads[1] = quads[0] end
+  return quads
+end
+
+local function iconEntry(path)
+  local hit = iconCache[path]
+  if hit ~= nil then return hit or nil end
+  local data = readImageData(path)
+  if not (data and love.graphics and love.graphics.newImage) then
+    warnOnce("icon." .. tostring(path),
+      "[gen3] icon override %s could not be loaded", tostring(path))
+    iconCache[path] = false
+    return nil
+  end
+  local iw, ih = data:getDimensions()
+  local w = math.min(iw, 32)
+  local h = (ih >= w * 2) and math.floor(ih / 2) or ih
+  local frames = math.max(1, math.floor(ih / h))
+  local image = love.graphics.newImage(data)
+  if image.setFilter then image:setFilter("nearest", "nearest") end
+  local quads = {}
+  for f = 0, frames - 1 do quads[f] = love.graphics.newQuad(0, f * h, w, h, iw, ih) end
+  if not quads[1] then quads[1] = quads[0] end
+  hit = { image = image, w = w, h = h, sheetH = ih, frames = frames, quads = quads,
+          path = path }
+  iconCache[path] = hit
+  return hit
+end
+
+local function blankIcon(vanilla)
+  local w = vanilla and vanilla.w or 32
+  local h = vanilla and vanilla.h or 32
+  local frames = vanilla and vanilla.frames or 2
+  local sheetH = vanilla and vanilla.sheetH or h * frames
+  local key = w .. "x" .. h .. "x" .. sheetH
+  local hit = blankIcons[key]
+  if hit then return hit end
+  if not (love and love.image and love.image.newImageData
+      and love.graphics and love.graphics.newImage) then
+    return vanilla
+  end
+  local image = love.graphics.newImage(love.image.newImageData(w, sheetH))
+  if image.setFilter then image:setFilter("nearest", "nearest") end
+  hit = { image = image, w = w, h = h, sheetH = sheetH, frames = frames,
+          quads = iconQuads(w, h, frames, sheetH), blank = true }
+  blankIcons[key] = hit
+  return hit
+end
+
+local function hookedIcon(species, mon, vanilla)
+  if not Runtime.wantsHook("pokemon.icon") then return vanilla end
+  local path = "data/generated/gba/pokemon/icons/" .. species .. ".rgba"
+  local g = live()
+  local ctx = { data = g and dataProxy(g.data), species = Gen3Compat.speciesName(species),
+                gen3Species = species, mon = mon, kind = "icon", trueColor = true,
+                path = path, letter = unownLetterIndex(species)
+               }
+  local hooked = Runtime.call("pokemon.icon", samePath, path, ctx)
+  if hooked == nil or hooked == false then return blankIcon(vanilla) end
+  if type(hooked) ~= "string" or hooked == path or isVanillaPic(hooked) then
+    return vanilla
+  end
+  return iconEntry(hooked) or vanilla
+end
+
+local function wrapIcons(P)
+  local iconOrig, monIconOrig = P.icon, P.monIcon
+  if iconOrig then
+    P.icon = function(species)
+      local entry = iconOrig(species)
+      local sp = tonumber(species)
+      if sp and sp >= 1 then return hookedIcon(sp, nil, entry) end
+      return entry
+    end
+  end
+  if iconOrig and monIconOrig and P.monPicSpecies then
+    P.monIcon = function(mon)
+      local sp = tonumber(P.monPicSpecies(mon))
+      local entry = iconOrig(sp)
+      if sp and sp >= 1 then return hookedIcon(sp, mon, entry) end
+      return entry
+    end
+  end
+end
+
 local function wrapPics(P)
   if not P or wrappedModules[P] then return end
   wrappedModules[P] = true
   local frontOrig, backOrig = P.frontPic, P.backPic
   if frontOrig then
-    P.frontPic = function(species, form, shiny, personality)
+    P.frontPic = function(species, form, shiny, personality, kind)
       local sp = tonumber(species)
       local path = sp and (tonumber(form) or 0) == 0 and spriteOverrides.front[sp]
       local entry = path and centredEntry(path)
       if not entry then entry = frontOrig(species, form, shiny, personality) end
-      if sp then return hookedEntry("front", sp, form, entry) end
+      if sp then return hookedEntry("front", sp, form, entry, kind, shiny) end
       return entry
     end
     P.frontSprite = P.frontPic
   end
   if backOrig then
-    P.backPic = function(species, form, shiny)
+    P.backPic = function(species, form, shiny, kind)
       local sp = tonumber(species)
       local path = sp and (tonumber(form) or 0) == 0 and spriteOverrides.back[sp]
       local entry = path and centredEntry(path)
       if not entry then entry = backOrig(species, form, shiny) end
-      if sp then return hookedEntry("back", sp, form, entry) end
+      if sp then return hookedEntry("back", sp, form, entry, kind, shiny) end
       return entry
     end
   end
+  wrapIcons(P)
 end
 
 local function seed(P)
@@ -2202,6 +2323,7 @@ end
 function Gen3Compat.applyMerged(game)
   if game then lastGame = game end
   imageCache = {}
+  iconCache = {}
   for key in pairs(recordCache) do recordCache[key] = nil end
   local okM, Moves = pcall(rawRequire, "src.core.game3.battle.moves")
   if okM and type(Moves) == "table" and type(Moves.onReload) == "function"

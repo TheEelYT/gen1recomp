@@ -3,8 +3,9 @@ local Window = require("src.ui.game3.window")
 local Options = require("src.core.game3.options")
 local Rows = require("src.ui.game3.option_rows")
 local RomText = require("src.core.game3.rom_text")
+local ShaderFXMenu = require("src.ui.game3.shaderfx_menu")
 
-local OptionMenu = {}
+local OptionMenu = { isMenu = true }
 
 OptionMenu.open = false
 OptionMenu.cursor = 1
@@ -44,6 +45,8 @@ end
 
 function OptionMenu.show(opts)
   opts = opts or {}
+  local other = require("src.ui.game3.screens").redirect("option", OptionMenu, opts.session)
+  if other then return other.show(opts) end
   OptionMenu.open = true
   OptionMenu._session = opts.session
   OptionMenu._onClose = opts.onClose
@@ -66,6 +69,7 @@ function OptionMenu.show(opts)
 end
 
 function OptionMenu.close()
+  ShaderFXMenu.close()
   OptionMenu.open = false
   OptionMenu._pages = nil
   Stack.pop("option")
@@ -146,6 +150,7 @@ end
 
 function OptionMenu.handleInput(input)
   if not input then return end
+  if ShaderFXMenu.isOpen() then return ShaderFXMenu.handleInput(input) end
   if input:wasPressed("up") then OptionMenu.move(-1)
   elseif input:wasPressed("down") then OptionMenu.move(1)
   elseif input:wasPressed("left") then OptionMenu.adjust(-1)
@@ -156,6 +161,7 @@ function OptionMenu.handleInput(input)
 end
 
 function OptionMenu.update()
+  ShaderFXMenu.update()
   if OptionMenu.open then
     OptionMenu._arrowK = (OptionMenu._arrowK or 0) + 1
   end
@@ -195,6 +201,7 @@ end
 
 function OptionMenu.draw()
   if not OptionMenu.open then return end
+  if ShaderFXMenu.isOpen() then return ShaderFXMenu.draw() end
   local p = page()
   if not p then return end
   local c = ctx()

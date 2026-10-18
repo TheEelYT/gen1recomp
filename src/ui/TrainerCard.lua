@@ -9,7 +9,7 @@ local Badges = require("src.inventory.Badges")
 local Font = require("src.render.Font")
 local Strings = require("src.core.Strings")
 
-local TrainerCard = {}
+local TrainerCard = { isMenu = true }
 TrainerCard.__index = TrainerCard
 TrainerCard.isOpaque = true
 
@@ -75,12 +75,13 @@ function TrainerCard.new(game, opts)
     game.data, "front", { kind = "trainer_card" })
   self.pic          = tryImage(picPath)
   self.picTrueColor = self.pic and picTrueColor or false
-  -- engine/menus/start_sub_menus.asm:480-487
+  -- engine/menus/start_sub_menus.asm:488
   if self.pic then
     local pw, ph = self.pic:getDimensions()
-    self.picW = math.max(0, math.min(40, pw))
-    self.picH = math.min(56, ph)
-    self.picQuad = love.graphics.newQuad(0, 0, self.picW, self.picH, pw, ph)
+    self.picW = math.max(0, math.min(32, pw - 8))
+    -- engine/menus/start_sub_menus.asm:599
+    self.picH = math.min(48, ph)
+    self.picQuad = love.graphics.newQuad(8, 0, self.picW, self.picH, pw, ph)
   end
 
   return self
@@ -148,8 +149,8 @@ function TrainerCard:draw()
   Font.draw(Strings("MONEY/¥%d", save.money or 0), 16, 32)
   local t = math.floor(save.playTime or 0)
   -- home/print_num.asm:217
-  Font.draw(Strings("TIME/  %d:%02d", math.floor(t / 3600),
-                    math.floor(t / 60) % 60), 16, 48)
+  Font.draw((Strings("TIME/  %d:%02d", math.floor(t / 3600),
+                     math.floor(t / 60) % 60):gsub("(%d):(%d%d)$", "%1<COLON>%2")), 16, 48)
 
   -- the circle-dotted BADGES banner (TrainerInfo_BadgesText)
   -- engine/menus/start_sub_menus.asm:544

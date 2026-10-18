@@ -13,7 +13,7 @@ local PartyView = require("src.core.game3.battle.party_view")
 local RomText = require("src.core.game3.rom_text")
 local TextIR = require("src.core.game3.scripting.text_ir")
 
-local BagMenu = {}
+local BagMenu = { isMenu = true }
 
 BagMenu.open = false
 BagMenu.cursor = 1
@@ -33,11 +33,7 @@ local LIST_W = 18
 local LIST_H = 13
 
 -- include/constants/songs.h:251
-local SE_BAG_CURSOR = 245
-local SE_BAG_POCKET = 246
-local SE_SELECT = 5
-local SE_USE_ITEM = 1
-local SE_GLASS_FLUTE = 110
+local SE = require("src.core.game3.se_ids")
 
 -- src/item_menu_icons.c:81
 local SHAKE_ROT = { -2, -4, -2, 0, 2, 4, 2, 0, -2, -4, -2, 0 }
@@ -57,6 +53,13 @@ local function se(id)
   pcall(function() require("src.core.game3.audio").playSe(id) end)
 end
 
+local function bag_se(name, role)
+  if SE[name] then return SE[name] end
+  local ok, P = pcall(function() return require("src.core.game3.profile").forSession(nil) end)
+  local sounds = ok and P and P.ui and P.ui.sounds
+  return sounds and sounds[role] and SE[sounds[role]]
+end
+
 -- src/menu_helpers.c:114 MenuHelpers_IsLinkActive
 -- src/union_room.c:4558 InUnionRoom
 local function link_menus_active()
@@ -66,7 +69,13 @@ local function link_menus_active()
   return type(Link) == "table" and Link.link ~= nil and Link.inLinkRoom() == true
 end
 
+local function bag_skin()
+  return require("src.ui.game3.screens").skin("bag", BagMenu._session)
+end
+
 local function actions_for_pocket(pocket, row)
+  local skin = bag_skin()
+  if skin and skin.actionsForPocket then return skin.actionsForPocket(pocket, row, BagMenu) end
   if BagMenu._battle then
     -- src/item_menu.c:1344
     local num = row and ItemsData.toNumericId(row.id)
@@ -80,6 +89,10 @@ local function actions_for_pocket(pocket, row)
     return { "CANCEL" }
   end
   pocket = pocket or "ITEMS"
+  if BagMenu._location == "blender" then
+    -- pokeemerald/src/item_menu.c:324
+    return { "CONFIRM", "CHECK_TAG", "CANCEL" }
+  end
   -- src/item_menu.c:1370
   if link_menus_active() then
     local num = row and ItemsData.toNumericId(row.id)
@@ -101,10 +114,15 @@ local function actions_for_pocket(pocket, row)
   elseif pocket == "TM_CASE" then
     return { "USE", "CANCEL" }
   elseif pocket == "BERRY_POUCH" then
+    if require("src.core.game3.profile").family(BagMenu._session) == "rse" then
+      -- pokeemerald/src/item_menu.c:306
+      return { "CHECK_TAG", "USE", "GIVE", "TOSS", "CANCEL" }
+    end
     return { "USE", "GIVE", "TOSS", "CANCEL" }
   end
   return { "USE", "GIVE", "TOSS", "CANCEL" }
 end
+
 
 function BagMenu.isOpen()
   return BagMenu.open
@@ -144,7 +162,8 @@ end
 
 local function max_showed(total)
   -- src/item_menu.c:1005
-  return math.min(VISIBLE, total)
+  local skin = bag_skin()
+  return math.min(skin and skin.MAX_SHOWN or VISIBLE, total)
 end
 
 local function clamp_cursor()
@@ -162,6 +181,27 @@ local function clamp_cursor()
   end
   if BagMenu.scroll < 0 then BagMenu.scroll = 0 end
   return rows
+end
+
+-- pokeemerald/src/item_menu.c:1967
+local function check_tag(rows)
+  local Screens = require("src.ui.game3.screens")
+  local Tag = Screens.get("berry_tag", BagMenu._session)
+  if not (Tag and Tag.show) then return false end
+  local list = {}
+  for i, r in ipairs(rows) do list[i] = r.id end
+  BagMenu.mode = "list"
+  Tag.show({
+    session = BagMenu._session,
+    list = list,
+    pos = BagMenu.cursor - 1,
+    onMove = function(_, newPos)
+      BagMenu.cursor = newPos + 1
+      clamp_cursor()
+    end,
+    onClose = function() end,
+  })
+  return true
 end
 
 local function bag_state()
@@ -232,6 +272,13 @@ local function reshow()
   if BagMenu.open then begin_open(false) end
 end
 
+-- src/teachy_tv.c:701
+function BagMenu.reshowFromTeachyTv()
+  BagMenu.mode = "list"
+  clamp_cursor()
+  reshow()
+end
+
 -- Close the bag and report the chosen item to the battle system.  partySlot is
 -- the real party index for party-targeted items, or nil otherwise.  Shared with
 -- the Berry Pouch so a berry picked there takes the same route as a potion.
@@ -254,9 +301,9 @@ local QUIET_ADAPTER = { say = function() end }
 function BagMenu.commitBattlePartyUse(st, itemId, realSlot, mon, beforeUse)
   local PartyMenu = require("src.ui.game3.party_menu")
   local BattleItems = require("src.core.game3.battle.items")
-  local isPp = ItemsData.fieldUseKind(itemId) == "pp"
+  local isPp = ItemUse.fieldUseKind(itemId, BagMenu._session, true) == "pp"
   local function wont_have_effect(err)
-    se(5) -- pokefirered/src/party_menu.c:4490
+    se(SE.SE_SELECT) -- pokefirered/src/party_menu.c:4490
     PartyMenu.showMessage(err or RomText.box("gText_WontHaveEffect"), function()
       PartyMenu.mode = "use"
     end)
@@ -275,7 +322,7 @@ function BagMenu.commitBattlePartyUse(st, itemId, realSlot, mon, beforeUse)
       BagMenu.battleUse(itemId, realSlot, moveSlot, true)
     end
     -- pokefirered/src/party_menu.c:4498
-    se(BattleItems.isFlute(itemId) and SE_GLASS_FLUTE or SE_USE_ITEM)
+    se(BattleItems.isFlute(itemId) and SE.SE_GLASS_FLUTE or SE.SE_USE_ITEM)
     local endHp = tonumber(mon and mon.hp) or startHp
     if endHp > startHp then
       -- pokefirered/src/party_menu.c:4514 PartyMenuModifyHP
@@ -287,7 +334,7 @@ function BagMenu.commitBattlePartyUse(st, itemId, realSlot, mon, beforeUse)
     PartyMenu.showMessage(text, go)
   end
   if isPp and mon and not mon.isEgg and ItemUse.ppItemNeedsMove(itemId) then
-    se(5)
+    se(SE.SE_SELECT)
     PartyMenu.pickPpMove(mon, itemId, commit)
     return
   end
@@ -309,8 +356,11 @@ function BagMenu.show(sessionBag, opts)
   end
   BagMenu._battle = opts.battle and true or false
   BagMenu._location = opts.location
+  BagMenu._onChoose = opts.onChoose
   BagMenu._sell = nil
   BagMenu._onBattleUse = opts.onBattleUse
+  local profVer = require("src.core.game3.profile").sessionVersion(BagMenu._session)
+  ItemsData.applyProfile(profVer)
   local st = bag_state()
   BagMenu.pocketIdx = opts.pocketIdx or st.pocket or 1
   BagMenu.mode = "list"
@@ -322,8 +372,16 @@ function BagMenu.show(sessionBag, opts)
   BagMenu.tossQty = 1
   BagMenu._onClose = opts.onClose
   if opts.pocket then
-    for i, p in ipairs(ItemsData.BAG_POCKET_ORDER) do
-      if p == opts.pocket then BagMenu.pocketIdx = i; break end
+    if type(opts.pocket) == "number" then
+      BagMenu.pocketIdx = opts.pocket
+    else
+      for i, p in ipairs(ItemsData.BAG_POCKET_ORDER) do
+        if p == opts.pocket or (opts.pocket == "BERRIES" and (p == "BERRIES" or p == "BERRY_POUCH"))
+            or (opts.pocket == "TM_HM" and (p == "TM_HM" or p == "TM_CASE")) then
+          BagMenu.pocketIdx = i
+          break
+        end
+      end
     end
   end
   if not ItemsData.BAG_POCKET_ORDER[BagMenu.pocketIdx] then BagMenu.pocketIdx = 1 end
@@ -337,6 +395,8 @@ function BagMenu.show(sessionBag, opts)
   BagMenu._heldKey = nil
   BagMenu._bagAnim = { n = 0 }
   begin_open(true)
+  local skin = bag_skin()
+  if skin and skin.onShow then skin.onShow(BagMenu, opts) end
   Stack.push("bag", BagMenu, { hideBelow = not BagMenu._battle, fullscreen = not BagMenu._battle })
 end
 
@@ -365,6 +425,14 @@ local function close_to_field()
   local battle = BagMenu._battle
   BagMenu.close()
   if not battle then field_fade_in() end
+end
+
+-- pokeemerald/src/item_menu.c:277
+local function choose_done(itemId)
+  local cb = BagMenu._onChoose
+  BagMenu._onChoose = nil
+  BagMenu.close()
+  if cb then cb(itemId or 0) end
 end
 
 -- src/item_menu.c:194 sItemMenuContextActions
@@ -402,15 +470,17 @@ end
 local function pocket_switch_dir(input, pocketIdx)
   -- src/item_menu.c:1124
   if BagMenu._location == "itempc" then return 0 end
+  -- pokeemerald/src/item_menu.c:630
+  if BagMenu._location == "berry_tree" or BagMenu._location == "blender" then return 0 end
   local lr = Options.lrMode(BagMenu._session)
   if input:wasPressed("left") or (lr and input:wasPressed("l")) then
     if pocketIdx <= 1 then return 0 end
-    se(SE_BAG_POCKET)
+    se(bag_se("SE_BAG_POCKET", "bagPocket"))
     return -1
   end
   if input:wasPressed("right") or (lr and input:wasPressed("r")) then
     if pocketIdx >= #ItemsData.BAG_POCKET_ORDER then return 0 end
-    se(SE_BAG_POCKET)
+    se(bag_se("SE_BAG_POCKET", "bagPocket"))
     return 1
   end
   return 0
@@ -434,7 +504,7 @@ end
 
 -- src/item_menu.c:677
 local function cursor_moved()
-  se(SE_BAG_CURSOR)
+  se(bag_se("SE_BAG_CURSOR", "bagCursor"))
   if shake_ended() then
     BagMenu._shake = { phase = "shake", j = 0, cb = true }
   end
@@ -512,6 +582,13 @@ end
 -- src/item_menu.c:1018 DisplayItemMessageInBag
 BagMenu.showMessage = show_bag_message
 
+-- pokeruby/src/pokemon_2.c:1130
+function BagMenu.partyAndStorageFull(session)
+  if type(session) ~= "table" or #(session.party or {}) < 6 then return false end
+  local Storage = require("src.core.game3.storage")
+  return Storage.findOpenSlot(Storage.ensure(session)) == nil
+end
+
 -- src/item_use.c:182
 local function use_field_from_bag(session, bag, id)
   return ItemUse.useField(session, bag, id, nil)
@@ -529,7 +606,8 @@ local function begin_sell(row)
     clamp_cursor()
     reshow()
   end
-  if num == ItemsData.ITEM_TM_CASE then
+  local frlgCases = require("src.core.game3.profile").family(BagMenu._session) ~= "rse"
+  if frlgCases and num == ItemsData.ITEM_TM_CASE then
     -- src/item_menu.c:1825 GoToTMCase_Sell
     open_submenu(function()
       require("src.ui.game3.tm_case").show(BagMenu._session, BagMenu._bag, {
@@ -537,7 +615,7 @@ local function begin_sell(row)
       })
     end)
     return
-  elseif num == ItemsData.ITEM_BERRY_POUCH then
+  elseif frlgCases and num == ItemsData.ITEM_BERRY_POUCH then
     -- src/item_menu.c:1830 GoToBerryPouch_Sell
     open_submenu(function()
       require("src.ui.game3.berry_pouch").show(BagMenu._session, BagMenu._bag, {
@@ -621,12 +699,12 @@ local function handle_menu_input(input)
     end
     if q ~= BagMenu.tossQty then
       BagMenu.tossQty = q
-      se(5)
+      se(SE.SE_SELECT)
     elseif input:wasPressed("a") then
-      se(5)
+      se(SE.SE_SELECT)
       try_deposit()
     elseif input:wasPressed("b") then
-      se(5)
+      se(SE.SE_SELECT)
       BagMenu.mode = "list"
     end
     return
@@ -634,7 +712,7 @@ local function handle_menu_input(input)
   -- src/item_menu.c:1563 Task_WaitAB_RedrawAndReturnToBag
   if BagMenu.mode == "deposit_done" then
     if input:wasPressed("a") or input:wasPressed("b") then
-      se(5)
+      se(SE.SE_SELECT)
       local p = BagMenu._depositPending
       BagMenu._depositPending = nil
       if p then Bag.remove(BagMenu._bag, p.id, p.qty) end
@@ -649,16 +727,16 @@ local function handle_menu_input(input)
     local maxQ = row and (tonumber(row.qty) or 1) or 1
     if input:wasPressed("up") or input:wasPressed("right") then
       BagMenu.tossQty = math.min(maxQ, BagMenu.tossQty + 1)
-      se(5)
+      se(SE.SE_SELECT)
     elseif input:wasPressed("down") or input:wasPressed("left") then
       BagMenu.tossQty = math.max(1, BagMenu.tossQty - 1)
-      se(5)
+      se(SE.SE_SELECT)
     elseif input:wasPressed("a") then
-      se(5) -- src/item_menu.c:1528
+      se(SE.SE_SELECT) -- src/item_menu.c:1528
       BagMenu.mode = "toss_confirm"
       BagMenu.yesNoCursor = 1
     elseif input:wasPressed("b") then
-      se(5) -- pokefirered/src/item_menu.c:1540
+      se(SE.SE_SELECT) -- pokefirered/src/item_menu.c:1540
       BagMenu.mode = "list"
     end
     return
@@ -667,12 +745,12 @@ local function handle_menu_input(input)
   if BagMenu.mode == "toss_confirm" then
     if input:wasPressed("up") or input:wasPressed("down") then
       BagMenu.yesNoCursor = (BagMenu.yesNoCursor == 1) and 2 or 1
-      se(5)
+      se(SE.SE_SELECT)
     elseif input:wasPressed("a") and BagMenu.yesNoCursor == 1 then
-      se(5)
+      se(SE.SE_SELECT)
       BagMenu.mode = "toss_done"
     elseif input:wasPressed("a") or input:wasPressed("b") then
-      se(5) -- src/item_menu.c:1511
+      se(SE.SE_SELECT) -- src/item_menu.c:1511
       BagMenu.mode = "list"
     end
     return
@@ -680,7 +758,7 @@ local function handle_menu_input(input)
   -- src/item_menu.c:1563 Task_WaitAB_RedrawAndReturnToBag
   if BagMenu.mode == "toss_done" then
     if input:wasPressed("a") or input:wasPressed("b") then
-      se(5)
+      se(SE.SE_SELECT)
       local row = BagMenu.list()[BagMenu.cursor]
       if row then
         Bag.remove(BagMenu._bag, row.id, BagMenu.tossQty)
@@ -693,7 +771,7 @@ local function handle_menu_input(input)
 
   if BagMenu.mode == "message" then
     if input:wasPressed("a") or input:wasPressed("b") or input:wasPressed("start") then
-      se(5)
+      se(SE.SE_SELECT)
       local pages = BagMenu._msgPages
       -- pokefirered/src/text.c:796
       if pages and BagMenu._msgPage < #pages then
@@ -718,18 +796,26 @@ local function handle_menu_input(input)
     refresh_actions()
     if input:wasPressed("up") then
       BagMenu.actionCursor = ((BagMenu.actionCursor - 2) % #BagMenu.ACTIONS) + 1
-      se(5)
+      se(SE.SE_SELECT)
     elseif input:wasPressed("down") then
       BagMenu.actionCursor = (BagMenu.actionCursor % #BagMenu.ACTIONS) + 1
-      se(5)
+      se(SE.SE_SELECT)
     elseif input:wasPressed("a") then
-      se(5)
+      se(SE.SE_SELECT)
       local act = BagMenu.ACTIONS[BagMenu.actionCursor]
       local rows = clamp_cursor()
       local row = rows[BagMenu.cursor]
       local party = (BagMenu._session and BagMenu._session.party) or {}
+      local skin = bag_skin()
+      if skin and skin.beforeAction and skin.beforeAction(BagMenu, act, row) then return end
       if act == "CANCEL" or not row then
         BagMenu.mode = "list"
+      elseif act == "CHECK_TAG" then
+        if not check_tag(rows) then BagMenu.mode = "list" end
+      elseif act == "CONFIRM" then
+        -- pokeemerald/src/item_menu.c:277
+        local id = row.id
+        begin_exit(true, function() choose_done(id) end)
       elseif act == "USE" then
         if BagMenu._battle and BagMenu._onBattleUse then
           local BattleItems = require("src.core.game3.battle.items")
@@ -781,6 +867,10 @@ local function handle_menu_input(input)
             end
             BagMenu._statBoost = { frames = 0, st = st, itemId = row.id, battlerId = battlerId }
             return
+          elseif BattleItems.isBall(row.id) and BagMenu.partyAndStorageFull(BagMenu._session) then
+            -- pokeruby/src/item_use.c:878
+            show_bag_message(RomText.box(RomText.has("gOtherText_BoxIsFull") and "gOtherText_BoxIsFull" or "gText_BoxFull"))
+            return
           else
             -- src/item_use.c:742
             BagMenu.battleUse(row.id, nil)
@@ -788,7 +878,8 @@ local function handle_menu_input(input)
           end
         else
           local numId = ItemsData.toNumericId(row.id)
-          if numId == ItemsData.ITEM_TM_CASE or row.id == "TM_CASE" then
+          local frlgCases = require("src.core.game3.profile").family(BagMenu._session) ~= "rse"
+          if frlgCases and (numId == ItemsData.ITEM_TM_CASE or row.id == "TM_CASE") then
             local savedState = { pocketIdx = BagMenu.pocketIdx, cursor = BagMenu.cursor, scroll = BagMenu.scroll }
             local TmCase = require("src.ui.game3.tm_case")
             open_submenu(function()
@@ -806,7 +897,7 @@ local function handle_menu_input(input)
               })
             end)
             return
-          elseif numId == ItemsData.ITEM_BERRY_POUCH or row.id == "BERRY_POUCH" then
+          elseif frlgCases and (numId == ItemsData.ITEM_BERRY_POUCH or row.id == "BERRY_POUCH") then
             local savedState = { pocketIdx = BagMenu.pocketIdx, cursor = BagMenu.cursor, scroll = BagMenu.scroll }
             local BerryPouch = require("src.ui.game3.berry_pouch")
             open_submenu(function()
@@ -822,6 +913,12 @@ local function handle_menu_input(input)
                   reshow()
                 end,
               })
+            end)
+            return
+          elseif frlgCases and ItemUse.isUsableTeachyTv(BagMenu._session, row.id) then
+            -- pokefirered/src/item_use.c:524
+            open_submenu(function()
+              use_field_from_bag(BagMenu._session, BagMenu._bag, row.id)
             end)
             return
           elseif ItemUse.needsPartyTarget(row.id) then
@@ -879,7 +976,7 @@ local function handle_menu_input(input)
                 Field.useItemfinder(session, true)
               end)
               return
-            elseif ok and kind == "escape" then
+            elseif ok and (kind == "escape" or kind == "on_field") then
               -- pokefirered/src/item_use.c:159 SetUpItemUseOnFieldCallback
               begin_exit(true, function()
                 BagMenu.close()
@@ -926,7 +1023,8 @@ local function handle_menu_input(input)
         end
       elseif act == "GIVE" then
         local pocket = BagMenu.currentPocket()
-        if pocket == "KEY_ITEMS" or pocket == "TM_CASE" then
+        local canGive = skin and skin.canGive and skin.canGive(row, pocket)
+        if canGive == false or (canGive == nil and (pocket == "KEY_ITEMS" or pocket == "TM_CASE")) then
           BagMenu.mode = "message"
           -- src/item_menu.c:1635
           BagMenu.messageText = RomText.box("gText_ItemCantBeHeld",
@@ -983,7 +1081,7 @@ local function handle_menu_input(input)
         BagMenu.mode = "list"
       end
     elseif input:wasPressed("b") then
-      se(5) -- pokefirered/src/item_menu.c:1453
+      se(SE.SE_SELECT) -- pokefirered/src/item_menu.c:1453
       BagMenu.mode = "list"
     end
     return
@@ -1007,17 +1105,32 @@ local function handle_menu_input(input)
         else
           BagMenu._session.registeredItem = row.id
         end
-        se(5)
+        se(SE.SE_SELECT)
       end
     end
     return
   end
   local rows = clamp_cursor()
+  local choosing = BagMenu._location == "berry_tree" or BagMenu._location == "blender"
+  if choosing and (input:wasPressed("b") or (input:wasPressed("a") and BagMenu.cursor > #rows)) then
+    -- pokeemerald/src/item_menu.c:1251
+    if BagMenu._location == "blender" then
+      se(SE.SE_FAILURE)
+    else
+      se(SE.SE_SELECT)
+      begin_exit(true, function() choose_done(0) end)
+    end
+    return
+  end
   if input:wasPressed("a") then
-    se(SE_SELECT)
+    se(SE.SE_SELECT)
     if BagMenu.cursor > #rows then
       -- src/item_menu.c:1085
       begin_exit(true, close_to_field)
+    elseif BagMenu._location == "berry_tree" then
+      -- pokeemerald/src/item_menu.c:346
+      local id = rows[BagMenu.cursor].id
+      begin_exit(true, function() choose_done(id) end)
     elseif BagMenu._location == "shop" then
       begin_sell(rows[BagMenu.cursor])
     elseif BagMenu._location == "itempc" then
@@ -1028,7 +1141,7 @@ local function handle_menu_input(input)
       refresh_actions()
     end
   elseif input:wasPressed("b") then
-    se(SE_SELECT)
+    se(SE.SE_SELECT)
     begin_exit(true, close_to_field)
   elseif held_repeat(input, "up") then
     if move_cursor(false) then cursor_moved() end
@@ -1127,6 +1240,13 @@ BagMenu.POKEDUDE_PLANS = {
     { at = 204, key = "a", item = ITEM_ANTIDOTE },
     { at = 306, exit = true },
   },
+  -- pokefirered/src/item_menu.c:2106
+  oldman = {
+    noInterrupt = true,
+    { at = 102, key = "right" }, { at = 204, key = "right" },
+    { at = 306, key = "a", item = ITEM_POKE_BALL },
+    { at = 408, exit = true },
+  },
 }
 
 local function finish_pokedude(itemId)
@@ -1148,7 +1268,7 @@ local function pokedude_tick(input)
   local pd = BagMenu._pokedude
   local inp = NO_INPUT
   if not (pd.done or BagMenu._open or BagMenu._exit) then
-    if input and input.wasPressed and input:wasPressed("b") then
+    if not pd.plan.noInterrupt and input and input.wasPressed and input:wasPressed("b") then
       -- pokefirered/src/item_menu.c:2192 Task_BButtonInterruptTeachyTv
       pd.done = true
       begin_exit(true, function() finish_pokedude(nil) end)
@@ -1158,7 +1278,7 @@ local function pokedude_tick(input)
         pd.index = pd.index + 1
         if entry.item then pd.item = entry.item end
         if entry.exit then
-          se(SE_SELECT)
+          se(SE.SE_SELECT)
           BagMenu.mode = "list"
           pd.done = true
           -- pokefirered/src/item_menu.c:2309 Task_Pokedude_FadeFromBag
@@ -1210,7 +1330,7 @@ local function stat_boost_tick()
   if sb.frames <= 7 then return end
   BagMenu._statBoost = nil
   local BattleItems = require("src.core.game3.battle.items")
-  se(SE_USE_ITEM)
+  se(SE.SE_USE_ITEM)
   local _, _, _, _, text = BattleItems.use(sb.st, QUIET_ADAPTER, BagMenu._bag, BagMenu._session,
     sb.itemId, nil, sb.battlerId)
   -- pokefirered/src/item_use.c:779 Task_BattleUse_StatBooster_WaitButton_ReturnToBattle
@@ -1322,10 +1442,6 @@ function BagMenu.draw()
         FrlgFont.draw(RomText.plain("gFameCheckerText_Cancel"), 97, y, { colors = FrlgFont.COLOR.NORMAL })
       else
         local label = r.name
-        if session and session.registeredItem
-            and ItemsData.toNumericId(session.registeredItem) == ItemsData.toNumericId(r.id) then
-          label = "►" .. label
-        end
         local num = ItemsData.toNumericId(r.id)
         local colors = (num == ItemsData.ITEM_TM_CASE or num == ItemsData.ITEM_BERRY_POUCH)
           and ITEM_BLUE or FrlgFont.COLOR.NORMAL
@@ -1336,6 +1452,10 @@ function BagMenu.draw()
           -- src/item_menu.c:716
           FrlgFont.draw(string.format("×%3d", r.qty or 1), 198, y,
             { small = true, colors = FrlgFont.COLOR.NORMAL })
+        elseif session and session.registeredItem
+            and ItemsData.toNumericId(session.registeredItem) == num then
+          -- src/item_menu.c:718
+          BagChrome.drawSelectButton(LIST_LEFT * 8 + 0x70, y)
         end
       end
     end

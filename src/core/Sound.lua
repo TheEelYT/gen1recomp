@@ -553,9 +553,20 @@ local function sourceAlive(entry)
   return ok and playing
 end
 
+-- audio/engine_2.asm:259
+local function channelFramesLeft(entry, ch)
+  local frames = entry.channelFrames and entry.channelFrames[ch]
+  if not frames then return nil end
+  local ok, pos = pcall(entry.src.tell, entry.src, "seconds")
+  if not ok or type(pos) ~= "number" then return nil end
+  return frames - pos * 60
+end
+
 local function pruneMoveSfx()
   for ch, cur in pairs(moveSfxChannels) do
-    if not sourceAlive(cur) then moveSfxChannels[ch] = nil end
+    if not sourceAlive(cur) or (channelFramesLeft(cur, ch) or 1) <= 0 then
+      moveSfxChannels[ch] = nil
+    end
   end
 end
 
@@ -585,17 +596,40 @@ local function sfxChannelGate(data, def)
   return true, takeover
 end
 
-local function noteMoveSfx(data, def, src)
+local channelFramesCache = setmetatable({}, { __mode = "k" })
+local function noteMoveSfx(data, def, src, pitch, tempo, plain)
   if not src or type(def) ~= "table" or not def.address then
     moveSfxChannels = {}
     return
   end
-  local channels = require("src.core.ChipSynth").effectChannels(data, def)
+  local ChipSynth = require("src.core.ChipSynth")
+  local channels = ChipSynth.effectChannels(data, def)
   if not channels then
     moveSfxChannels = {}
     return
   end
   local entry = { src = src, address = def.address, engine = def.engine }
+  if isChipDef(def) then
+    local key = def.address .. ":" .. tostring(def.engine) .. ":"
+      .. (pitch or 0) .. ":" .. (tempo or 0x80) .. ":" .. (plain or 0)
+    local audioKey = data.audio or data
+    local byAudio = channelFramesCache[audioKey]
+    if not byAudio then
+      byAudio = {}
+      channelFramesCache[audioKey] = byAudio
+    end
+    local frames = byAudio[key]
+    if frames == nil then
+      local ok, got = pcall(ChipSynth.effectChannelFrames, data, def, {
+        frequencyOffset = pitch or 0,
+        frameTicks = 0x80 + (tempo or 0x80),
+        plainFrames = plain,
+      })
+      frames = ok and got or false
+      byAudio[key] = frames
+    end
+    entry.channelFrames = frames or nil
+  end
   for _, ch in ipairs(channels) do moveSfxChannels[ch] = entry end
 end
 
@@ -617,27 +651,34 @@ local function remainingFrames(src)
 end
 
 -- home/delay.asm:15 WaitForSoundToFinish polls CHAN5/CHAN6/CHAN8
+local WAITED_CHANNELS = { 5, 6, 8 }
+
 function Sound.moveSfxBusy()
   pruneMoveSfx()
-  for _ in pairs(moveSfxChannels) do return true end
+  for _, ch in ipairs(WAITED_CHANNELS) do
+    if moveSfxChannels[ch] then return true end
+  end
   return false
 end
 
 function Sound.moveSfxWaitFrames()
   pruneMoveSfx()
   local worst = 0
-  for _, cur in pairs(moveSfxChannels) do
-    local n = remainingFrames(cur.src)
+  for _, ch in ipairs(WAITED_CHANNELS) do
+    local cur = moveSfxChannels[ch]
+    local left = cur and channelFramesLeft(cur, ch)
+    local n = cur and (left and math.max(0, left) or remainingFrames(cur.src))
     if n then
       local okp, pitch = pcall(cur.src.getPitch, cur.src)
       if okp and type(pitch) == "number" and pitch > 0 then
-        n = math.ceil(n / pitch * rate)
+        n = n / pitch * rate
       end
-      n = n + 2
-    else
+      n = math.ceil(n)
+      if not left then n = n + 2 end
+    elseif cur then
       n = Sound.waitFrames(cur.src, 0)
     end
-    if n > worst then worst = n end
+    if n and n > worst then worst = n end
   end
   return worst
 end
@@ -658,7 +699,8 @@ local function plainMoveFrames(data, def, channels)
     local cur = (not claimed[ch]) and moveSfxChannels[ch] or nil
     if cur and cur.engine == def.engine and sourceAlive(cur) then
       local otherId = sfxHeaderId(cur)
-      local rem = remainingFrames(cur.src)
+      local left = channelFramesLeft(cur, ch)
+      local rem = left and math.max(0, math.ceil(left)) or remainingFrames(cur.src)
       if otherId and rem and rem > 0 then
         others[#others + 1] = { id = otherId, rem = rem }
       end
@@ -677,6 +719,13 @@ local function plainMoveFrames(data, def, channels)
   return plain
 end
 
+-- the cache key of a move sound variant; playMove and prewarmMove share it
+local function moveKey(name, pitch, tempo, plain)
+  local key = ("%s@%02x%02x"):format(name, pitch, tempo)
+  if plain and plain > 0 then key = ("%s~%d"):format(key, plain) end
+  return key
+end
+
 function Sound.playMove(data, anim)
   if not anim or not anim.sound then return end
   local sfx = data.audio and data.audio.sfx
@@ -687,19 +736,18 @@ function Sound.playMove(data, anim)
   local allowed, superseded = sfxChannelGate(data, def)
   if not allowed then return end
   local src
+  local plain = 0
   -- a chip program synthesizes the modified variant on demand; a file def
   -- can only reach for a pre-rendered one
   if isChipDef(def) then
-    local plain = 0
     if pitch ~= 0 or tempo ~= 0x80 then
       local channels = require("src.core.ChipSynth").effectChannels(data, def)
       plain = plainMoveFrames(data, def, channels)
     end
-    local key = ("%s@%02x%02x"):format(name, pitch, tempo)
-    if plain > 0 then key = ("%s~%d"):format(key, plain) end
+    local key = moveKey(name, pitch, tempo, plain)
     src = playPath(data, key, def, pitch, tempo, plain)
   else
-    local key = ("%s@%02x%02x"):format(name, pitch, tempo)
+    local key = moveKey(name, pitch, tempo)
     if (pitch ~= 0 or tempo ~= 0x80) and sfx[key] then
       src = playPath(data, key, sfx[key])
     else
@@ -714,7 +762,7 @@ function Sound.playMove(data, anim)
   end
   if src then
     played("move", name)
-    noteMoveSfx(data, def, src)
+    noteMoveSfx(data, def, src, pitch, tempo, plain)
   end
 end
 
@@ -825,6 +873,63 @@ function Sound.playCry(data, species, pikaClip)
   pcall(src.play, src)
   played("cry", species, species)
   return src
+end
+
+-- Prewarm: the first play of a chip cry/SFX synthesizes it on the calling
+-- frame (~10-25 ms for a cry, far more for a long jingle), which is the hitch
+-- at a battle's first cry.  These hand that render to the chip audio worker
+-- ahead of time (ChipAudio.prewarmCry/prewarmSfx); the play that follows
+-- builds its Source from the finished PCM, identical to a fresh render.  Call
+-- at an idle point before the sound is needed (battle creation / the
+-- transition, for both species).  Returns true when a render was queued or
+-- the sound is already cached; never renders on the calling thread, and a
+-- play that comes first simply renders as before.
+function Sound.prewarmCry(data, species)
+  if not love.audio or deviceSuspended() then return false end
+  if cache["cry:" .. tostring(species)] ~= nil then return true end
+  local audio = data and data.audio
+  local def = audio and audio.cries and audio.cries[species]
+  if not def then return false end
+  -- pokeyellow/home/pokemon.asm:140 -- voiced by a PCM clip instead
+  if species == "PIKACHU" and audio.pikaCries then return false end
+  local resolved = resolveCry(data, def, 0)
+  if type(resolved) ~= "table" or not (resolved.header or resolved.chip) then
+    return false
+  end
+  local ok, queued = pcall(
+    require("src.core.ChipAudio").prewarmCry, data, species, resolved)
+  return ok and queued or false
+end
+
+-- the plain Sound.play variant of `name` (no pitch/tempo modifiers)
+function Sound.prewarmSfx(data, name)
+  if not love.audio or deviceSuspended() then return false end
+  name = Sound.resolve(data, name)
+  if cache[name] ~= nil then return true end
+  local sfx = data and data.audio and data.audio.sfx
+  local def = sfx and sfx[name]
+  if not isChipDef(def) then return false end
+  local ok, queued = pcall(
+    require("src.core.ChipAudio").prewarmSfx, data, name, nil, nil, def, nil)
+  return ok and queued or false
+end
+
+-- the move-sound variant playMove builds when no other move sound overlaps it
+-- (plain == 0, the only case knowable ahead of time).  Same def, pitch, tempo
+-- and plainFrames=0 as that play, so ChipAudio's prewarm key matches it.
+function Sound.prewarmMove(data, anim)
+  if not love.audio or deviceSuspended() then return false end
+  if not (anim and anim.sound) then return false end
+  local sfx = data and data.audio and data.audio.sfx
+  local def = sfx and sfx[anim.sound]
+  if not isChipDef(def) then return false end
+  local pitch, tempo = anim.pitch or 0, anim.tempo or 0x80
+  if cache[moveKey(anim.sound, pitch, tempo)] ~= nil then
+    return true
+  end
+  local ok, queued = pcall(require("src.core.ChipAudio").prewarmSfx,
+    data, anim.sound, pitch, tempo, def, 0)
+  return ok and queued or false
 end
 
 -- GROWL/ROAR are the only two moves that play a cry (IsCryMove checks

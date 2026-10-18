@@ -18,8 +18,8 @@ end
 
 -- One-time item gift, following the original text_asm flow:
 -- pre text (optional) -> GiveItem (bag-full refusal keeps the flag
--- unset, talk again after making room) -> received text -> optional
--- explanation; repeat visits get the already text.
+-- unset, talk again after making room) -> received text; repeat visits
+-- get the already (or explain) text.
 local function gift(opts)
   return function(game, ow, npc, done)
     local t = text(game)
@@ -32,6 +32,7 @@ local function gift(opts)
       say(opts.already or opts.explain, "It's a useful\nitem, isn't it?", done)
       return
     end
+    if opts.setFlagFirst then game.save.flags[opts.flag] = true end
     local function give()
       if not require("src.inventory.Bag").add(game.save, opts.item, 1) then
         say(opts.noRoom, "You have no room\nfor this item!", done)
@@ -41,14 +42,9 @@ local function gift(opts)
       local idef = game.data.items[opts.item]
       -- the received texts carry sound_get_item_1 / sound_get_key_item, so
       -- the jingle only fires once that box has typed out
-      say(opts.received, "{PLAYER} received\n{RAM:}!", function()
-        if opts.explain then
-          say(opts.explain, "", done)
-        else
-          done()
-        end
-      end, require("src.render.TextBox").soundOpts(game,
-        (idef and idef.keyItem) and "Get_Key_Item" or "Get_Item1"))
+      say(opts.received, "{PLAYER} received\n{RAM:}!", done,
+        require("src.render.TextBox").soundOpts(game, opts.sound
+          or ((idef and idef.keyItem) and "Get_Key_Item" or "Get_Item1")))
     end
     if opts.pre then say(opts.pre, opts.preFallback or "", give) else give() end
   end
@@ -134,6 +130,7 @@ M.VIRIDIAN_CITY = {
         .. "\vWhat's this?\vWhere did this TM\vcome from?"
         .. "\fThis is spooky!\nHere, you can\vhave this TM.",
       received = "_ViridianCityFisherReceivedTM42Text",
+      sound = "Get_Item2", -- scripts/ViridianCity.asm:263
       explain = "_ViridianCityFisherTM42ExplanationText",
       noRoom = "_ViridianCityFisherTM42NoRoomText",
     }),
@@ -157,12 +154,11 @@ M.SILPH_CO_2F = {
   },
 }
 
--- Free POTION sample (scripts/Route1.asm; the original burns the flag
--- even on a full bag -- we keep the port's kinder halt-and-retry)
+-- scripts/Route1.asm:10-28
 M.ROUTE_1 = {
   talk = {
     TEXT_ROUTE1_YOUNGSTER1 = gift({
-      flag = "EVENT_GOT_POTION_SAMPLE", item = "POTION",
+      flag = "EVENT_GOT_POTION_SAMPLE", item = "POTION", setFlagFirst = true,
       pre = "_Route1Youngster1MartSampleText",
       received = "_Route1Youngster1GotPotionText",
       noRoom = "_Route1Youngster1NoRoomText",
@@ -236,7 +232,6 @@ local function stepGate(opts)
   return function(game, ow, x, y)
     if not inCoords(opts.coords, x, y) then return false end
     if not opts.blocked(game) then return false end
-    require("src.core.Sound").play(game.data, "Denied")
     push(game, text(game)[opts.text] or opts.fallback, function()
       ow.player.facing = opts.push
       if not ow:checkLedgeHop(opts.push) then
@@ -292,6 +287,8 @@ M.CINNABAR_ISLAND = {
   -- ready state machine in data/scripts/story2.lua's
   -- TEXT_CINNABARLABFOSSILROOM_SCIENTIST1.
   onEnter = function(game, ow)
+    -- scripts/CinnabarIsland.asm:5
+    game.save.flags.EVENT_MANSION_SWITCH_ON = nil
     if game.save.flags.EVENT_LAB_STILL_REVIVING_FOSSIL then
       game.save.flags.EVENT_LAB_STILL_REVIVING_FOSSIL = nil
     end
@@ -494,6 +491,10 @@ end
 
 M.PEWTER_CITY = {
   escort = pewterEscort,
+  -- scripts/PewterCity.asm:20
+  onEnter = function(game)
+    game.save.flags.EVENT_BOUGHT_MUSEUM_TICKET = nil
+  end,
   -- PewterCityYoungsterText: talking also arms the gym escort script
   talk = {
     TEXT_PEWTERCITY_YOUNGSTER = function(game, ow, npc, done)
@@ -571,19 +572,19 @@ local function route22Scene(n, objIndex, objName, oppClass, baseParty, beatFlag,
   return {
     { "show_object", "ROUTE_22", objName },                    -- 1
     { "move_npc_to", objIndex, rx, 5 },                        -- 2
+    { "face_player_dir", (py == 4) and "down" or "left" },
     { "face_object", objIndex, rivalFacing },                  -- 3
     { "show_text", "_Route22RivalBeforeBattleText" .. n },     -- 4
     -- scripts/Route22.asm:132-134, 288-290
     { "save_end_battle_text", "_Route22Rival" .. n .. "DefeatedText" },
     { "rival_battle", oppClass, baseParty },
-    { "jump_if_false", "leave" },
+    { "jump_if_false", "end" },                  -- scripts/Route22.asm:152
     { "set_flag", beatFlag },
     { "show_text", "_Route22RivalAfterBattleText" .. n },
     { "play_music", "Music_MeetRival", { start = "rival",
       tempo = n == 2 and 100 or nil } },
     { "walk_npc", objIndex, route22ExitDirs(n, py) },
     { "play_default_music" },                    -- scripts/Route22.asm:230
-    { "label", "leave" },
     { "hide_object", "ROUTE_22", objName },
   }
 end
@@ -596,7 +597,7 @@ M.ROUTE_22 = {
   onStep = function(game, ow, x, y)
     if not inCoords({ { 29, 4 }, { 29, 5 } }, x, y) then return false end
     local f = game.save.flags
-    local playerFacing = (y == 4) and "down" or "left"
+    local playerFacing = "left"
     if f.EVENT_GOT_POKEDEX and not f.EVENT_BEAT_BROCK
        and not f.EVENT_BEAT_ROUTE22_RIVAL_1ST_BATTLE then
       return runAmbush(game, ow,
@@ -666,7 +667,8 @@ local rocketRows = {
   { "jump_if_false", "end" },                                  -- 9
   { "show_text", "_CeruleanCityRocketIllReturnTheTMText" },    -- 10
   { "set_flag", "EVENT_BEAT_CERULEAN_ROCKET_THIEF" },          -- 11
-  { "give_item", "TM_DIG", 1, false },                         -- 12 (row 14 prints)
+  { "give_item", "TM_DIG", 1, false,
+    "_CeruleanCityRocketTM28NoRoomText" },                     -- 12 (row 14 prints)
   { "set_flag", "EVENT_GOT_TM28" },                            -- 13
   { "show_text", "_CeruleanCityRocketReceivedTM28Text" },      -- 14
   { "show_text", "_CeruleanCityRocketIBetterGetMovingText" },  -- 15
@@ -857,23 +859,18 @@ local function bikeGateGuard(coords, stopText, explainText)
     end
     local dist = y - closestY
     local t = text(game)
+    -- scripts/Route16Gate1F.asm:16-80
     push(game, t[stopText] or "Hey! Wait up!", function()
-      push(game, t[explainText] or "You need a\nBICYCLE for\nCYCLING ROAD!", function()
-        -- pokered's Route16Gate1FGuardScript / Route18Gate1FGuardScript
-        -- (scripts/Route16Gate1F.asm, Route18Gate1F.asm) simulate one
-        -- PAD_RIGHT step after the refusal text, and only clear
-        -- wJoyIgnore / hand control back once that step finishes
-        -- (PlayerMovingRightScript). Without it the player was left
-        -- parked beside the guard's counter with no way past. #518
-        local function shoveRight()
+      local function explain()
+        push(game, t[explainText] or "You need a\nBICYCLE for\nCYCLING ROAD!", function()
           ow:scriptMove(ow.player, "right", 1, nil, { collide = true })
-        end
-        if dist > 0 then
-          ow:scriptMove(ow.player, "up", dist, shoveRight, { collide = true })
-        else
-          shoveRight()
-        end
-      end)
+        end)
+      end
+      if dist > 0 then
+        ow:scriptMove(ow.player, "up", dist, explain, { collide = true })
+      else
+        explain()
+      end
     end)
     return true
   end
@@ -919,13 +916,12 @@ M.SILPH_CO_7F = {
       -- scripts/SilphCo7F.asm:184-186
       { "save_end_battle_text", "_SilphCo7FRivalDefeatedText" },
       { "rival_battle", "OPP_RIVAL2", 7 },
-      { "jump_if_false", "leave" },
+      { "jump_if_false", "end" },              -- scripts/SilphCo7F.asm:209
       { "set_flag", "EVENT_BEAT_SILPH_CO_RIVAL" },
       { "show_text", "_SilphCo7FRivalGoodLuckToYouText" },
       { "play_music", "Music_MeetRival", { start = "rival" } },
       { "walk_npc", 9, silphCo7FRivalExitDirs(y) },
       { "play_default_music" },                -- scripts/SilphCo7F.asm:261
-      { "label", "leave" },
       { "hide_object", "SILPH_CO_7F", "SILPHCO7F_RIVAL" },
     }, "down")
   end,
@@ -959,13 +955,12 @@ M.SS_ANNE_2F = {
       -- (scripts/SSAnne2F.asm:199), so the line prints in battle (#1688)
       { "save_end_battle_text", "_SSAnne2FRivalDefeatedText" },
       { "rival_battle", "OPP_RIVAL2", 1 },
-      { "jump_if_false", "leave" },
+      { "jump_if_false", "end" },               -- scripts/SSAnne2F.asm:127
       { "set_flag", "EVENT_BEAT_SS_ANNE_RIVAL" },
       { "show_text", "_SSAnne2FRivalCutMasterText" },
       { "play_music", "Music_MeetRival", { start = "rival" } },
       { "walk_npc", 2, ssAnne2FRivalExitDirs(onLeft) },
       { "play_default_music" },                 -- scripts/SSAnne2F.asm:175
-      { "label", "leave" },
       { "hide_object", "SS_ANNE_2F", "SSANNE2F_RIVAL" },
     }
     -- the wXCoord == 37 branch (scripts/SSAnne2F.asm:73-77)

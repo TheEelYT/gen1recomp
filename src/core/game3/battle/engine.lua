@@ -16,6 +16,8 @@ local Secondary = require("src.core.game3.battle.effects.secondary")
 local HeldItems = require("src.core.game3.battle.held_items")
 local Abilities = require("src.core.game3.battle.abilities")
 local Oak = require("src.core.game3.battle.oak_advice")
+local BattleProfile = require("src.core.game3.battle.profile")
+local Kinds = require("src.core.game3.battle.kinds")
 local ModRuntime = require("src.mods.Runtime")
 local BattleText = require("src.core.game3.battle.battle_text")
 local RomText = require("src.core.game3.rom_text")
@@ -168,6 +170,13 @@ function Engine.hasBadge(st, n)
   if type(b) == "number" then return math.floor(b / 2 ^ (n - 1)) % 2 == 1 end
   local Space = package.loaded["src.core.game3.scripting.space"]
   local Flags = package.loaded["src.core.game3.scripting.flags"]
+  local badgeFlags = BattleProfile.of(st).badgeFlags
+  if badgeFlags then
+    -- pokeemerald/src/battle_util.c:3930
+    local flag = badgeFlags[n]
+    if not (flag and Space and Space.store and Flags and Flags.getFlag) then return false end
+    return Flags.getFlag(Space.store, nil, flag) and true or false
+  end
   if Space and Space.store and Flags and Flags.hasBadge then
     local ok, v = pcall(Flags.hasBadge, Space.store, n)
     if not ok then
@@ -205,7 +214,10 @@ local function speed_of(battler, st, adapter)
   end
   local stage = battler and battler.stages and battler.stages.speed or 0
   spe = Damage.applyStage(spe * mul, stage)
-  if battler and battler.side == "player" and Engine.hasBadge(st, 3) then
+  local k = st and st.kinds or {}
+  -- pokeemerald/src/battle_main.c:4640
+  local noBoost = st and BattleProfile.isRse(st) and (k.frontier or k.recordedLink)
+  if battler and battler.side == "player" and not noBoost and Engine.hasBadge(st, 3) then
     spe = math.floor(spe * 110 / 100)
   end
   local he, param = HeldItems.of(battler)
@@ -470,16 +482,20 @@ function Ctx:absorbed()
   return false
 end
 
-function Ctx:faintMessage(battler)
+function Ctx:faintMessage(battler, selector, target)
   local ad = self.adapter
   if not battler or battler._faintAnnounced then return false end
   if not ad:isFainted(battler) then return false end
   battler._faintAnnounced = true
+  local scriptTarget = target or self.target
+  local script = { attacker = self.user, target = scriptTarget, selector = selector }
+  if ad.setFaintScriptBattlers then ad:setFaintScriptBattlers(self.user, scriptTarget) end
+  if ad.prepareFaintAnnouncement then ad:prepareFaintAnnouncement(battler, script) end
   ad:pushEvent({ kind = "faint", side = battler.side, battler = State.idOf(battler) })
   self:sayId("STRINGID_TARGETFAINTED", { def = battler })
   self.anim.fainted = true
   self.anim.faints[#self.anim.faints + 1] = { side = battler.side or "enemy", battler = State.idOf(battler) }
-  ad:emitFaint(battler)
+  ad:emitFaint(battler, script)
   return true
 end
 
@@ -488,11 +504,11 @@ function Ctx:tryFaintTarget()
   local ad, user, target = self.adapter, self.user, self.target
   if not target or target == user then return end
   if not ad:isFainted(target) or target._faintAnnounced then return end
-  self:faintMessage(target)
+  self:faintMessage(target, 0)
   if target.expDestinyBond and user.side ~= target.side and not ad:isFainted(user) then
     self:sayId("STRINGID_PKMNTOOKFOE", { def = target, atk = user })
     ad:applyHpLoss(user, ad:hp(user))
-    self:faintMessage(user)
+    self:faintMessage(user, 1)
   end
   if target.expGrudge and self.slot and user.mon and user.mon.pp and not ad:isFainted(user) then
     user.mon.pp[self.slot] = 0
@@ -500,8 +516,8 @@ function Ctx:tryFaintTarget()
   end
 end
 
-function Ctx:tryFaintUser()
-  if self.adapter:isFainted(self.user) then self:faintMessage(self.user) end
+function Ctx:tryFaintUser(target)
+  if self.adapter:isFainted(self.user) then self:faintMessage(self.user, 1, target) end
 end
 
 local function new_ctx(user, target, moveId, slot, adapter, st, out, anim, opts)
@@ -525,6 +541,7 @@ local function new_ctx(user, target, moveId, slot, adapter, st, out, anim, opts)
     tname = adapter:displayName(target),
     animTurn = 0,
   }, Ctx)
+  if adapter.setFaintScriptBattlers then adapter:setFaintScriptBattlers(user, target) end
   return M
 end
 Engine.newContext = new_ctx
@@ -532,24 +549,31 @@ Engine.newContext = new_ctx
 -- pokefirered/data/battle_scripts_1.s:3741
 function Engine.selfHit(M, dmg)
   local ad, user = M.adapter, M.user
-  local r = roll(ad, 85, 100)
-  dmg = math.floor(dmg * r / 100)
-  if dmg == 0 then dmg = 1 end
-  local banded = HeldItems.rollFocusBand(ad, user)
-  local hung = nil
-  if (user.substituteHP or 0) <= 0 and (user.expEnduring or banded) and dmg >= ad:hp(user) then
-    dmg = ad:hp(user) - 1
-    hung = user.expEnduring and "endured" or "band"
+  -- pokeruby/src/battle_util.c:1536
+  if ad.setFaintScriptBattlers then ad:setFaintScriptBattlers(user, user) end
+  local adjustment = BattleProfile.rule(M.st, "damageAdjustment")
+  local hung
+  if adjustment then
+    dmg, hung = adjustment.adjust(M, user, dmg, "normal2")
+  else
+    local r = roll(ad, 85, 100)
+    dmg = math.floor(dmg * r / 100)
+    if dmg == 0 then dmg = 1 end
+    local banded = HeldItems.rollFocusBand(ad, user)
+    if (user.substituteHP or 0) <= 0 and (user.expEnduring or banded) and dmg >= ad:hp(user) then
+      dmg = ad:hp(user) - 1
+      hung = user.expEnduring and "endured" or "band"
+    end
+    user.expFocusBanded = nil
   end
-  user.expFocusBanded = nil
   M:sayId("STRINGID_ITHURTCONFUSION")
   ad:applyHpLoss(user, dmg)
   if hung == "endured" then
     M:sayId("STRINGID_PKMNENDUREDHIT", { def = user })
-  elseif hung == "band" then
+  elseif hung == "band" or hung == "hung" then
     HeldItems.focusBandMessage(ad, user)
   end
-  M:tryFaintUser()
+  M:tryFaintUser(user)
 end
 
 -- pokefirered/src/battle_util.c:1253
@@ -669,6 +693,8 @@ local function canceller(M)
   if ad:status(user) == "PAR" and roll(ad, 0, 3) == 0 then
     M:sayId("STRINGID_PKMNISPARALYZED", { atk = user })
     ad:statusAnim(user, "PAR")
+    -- pokefirered/data/battle_scripts_1.s:3717
+    Engine.cancelMultiTurnMoves(user)
     user.expUnableToMove = true
     return false
   end
@@ -749,6 +775,8 @@ local function bide_attack(M)
   if not M:accuracyCheck("normal", true) then return end
   local _, flags = Types.typeCalc(M.move.type, target.type1, target.type2, nil, target.expIdentified)
   if flags.immune then
+    local adjustment = BattleProfile.rule(M.st, "damageAdjustment")
+    if adjustment then adjustment.adjust(M, target, dmgStored * 2, "set") end
     M:sayId("STRINGID_ITDOESNTAFFECT", { def = target })
     return
   end
@@ -776,6 +804,14 @@ end
 
 -- pokefirered/src/battle_script_commands.c:7519
 local function pick_metronome(M)
+  local cap = tonumber(M.st and M.st.moveMax)
+  if cap then
+    local pool, skip = {}, M.st.moveExcluded or {}
+    for m = 1, cap do
+      if not forbidden(m, false) and not skip[m] then pool[#pool + 1] = m end
+    end
+    return pool[roll(M.adapter, 1, #pool)]
+  end
   for _ = 1, 64 do
     local m = roll(M.adapter, 1, 511)
     if m < 355 and not forbidden(m, false) then return m end
@@ -923,6 +959,7 @@ local function charge_turn(M)
   if eff == E.SOLAR_BEAM and Rules.weather.effective(M.st, ad) == "SUN" then
     M:ppReduce()
     M.noPP = true
+    M.animTurn = 1
     return false
   end
   if ModRuntime.wantsHook("battle.charge_required") then
@@ -934,6 +971,7 @@ local function charge_turn(M)
     if required == false then
       M:ppReduce()
       M.noPP = true
+      M.animTurn = 1
       return false
     end
   end
@@ -962,6 +1000,8 @@ end
 -- pokefirered/data/battle_scripts_1.s:761
 local function ohko(M)
   local ad, user, target = M.adapter, M.user, M.target
+  local chancePolicy = BattleProfile.rule(M.st, "effectChanceOpcode")
+  local chanceDescriptor = chancePolicy and chancePolicy.prepare(M)
   M:attackString()
   M:ppReduce()
   if not M:accuracyCheck("lockon", true) then
@@ -972,6 +1012,7 @@ local function ohko(M)
   if flags.immune or (ad:abilityOf(target) == "LEVITATE" and tonumber(M.move.type) == Types.ID.GROUND) then
     M.anim.missed = true
     M:sayId("STRINGID_ITDOESNTAFFECT", { def = target })
+    if chancePolicy then chancePolicy.finish(M, chanceDescriptor, true) end
     return
   end
   local banded = HeldItems.rollFocusBand(ad, target)
@@ -1014,6 +1055,7 @@ local function ohko(M)
   else
     M:sayId("STRINGID_ONEHITKO")
   end
+  if chancePolicy then chancePolicy.finish(M, chanceDescriptor) end
   M:tryFaintTarget()
 end
 
@@ -1248,25 +1290,22 @@ function Engine.moveLimitations(b, ad)
 end
 
 local function player_identity(st)
-  local id, nm = st.playerTrainerId, st.playerOtName or st.playerName
-  if id == nil then
+  local sess = st.session
+  if not sess then
     local Runtime = package.loaded["src.core.game3.runtime"]
-    local ok, sess = pcall(function() return Runtime and Runtime.getSession and Runtime.getSession() end)
-    if ok and sess then
-      id = sess.trainerId or sess.id or sess.playerId or 12345
-      nm = sess.name or sess.playerName or nm or "RED"
-    end
+    local ok, current = pcall(function() return Runtime and Runtime.getSession and Runtime.getSession() end)
+    if ok then sess = current end
   end
-  return id, nm
+  sess = sess or {}
+  return { trainerId = st.playerTrainerId or sess.trainerId or sess.id or sess.playerId,
+    secretId = st.playerSecretId or sess.secretId,
+    name = st.playerOtName or st.playerName or sess.name or sess.playerName }
 end
 
 -- pokefirered/src/pokemon.c:5965
 function Engine.isTradedMon(st, mon)
   if not mon or mon.otId == nil then return false end
-  local pid, pname = player_identity(st or {})
-  if pid == nil then return false end
-  return tonumber(mon.otId) ~= tonumber(pid)
-    or (mon.otName ~= nil and pname ~= nil and tostring(mon.otName) ~= tostring(pname))
+  return require("src.core.game3.pokemon").isTradedMon(mon, player_identity(st or {}))
 end
 
 -- src/battle_message.c:1180
@@ -1279,10 +1318,14 @@ local LOAF_TEXT = {
 local function disobedient(M)
   local ad, user, st = M.adapter, M.user, M.st
   if not st or st.link or st.pokedude or not user or user.side ~= "player" then return nil end
+  -- pokeemerald/src/battle_util.c:3922
+  if st.playerHalf and State.idOf(user) == 2 then return nil end
   local mon = State.partyMon(user) or user.mon or {}
   local species = tonumber(user.species)
   local ob = 0
   if not ((species == 151 or species == 410) and mon.fatefulEncounter == false) then
+    -- pokeemerald/src/battle_util.c:3924
+    if BattleProfile.isRse(st) and Kinds.has(st, "frontier") then return nil end
     if not Engine.isTradedMon(st, mon) or Engine.hasBadge(st, 8) then return nil end
     ob = 10
     if Engine.hasBadge(st, 2) then ob = 30 end
@@ -1297,7 +1340,8 @@ local function disobedient(M)
     M:sayId("STRINGID_PKMNIGNORESASLEEP", { atk = user })
     return "stop"
   end
-  if math.floor((lvl + ob) * roll(ad, 0, 255) / 256) < ob and M.mnum ~= 264 then
+  if math.floor((lvl + ob) * roll(ad, 0, 255) / 256) < ob
+      and (M.mnum ~= 264 or not BattleProfile.rule(st, "obedienceFocusPunchExempt")) then
     local bad = Engine.moveLimitations(user, ad)
     if M.slot then bad[M.slot] = true end
     if bad[1] and bad[2] and bad[3] and bad[4] then
@@ -1335,10 +1379,11 @@ end
 Engine.disobedient = disobedient
 
 -- pokefirered/src/battle_script_commands.c:4121
-function Engine.moveEndEffects(M)
+function Engine.moveEndEffects(M, opts)
+  opts = opts or {}
   local ad, user, target = M.adapter, M.user, M.target
   if target and target ~= user then Abilities.synchronize(M, target, user) end
-  Abilities.onDamage(M)
+  if not opts.skipContact then Abilities.onDamage(M) end
   Abilities.immunityCure(ad)
   if target and target ~= user then Abilities.synchronize(M, user, target) end
   local chosenNum = move_num(M.opts.calledBy or M.moveId)
@@ -1353,7 +1398,7 @@ function Engine.moveEndEffects(M)
     local H = require("src.core.game3.battle.effects._helpers")
     if not H.slotOf(user, user.choicedMove) then user.choicedMove = nil end
   end
-  HeldItems.moveEnd(ad)
+  HeldItems.moveEnd(ad, { includeFainted = opts.includeFaintedItems })
   HeldItems.kingsRockShellBell(M)
 end
 
@@ -1384,7 +1429,7 @@ function Engine.afterAction(st, ad)
 end
 
 -- pokefirered/src/battle_script_commands.c:4056
-local function move_end(M)
+function Engine.moveEndRageDefrost(M)
   local ad, user, target = M.adapter, M.user, M.target
   if target and target ~= user and target.rage and not ad:isFainted(target)
       and user.side ~= target.side and not M.noEffect and (M.hitsLanded or 0) > 0
@@ -1397,7 +1442,10 @@ local function move_end(M)
     ad:clearStatus(target)
     M:sayId("STRINGID_PKMNWASDEFROSTED", { def = target })
   end
-  Engine.moveEndEffects(M)
+end
+
+function Engine.moveEndBookkeeping(M)
+  local ad, user, target = M.adapter, M.user, M.target
   local chosen = M.opts.calledBy or M.moveId
   local chosenMove = M.opts.calledBy and Moves.get(M.opts.calledBy) or M.move
   if tonumber(chosenMove.effect) ~= E.BATON_PASS then
@@ -1418,6 +1466,27 @@ local function move_end(M)
     target.expLastLandedMove = M.mnum
     target.expLastHitByType = tonumber(M.moveType or M.move.type)
   end
+  if M._rsMultiHit and target and target ~= user then
+    if M.noEffect or M.anim.missed or M.notObeyed then
+      target.expLastLandedMove = 0xFFFF
+    else
+      target.expLastLandedMove = M.mnum
+      target.expLastHitByType = tonumber(M.moveType or M.move.type)
+    end
+    if has_flag(chosenMove, FLAG_MIRROR_MOVE_AFFECTED) and not M.notObeyed
+        and not target._faintAnnounced and not M.noEffect and not M.anim.missed then
+      target.expLastTakenMove = chosen
+    else
+      target.expLastTakenMove = nil
+    end
+  end
+end
+
+local function move_end(M)
+  local perHit = BattleProfile.rule(M.st, "multiHitMoveEnd")
+  if not perHit or not M._rsMultiHit then Engine.moveEndRageDefrost(M) end
+  if not perHit or not perHit.finalEffects(M) then Engine.moveEndEffects(M) end
+  Engine.moveEndBookkeeping(M)
 end
 
 local function run(M)
@@ -1518,6 +1587,15 @@ local function run(M)
       user.expLockedMove = M.moveId
       user.expLockedSlot = M.slot
       M.anim.statusOnly = true
+      move_end(M)
+      return
+    end
+
+    if eff == E.FUTURE_SIGHT then
+      M.anim.statusOnly = true
+      M:attackString()
+      M:ppReduce()
+      Effects.runForMove(ad, M.user, M.target, M.moveId, M)
       move_end(M)
       return
     end
@@ -1672,6 +1750,14 @@ function Engine.resolveMove(user, target, moveId, slot, adapter, st, out, opts)
       end
     end
   end
+  -- pokeruby/src/battle_main.c:5170
+  if st and st.resultPolicy and user then
+    st.resultPolicy.moveDispatch(st.battleResults, {
+      called = opts.called == true, pursuitSwitch = opts.pursuitSwitch == true,
+      initiallyAbsent = absentUser == true, side = user.side == "player" and 0 or 1,
+      move = move_num(moveId, Moves.get(moveId)),
+    })
+  end
   -- pokefirered/src/battle_main.c:3963
   if st and st.double and user and not opts.called and not opts.pursuitSwitch and not opts.noRetarget
       and not absentUser then
@@ -1810,6 +1896,8 @@ function Engine.mostSuitableMon(st, adapter, side)
     return mon and not mon.isEgg and (tonumber(mon.hp) or 0) > 0 and i ~= activeIdx and i ~= in2Idx
       and i ~= pending[id] and i ~= pending[in2]
       and (tonumber(mon.species or mon.speciesId) or 0) ~= 0
+      -- pokeemerald/src/battle_ai_switch_items.c:671
+      and ((st.foeHalf == nil and st.playerHalf == nil) or State.ownsSlot(st, id, i))
   end
   -- pokefirered/src/battle_ai_switch_items.c:404
   local function modulate(atk, d1, d2, v)
@@ -1932,6 +2020,12 @@ function Engine.performSwitch(st, adapter, side, slot, opts)
   end
   if st.battlers then st.battlers[id] = nb else st[side] = nb end
   if st.absent then st.absent[id] = nil end
+  local sequencing = BattleProfile.rule(st, "sequencingPolicy")
+  if sequencing then
+    local kind = opts.nativeSwitchKind or opts.reason or "switch"
+    if kind == "shift" then kind = side == "player" and "shift_player" or "shift_enemy" end
+    sequencing.prepareSwitch(adapter, nb, kind)
+  end
   if st.monToSwitchInto then st.monToSwitchInto[id] = nil end
   Engine.cancelPendingAction(st, id)
   if st.double then
@@ -2019,7 +2113,11 @@ function Engine.switchInEffects(st, adapter, battler, opts)
       local dmg = math.max(1, math.floor(adapter:maxHp(battler) / denom))
       adapter:applyHpLoss(battler, dmg)
       say_id(adapter, "STRINGID_PKMNHURTBYSPIKES", { scrActive = battler })
-      if adapter:isFainted(battler) then return true end
+      if adapter:isFainted(battler) then
+        local sequencing = BattleProfile.rule(st, "sequencingPolicy")
+        if sequencing then sequencing.spikesFaint(adapter, battler) end
+        return true
+      end
     end
   end
   if adapter:isFainted(battler) then return false end
@@ -2073,6 +2171,8 @@ end
 function Engine.canRun(st, adapter, battler)
   battler = battler or (st and st.player)
   if not st or not battler then return false, nil end
+  -- pokeemerald/src/battle_util.c:407
+  if not st.wild and (Kinds.has(st, "frontier") or Kinds.has(st, "trainerHill")) then return true end
   -- pokefirered/src/battle_main.c:3240
   if st.link then return true end
   if not st.wild then return false, State.text(st, "STRINGID_NORUNNINGFROMTRAINERS") end
@@ -2085,6 +2185,10 @@ function Engine.canRun(st, adapter, battler)
   end
   if battler.expTrapped or battler.escapePrevention or (battler.expTrapTurns or 0) > 0 or battler.expIngrain then
     return false, State.text(st, "STRINGID_CANTESCAPE")
+  end
+  if Kinds.isBirchFirstBattle(st) then
+    -- pokeemerald/src/battle_main.c:4078
+    return false, State.text(st, BattleProfile.of(st).firstBattle.cantRun)
   end
   return true
 end
@@ -2140,6 +2244,13 @@ function Engine.tryFlee(st, adapter, battler)
     if st.double then
       -- pokefirered/src/battle_main.c:4259
       return false
+    elseif st.pyramid then
+      -- pokeemerald/src/battle_util.c:432
+      local Pyramid = require("src.core.game3.rse.frontier.pyramid")
+      local multiplier = Pyramid.runMultiplier(st.session)
+      local speedVar = (math.floor(pSpd * multiplier / math.max(1, eSpd))
+        + (st.fleeAttempts or 0) * 30) % 256
+      return speedVar > roll(adapter, 0, 255)
     elseif pSpd < eSpd then
       local speedVar = (math.floor(pSpd * 128 / math.max(1, eSpd)) + (st.fleeAttempts or 0) * 30) % 256
       return speedVar > roll(adapter, 0, 255)
@@ -2581,12 +2692,18 @@ function Engine.collectResidualEvents(_st, adapter)
   return Residuals.collectEvents(adapter)
 end
 
+-- pokeemerald/src/battle_script_commands.c:3556
+-- pokefirered/src/battle_script_commands.c:3395
+local function mon_can_battle(mon)
+  if not mon or (tonumber(mon.hp) or 0) <= 0 then return false end
+  if require("src.core.game3.pokemon").isEgg(mon) then return false end
+  return true
+end
+
 function Engine.hasLivingMons(party)
   if not party then return false end
   for _, mon in ipairs(party) do
-    if mon and (tonumber(mon.hp) or 0) > 0 then
-      return true
-    end
+    if mon_can_battle(mon) then return true end
   end
   return false
 end
@@ -2594,9 +2711,7 @@ end
 function Engine.nextLivingMonIndex(party, currentIdx)
   if not party then return nil end
   for i, mon in ipairs(party) do
-    if i ~= currentIdx and mon and (tonumber(mon.hp) or 0) > 0 then
-      return i
-    end
+    if i ~= currentIdx and mon_can_battle(mon) then return i end
   end
   return nil
 end
@@ -2627,7 +2742,15 @@ function Engine.checkEnd(st, adapter)
     if b3 and st.foeParty then State.syncBattlerToParty(b3, st.foeParty) end
   end
 
-  local playerAlive = Engine.hasLivingMons(st.playerParty)
+  local playerAlive
+  if st.playerHalf then
+    -- pokeemerald/src/battle_script_commands.c:3543
+    local own = {}
+    for i = 1, math.min(st.playerHalf, #(st.playerParty or {})) do own[i] = st.playerParty[i] end
+    playerAlive = Engine.hasLivingMons(own)
+  else
+    playerAlive = Engine.hasLivingMons(st.playerParty)
+  end
   if not playerAlive then
     st.over = true
     -- pokefirered/src/battle_script_commands.c:3413

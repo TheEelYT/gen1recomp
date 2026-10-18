@@ -66,13 +66,20 @@ local function battleStub(data)
 end
 
 do
-  local mon = { nickname = "PIKACHU", volatile = { recharge = true } }
-  local battle = setmetatable({ data = {}, events = {}, player = mon },
-    { __index = Battle })
-  T.check(not battle:canAct(mon), "recharge still spends the turn")
-  T.eq(battle.events[1] and battle.events[1].text,
+  local function recharge(overrides)
+    local text = require("tests.gen2_battle_text_fixture")()
+    for label, line in pairs(overrides or {}) do text[label] = line end
+    local mon = { nickname = "PIKACHU", volatile = { recharge = true } }
+    local battle = setmetatable({ data = { text = text }, events = {},
+      player = mon }, { __index = Battle })
+    T.check(not battle:canAct(mon), "recharge still spends the turn")
+    return battle.events[1] and battle.events[1].text
+  end
+  T.eq(recharge(), "PIKACHU\nmust recharge!",
+    "the untranslated cache line carries the runtime battler name")
+  T.eq(recharge({ MustRechargeText = "{USER} doit recharger!" }),
     "PIKACHU doit recharger!",
-    "a translated battle template receives the runtime battler name")
+    "a translated cache line replaces the English one and still receives the battler name")
 end
 
 T.eq(Effects.stageMessage("PIKACHU", "attack", 2),
@@ -92,7 +99,7 @@ do
   enemy.moves = { { id = "RAW_MOVE", pp = 5 } }
   enemy.volatile.lastMove = "RAW_MOVE"
   Battle.MOVE_EFFECTS.EFFECT_DISABLE(battle, player, enemy)
-  T.eq(battle.events[#battle.events].text, "CIBLE: JOLI MOUV neutralisee!",
+  T.eq(battle.events[#battle.events].text, "Enemy CIBLE: JOLI MOUV neutralisee!",
     "a multi-argument template receives the move's display name, not its id")
 
   battle.events = {}
@@ -199,7 +206,7 @@ do
   local state = setmetatable({
     game = { data = {
       moves = { MOD_MOVE = { type = "MOD_TYPE" } },
-      type_chart = { types = {
+      text = require("tests.gen2_battle_text_fixture")(), type_chart = { battleRules = require("tests.gen2_battle_rules_fixture")(), types = {
         MOD_TYPE = { name = "TYPE LOCALISE", category = "special" },
       } },
     } },

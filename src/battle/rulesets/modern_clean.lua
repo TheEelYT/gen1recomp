@@ -3,6 +3,8 @@
 
 return {
   name = "modern_clean",
+  -- pokered/engine/battle/effects.asm:508
+  statCapRollbackBug = false,
   oneIn256Miss = false,
   critUsesBaseSpeed = true,
   critIgnoresStages = false,
@@ -20,4 +22,10 @@ return {
   zeroDamageMiss = false,
   -- engine/battle/core.asm:6283,6326 and effects.asm:414-415
   statusPenaltyIsBaked = false,
+  -- engine/battle/move_effects/heal.asm:13
+  healHpLowByteBug = false,
+  -- engine/battle/move_effects/heal.asm:29
+  toxicFlagSurvivesCure = false,
+  -- engine/battle/move_effects/substitute.asm:39-40
+  substituteZeroHpBug = false,
 }

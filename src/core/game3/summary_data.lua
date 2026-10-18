@@ -5,10 +5,21 @@ local Strings = require("src.core.Strings")
 local RomText = require("src.core.game3.rom_text")
 local SummaryData = {}
 
-local NATURE_KEYS = {}
-for i = 0, 24 do NATURE_KEYS[i] = RomText.key("gNatureNamePointers", i) end
+-- pokeruby/src/data/text/nature_names_en.h:27
+local RS_NATURE_TABLE = { ruby = "gNatureNames", sapphire = "gNatureNames" }
+
+function SummaryData.natureTable(version)
+  return RS_NATURE_TABLE[version or require("src.core.GameVersion").get()] or "gNatureNamePointers"
+end
+
 -- src/data/text/nature_names.h:27
-SummaryData.NATURES = RomText.lazy(NATURE_KEYS)
+SummaryData.NATURES = setmetatable({}, {
+  __index = function(_, k)
+    local id = tonumber(k)
+    if not id or id < 0 or id > 24 or id % 1 ~= 0 then return nil end
+    return RomText.at(SummaryData.natureTable(), id)
+  end,
+})
 
 -- Stat multipliers per nature [natureId] = { stat = 1.1 / 0.9 / 1.0 }
 -- Stats: atk, def, spAtk, spDef, spd
@@ -41,7 +52,7 @@ end
 --- Growth Rates matching pokefirered/src/data/pokemon/experience_tables.h
 -- Enum order = pret GROWTH_MEDIUM_FAST..GROWTH_SLOW (species meta.growthRate from ROM).
 -- Tables hardcode [0]=0, [1]=1 for every rate; formulas apply from level 2 up
--- (Medium Slow at n=1 is negative — pret stores 1).
+-- (Medium Slow at n=1 is negative, pret stores 1).
 local function calc_exp(growthRate, n)
   n = tonumber(n) or 0
   if n <= 0 then return 0 end
@@ -140,12 +151,13 @@ end
 function SummaryData.isShiny(mon)
   if not mon then return false end
   if mon.isShiny ~= nil then return not not mon.isShiny end
-  local p = tonumber(mon.personality) or 0
-  local otId = tonumber(mon.otId) or 0
-  local secretId = tonumber(mon.otSecretId) or 0
+  local p = (tonumber(mon.personality) or 0) % 4294967296
+  local full = (tonumber(mon.otId) or 0) % 4294967296
+  local otId = full % 65536
+  local secretId = (tonumber(mon.otSecretId) or math.floor(full / 65536)) % 65536
 
-  local pHigh = bit.rshift(p, 16)
-  local pLow = bit.band(p, 0xFFFF)
+  local pHigh = math.floor(p / 65536)
+  local pLow = p % 65536
   local trainerXor = bit.bxor(otId, secretId)
   local pidXor = bit.bxor(pHigh, pLow)
   return bit.bxor(trainerXor, pidXor) < 8
@@ -414,6 +426,16 @@ function SummaryData.abilityDescription(abilityId, abilityName)
   end
   -- src/data/text/abilities.h:1
   return Strings(d.ABILITIES["ABILITY_"])
+end
+
+-- pokeemerald/src/data/contest_text_tables.h:220
+function SummaryData.contestEffectDescription(effect)
+  local text = type(effect) == "table" and effect.description or effect
+  return Strings(type(text) == "string" and text or "")
+end
+
+function SummaryData.contestCategoryName(name)
+  return Strings(name or "")
 end
 
 function SummaryData.moveDescription(moveId, moveName)

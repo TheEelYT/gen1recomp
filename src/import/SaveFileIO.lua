@@ -18,13 +18,10 @@ local SaveConvert = require("src.save_convert.SaveConvert")
 local SaveData = require("src.core.SaveData")
 local GameVersion = require("src.core.GameVersion")
 local SaveSerializer = require("src.core.SaveSerializer")
+local SrmDecompress = require("src.import.SrmDecompress")
 
 local SaveFileIO = {}
 
--- The cartridge image an imported Gen 2 slot came from, kept BESIDE the slot
--- rather than inside it: export needs the regions the codec does not model,
--- and 32 KB of binary in the serialized table is 40 KB of Lua source reparsed
--- on every save and load.
 local function valid_slot_id(id)
   id = tostring(id)
   return id:match("^slot%d+$") ~= nil or id == "save"
@@ -38,18 +35,6 @@ end
 local function cartFs()
   local portable = SaveData.portableFs and SaveData.portableFs()
   return portable or (love and love.filesystem)
-end
-
-local function writeCart(version, slotId, bytes)
-  local fs = cartFs()
-  if not (fs and fs.write and bytes) then return end
-  if fs.createDirectory then
-    fs.createDirectory("saves")
-    fs.createDirectory("saves/" .. version)
-  end
-  local rel = cartPath(version, slotId)
-  if not rel then return end
-  fs.write(rel, bytes)
 end
 
 local function readCart(version, slotId)
@@ -76,9 +61,38 @@ function SaveFileIO.dropStaleCart(version, slotId, save)
   end
   local bytes = readCart(version, slotId)
   if not bytes then return false end
-  local Gen3Save = require("src.save_convert.Gen3Save")
+  local Gen3Save = require("src.save_convert.Gen3Save").forVersion(version)
   if Gen3Save.templateBelongs(Gen3Save.ownerOf(bytes), save) then return false end
   return removeCart(version, slotId)
+end
+
+function SaveFileIO.migrateLegacyCart(version, slotId, save)
+  if type(save) ~= "table" then return nil end
+  local bytes = readCart(version, slotId)
+  if not bytes then return nil end
+  local generation = GameVersion.VERSIONS[version] and GameVersion.generation(version)
+  local gen3 = generation == 3
+  if not (gen3 or generation == 2) then return nil end
+  local folded = false
+  if gen3 then
+    local Gen3Save = require("src.save_convert.Gen3Save").forVersion(version)
+    if not Gen3Save.slotTemplate(save) then
+      local cart = Gen3Save.decode(bytes)
+      if cart and Gen3Save.templateBelongs(cart, save) then
+        Gen3Save.stampImport(save, bytes, cart, version)
+        folded = true
+      end
+    end
+  elseif type(save.rawImport) ~= "string" then
+    save.rawImport = bytes
+    folded = true
+  end
+  if folded then
+    local ok = SaveData.writeSlot(version, slotId, save)
+    if not ok then return nil end
+  end
+  removeCart(version, slotId)
+  return folded and "folded" or "dropped"
 end
 
 local SAVE_SIZE = SaveConvert.SAVE_SIZE
@@ -87,10 +101,20 @@ local SAVE_SIZE = SaveConvert.SAVE_SIZE
 --   * a LOVE DroppedFile (a table/userdata with :open/:read/:getSize), read the
 --     way RomImporter reads a dropped ROM;
 --   * a raw 32768-byte string (the tests and the in-memory path) used as-is;
---   * any other string treated as an absolute picker path opened with io.open.
+--   * any other string treated as an absolute picker path opened natively.
 -- A picker path is never 32768 bytes long, so the length test disambiguates it
--- from a raw image cleanly.  Returns bytes, or nil + an error string.
+-- from a raw image cleanly.  RetroArch RZIP-compressed images are unwrapped
+-- here; size policy stays in importToSlot.  Returns bytes, or nil + an error.
 local function readSource(source)
+  local function handleBytes(data)
+    if type(data) ~= "string" then return nil, "the save file was empty" end
+    if SrmDecompress.isCompressed(data) then
+      local d, derr = SrmDecompress.decompress(data)
+      if not d then return nil, "could not decompress the save file: " .. tostring(derr) end
+      return d
+    end
+    return data
+  end
   local t = type(source)
   if t == "table" or t == "userdata" then
     if type(source.read) ~= "function" then
@@ -101,26 +125,25 @@ local function readSource(source)
     local data, readErr = source:read(source:getSize())
     source:close()
     if not data then return nil, "could not read the dropped file: " .. tostring(readErr) end
-    return data
+    return handleBytes(data)
   end
   if t ~= "string" then
     return nil, "no save file was provided"
   end
-  if #source == SAVE_SIZE then
+  if #source == SAVE_SIZE and not SrmDecompress.isCompressed(source) then
     return source
   end
-  local f, openErr = io.open(source, "rb")
+  local f, openErr = SaveData.openNative(source, "rb")
   if f then
     local data = f:read("*a")
     f:close()
-    if type(data) ~= "string" then return nil, "the save file was empty" end
-    return data
+    return handleBytes(data)
   end
   -- Android SAF drops (picked_save.sav) and USB copies land in the LOVE save
   -- directory; io.open cannot see them, so fall back to love.filesystem.
   if love and love.filesystem and love.filesystem.read then
     local data = love.filesystem.read(source)
-    if type(data) == "string" then return data end
+    if type(data) == "string" then return handleBytes(data) end
   end
   return nil, "could not read the save file: " .. tostring(openErr)
 end
@@ -161,6 +184,7 @@ local function importLuaSlot(bytes, version)
   end
   local slotId = SaveData.createSlot(version)
   if not slotId then return false, "this game has no save slots to import into" end
+  SaveData.claimImportPlaythroughId(version, slotId, save)
   local ok, writeErr = SaveData.writeSlot(version, slotId, save)
   if not ok then
     SaveData.deleteSlot(version, slotId)
@@ -181,13 +205,13 @@ local function importGen3Cart(bytes, version)
   save.meta = SaveData.buildMeta(nil, save.meta)
   local slotId = SaveData.createSlot(version)
   if not slotId then return false, "this game has no save slots to import into" end
+  SaveData.claimImportPlaythroughId(version, slotId, save)
   local ok, writeErr = SaveData.writeSlot(version, slotId, save)
   if not ok then
     SaveData.deleteSlot(version, slotId)
     return false, "could not write the imported save: " .. tostring(writeErr)
   end
   SaveData.setActiveSlot(version, slotId)
-  writeCart(version, slotId, bytes)
   return true, slotId, note and { note = note } or nil
 end
 
@@ -201,6 +225,8 @@ end
 -- this returns false, nil, { needsConfirm = true, size = #bytes } so the
 -- launcher can ask the player before truncating; with force the extra bytes
 -- are dropped and the 32768-byte save imports.
+SaveFileIO._readSource = readSource
+
 function SaveFileIO.importToSlot(source, version, force)
   version = version or GameVersion.get()
   local bytes, readErr = readSource(source)
@@ -235,13 +261,15 @@ function SaveFileIO.importToSlot(source, version, force)
        and not SaveConvert.isGen2Cart(version) then
       return false, nil, { needsConfirm = true, size = #bytes }
     end
-    bytes = #bytes > SAVE_SIZE and bytes:sub(1, SAVE_SIZE)
-      or (bytes .. string.rep("\0", SAVE_SIZE - #bytes))
+    if not SaveConvert.isGen2Cart(version) then
+      bytes = #bytes > SAVE_SIZE and bytes:sub(1, SAVE_SIZE)
+        or (bytes .. string.rep("\0", SAVE_SIZE - #bytes))
+    end
   end
   -- 3rd arg: the crosswalk has to come from THIS game's ROM cache.  The
   -- launcher imports before the cache is mounted on the un-prefixed paths, so
   -- SaveConvert cannot find the generated tables by itself here (#420).
-  local save, convertErr = SaveConvert.importSav(bytes, version, version)
+  local save, convertErr, note = SaveConvert.importSav(bytes, version, version)
   if not save then return false, convertErr end
   -- Tag the game version and normalize the meta stamp: SaveConvert leaves
   -- meta.format = "gen1_import", but SaveData.load's migration pass compares
@@ -251,13 +279,14 @@ function SaveFileIO.importToSlot(source, version, force)
   save.meta = SaveData.buildMeta(nil, save.meta)
   local slotId = SaveData.createSlot(version)
   if not slotId then return false, "this game has no save slots to import into" end
+  SaveData.claimImportPlaythroughId(version, slotId, save)
   local ok, writeErr = SaveData.writeSlot(version, slotId, save)
   if not ok then
+    SaveData.deleteSlot(version, slotId)
     return false, "could not write the imported save: " .. tostring(writeErr)
   end
   SaveData.setActiveSlot(version, slotId)
-  if SaveConvert.isGen2Cart(version) then writeCart(version, slotId, bytes) end
-  return true, slotId
+  return true, slotId, note and { note = note } or nil
 end
 
 -- exportActiveSlot(version) -> ok, pathOrErr
@@ -278,10 +307,11 @@ function SaveFileIO.exportActiveSlot(version)
     local minted, id = pcall(SaveData.slotPlaythroughId, version, activeSlot, save)
     if minted and type(id) == "string" then save.meta.playthroughId = id end
   end
+  if activeSlot then SaveFileIO.migrateLegacyCart(version, slotId, save) end
   SaveFileIO.dropStaleCart(version, slotId, save)
-  local bytes, exportErr = SaveConvert.exportSav(save, version,
-                                                 readCart(version, slotId))
+  local bytes, exportErr = SaveConvert.exportSav(save, version)
   if not bytes then return false, exportErr end
+  local exportNote = type(exportErr) == "string" and exportErr ~= "" and exportErr or nil
   -- Portable mode is the same seam SaveData's own persistFs uses: when
   -- portable.txt marks the install every persistent write leaves the OS save
   -- directory for the game folder, and an export is no exception.  Writing
@@ -305,11 +335,11 @@ function SaveFileIO.exportActiveSlot(version)
   local portableBase = SaveData.portableBaseDir()
   if portableBase then
     local sep = package.config:sub(1, 1)
-    return true, portableBase .. sep .. rel:gsub("/", sep)
+    return true, portableBase .. sep .. rel:gsub("/", sep), exportNote
   end
   local base = fs.getSaveDirectory and fs.getSaveDirectory() or ""
-  if base ~= "" then return true, base .. "/" .. rel end
-  return true, rel
+  if base ~= "" then return true, base .. "/" .. rel, exportNote end
+  return true, rel, exportNote
 end
 
 -- Copy the original serialized source rather than decoding and re-encoding it.

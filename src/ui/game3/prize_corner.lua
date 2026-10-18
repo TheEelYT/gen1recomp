@@ -4,7 +4,7 @@ local Stack = require("src.ui.game3.stack")
 local Window = require("src.ui.game3.window")
 local FrlgFont = require("src.ui.game3.frlg_font")
 
-local PrizeCorner = {}
+local PrizeCorner = { isMenu = true }
 
 -- pokefirered/include/constants/menu.h:21
 PrizeCorner.LIST_POKEMON_PRIZES = 14
@@ -182,7 +182,7 @@ local function finish(result)
 end
 
 local function se()
-  pcall(function() require("src.core.game3.audio").playSe(5) end)
+  pcall(function() require("src.core.game3.audio").playSe(require("src.core.game3.se_ids").SE_SELECT) end)
 end
 
 -- pokefirered/src/script_menu.c:818

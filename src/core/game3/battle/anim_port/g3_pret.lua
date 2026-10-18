@@ -4,6 +4,7 @@ local bit = require("bit")
 local Trig = require("src.core.game3.trig")
 local AnimPal = require("src.core.game3.battle.anim_pal")
 local AnimCoords = require("src.core.game3.battle.anim_coords")
+local PixelCanvas = require("src.render.PixelCanvas")
 P.band, P.bor, P.bxor, P.lshift, P.rshift = bit.band, bit.bor, bit.bxor, bit.lshift, bit.rshift
 
 local SINE = Trig.SINE
@@ -318,7 +319,7 @@ function P.sheet(vm, tag, w, h)
   local cw = math.max(1, floor(w / 8))
   local perFrame = cw * math.max(1, floor(h / 8))
   local nframes = math.max(1, floor(total / perFrame))
-  local ok, canvas = pcall(love.graphics.newCanvas, w, h * nframes)
+  local ok, canvas = pcall(PixelCanvas.new, w, h * nframes)
   if not ok or not canvas then
     per[key] = { image = img, frames = 1 }
     return img, 1
@@ -345,7 +346,7 @@ function P.sheet(vm, tag, w, h)
   relay(img, canvas)
   local idxImg, idxTag = AnimPal.indexImage(img)
   if idxImg then
-    local okc, ic = pcall(love.graphics.newCanvas, w, h * nframes)
+    local okc, ic = pcall(PixelCanvas.new, w, h * nframes)
     if okc and ic then
       ic:setFilter("nearest", "nearest")
       relay(idxImg, ic)
@@ -674,6 +675,11 @@ local function setup(s, vm, tmplName)
   s.affineAnimPaused = false
   s._mat = nil
   local tag = T.tag or s.tag
+  local opTag = s._op and s._op.tag
+  if type(T.tag) == "string" and opTag and vm and vm._pack and vm._pack.tags and not vm._pack.tags[T.tag]
+      and vm._pack.tags[opTag] then
+    tag = opTag
+  end
   if tag and vm then
     local img, frames = P.sheet(vm, tag, w, h)
     if img then s.image = img end
@@ -681,6 +687,7 @@ local function setup(s, vm, tmplName)
     s.quad = nil
   end
   s.pri = 2
+  s._pz = nil
   s.callbackData = nil
 end
 
@@ -1399,7 +1406,7 @@ local function overlayResources()
     overlayRes = false
     return nil
   end
-  local ok1, canvas = pcall(love.graphics.newCanvas, 240, 160)
+  local ok1, canvas = pcall(PixelCanvas.new, 240, 160)
   local ok2, mask = pcall(love.graphics.newShader, MASK_SHADER_SRC)
   local ok3, over = pcall(love.graphics.newShader, OVERLAY_SHADER_SRC)
   if not (ok1 and ok2 and ok3) then
@@ -1411,13 +1418,22 @@ local function overlayResources()
   return overlayRes
 end
 
+-- One quad re-pointed per draw (draw reads the viewport immediately).
+local windowSpriteQuad = nil
+
 local function drawWindowSprite(sp)
   local img = sp.image
   if not img or sp.invisible or not sp.active then return end
   local bw = sp._baseW or sp.w or 32
   local bh = sp._baseH or sp.h or 32
   local iw, ih = img:getDimensions()
-  local q = love.graphics.newQuad(sp.quadX or 0, sp.quadY or 0, bw, bh, iw, ih)
+  local q = windowSpriteQuad
+  if q then
+    q:setViewport(sp.quadX or 0, sp.quadY or 0, bw, bh, iw, ih)
+  else
+    q = love.graphics.newQuad(sp.quadX or 0, sp.quadY or 0, bw, bh, iw, ih)
+    windowSpriteQuad = q
+  end
   local sx = (sp.scaleX or 1) * (sp.hFlip and -1 or 1)
   local sy = (sp.scaleY or 1) * (sp.vFlip and -1 or 1)
   love.graphics.draw(img, q, math.floor(sp.x + (sp.ox or 0) + 0.5), math.floor(sp.y + (sp.oy or 0) + 0.5),

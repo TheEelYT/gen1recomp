@@ -78,6 +78,9 @@ function TrainerSight.getTrainerId(eo)
   local scripts = Sp and Sp.bundle and Sp.bundle.scripts
   local list = scripts and scripts[scriptKey]
   if type(list) == "table" then
+    -- negative cache: this exact script list was already scanned without a
+    -- trainerbattle (a script swapped in under the key rescans)
+    if eo._trainerIdMiss == list then return nil end
     for _, row in ipairs(list) do
       if row.op == "trainerbattle" or row.op == "dotrainerbattle" then
         local tid = tonumber(row.trainer or row[1])
@@ -88,6 +91,7 @@ function TrainerSight.getTrainerId(eo)
         end
       end
     end
+    eo._trainerIdMiss = list
   end
   return nil
 end
@@ -158,11 +162,26 @@ local function is_ledge_tile(game, cx, cy)
   return false
 end
 
+local function isRse()
+  local O = Objects()
+  return O.isRse ~= nil and O.isRse()
+end
+
+-- pokeemerald/src/trainer_see.c:301
+local SEE_ALL_ORDER = { "down", "up", "left", "right" }
+
 --- Directional line-of-sight raycast verifying elevation, obstacles, ledges, and intermediaries.
 -- @return spotted (bool), dist (number)
-function TrainerSight.checkLineOfSight(eo, P, game)
+function TrainerSight.checkLineOfSight(eo, P, game, facingOverride)
   if not eo or not P then return false, 0 end
-  local facing = eo.facing or "down"
+  if not facingOverride and isRse() and tonumber(eo.trainerType or (eo.def and eo.def.trainerType)) == 3 then
+    for _, dir in ipairs(SEE_ALL_ORDER) do
+      local spotted, dist = TrainerSight.checkLineOfSight(eo, P, game, dir)
+      if spotted then return true, dist, dir end
+    end
+    return false, 0
+  end
+  local facing = facingOverride or eo.facing or "down"
   local d = DELTA[facing]
   if not d then return false, 0 end
 
@@ -237,11 +256,101 @@ function TrainerSight.checkLineOfSight(eo, P, game)
     return false, 0
   end
 
-  return true, dist
+  return true, dist, facing
+end
+
+local function faceMovementType(facing)
+  return ({ down = 0x08, up = 0x07, left = 0x09, right = 0x0A })[facing] or 0x08
+end
+
+-- pokeemerald/src/trainer_see.c:564
+function TrainerSight.revealBuried(eo, done, facing)
+  local Objs = Objects()
+  local P = Player()
+  if facing then
+    eo.facing = facing
+  elseif P then
+    -- pokeemerald/src/event_object_movement.c:4622 GetDirectionToFace
+    Objs.facePlayer(eo.localId)
+  end
+  local FxRse = require("src.core.game3.field_effects_rse")
+  local shown, puffDone = false, false
+  local function finish()
+    if not (shown and puffDone) or eo.moving then return false end
+    -- pokeemerald/src/trainer_see.c:625
+    local mt = faceMovementType(eo.facing)
+    Objs.setTrainerMovementType(eo, mt)
+    Objs.overrideTemplateMovementType(eo.localId, mt)
+    if done then done() end
+    return true
+  end
+  local puff = assert(FxRse.startAshPuff(eo.cellX, eo.cellY, function() puffDone = true end),
+    "pop out of ash field effect sheet missing")
+  local prev = puff.onStep
+  puff.onStep = function(e)
+    -- pokeemerald/src/trainer_see.c:593
+    if not shown and (e.a.index or 0) >= 2 then
+      shown = true
+      eo.invisible = false
+      eo.buried = nil
+      Objs.scriptJump(eo, eo.facing, 0, { type = "high" })
+    end
+    if prev then return prev(e) end
+  end
+  local Task = require("src.core.game3.task")
+  Task.spawn(function() return finish() end)
+end
+
+-- pokeemerald/src/trainer_see.c:543
+function TrainerSight.revealDisguise(eo, done)
+  local d = eo.disguise
+  if not d then
+    if done then done() end
+    return
+  end
+  local FxRse = require("src.core.game3.field_effects_rse")
+  d.a = FxRse.anim(FxRse.animCmds(d.sheet, 2))
+  d.revealing = true
+  local Task = require("src.core.game3.task")
+  Task.spawn(function()
+    if eo.disguise and not eo.disguise.done then return false end
+    if done then done() end
+    return true
+  end)
+end
+
+-- pokeemerald/src/trainer_see.c:472
+function TrainerSight.revealThen(eo, facing, cont)
+  if not isRse() then return cont() end
+  if eo.buried then return TrainerSight.revealBuried(eo, cont, facing) end
+  if eo.disguise then return TrainerSight.revealDisguise(eo, cont) end
+  return cont()
+end
+
+local EMPTY = {}
+
+local function fieldBlock()
+  local Profile = package.loaded["src.core.game3.profile"] or require("src.core.game3.profile")
+  local ok, row = pcall(Profile.forSession)
+  return ok and row and row.field or EMPTY, ok and row or nil
+end
+
+-- pokeemerald/src/battle_setup.c:1440
+function TrainerSight.encounterMusic(tid)
+  local block, row = fieldBlock()
+  local rule = block.encounterMusic
+  if not (rule and row) then return nil end
+  local okT, Trainers = pcall(require, "src.core.game3.scripting.trainers")
+  local t = okT and Trainers and tid and Trainers.get and Trainers.get(tid)
+  local code = t and (tonumber(t.encounterMusic) or 0) % 128 or -1
+  local C = require("src.core.game3.constants").of(row.id)
+  local name = C:name("trainer_classes", code, rule.prefix)
+  local song = name and C:song(rule.song .. name:sub(#rule.prefix + 1))
+  return song or C:song(rule.default)
 end
 
 --- Engage trainer encounter: play '!' exclamation bubble, walk up (or skip if dist == 1), and launch script.
-function TrainerSight.engage(game, eo, dist)
+function TrainerSight.engage(game, eo, dist, facing)
   local F = Field()
   local P = Player()
   local Objs = Objects()
@@ -252,9 +361,6 @@ function TrainerSight.engage(game, eo, dist)
   F.locked = true
   eo.frozen = true
   eo.scriptBusy = true
-
-  -- 2. Turn trainer to face player directly
-  local playerFacing = OPPOSITE_FACING[eo.facing] or "up"
 
   -- 3. Play encounter music immediately when trainer spots player (pret PlayTrainerEncounterMusic / EventScript_DoTrainerBattleFromApproach)
   local tid = TrainerSight.getTrainerId(eo)
@@ -268,7 +374,10 @@ function TrainerSight.engage(game, eo, dist)
       mapId = Map and Map.current, sight = { distance = dist, facing = eo.facing },
     })
   end
-  local musicId = okT and Trainers and Trainers.getEncounterMusic and Trainers.getEncounterMusic(tid)
+  local musicId = TrainerSight.encounterMusic(tid)
+  if musicId == nil then
+    musicId = okT and Trainers and Trainers.getEncounterMusic and Trainers.getEncounterMusic(tid)
+  end
   if not musicId then
     musicId = 285 -- MUS_ENCOUNTER_BOY fallback
   end
@@ -282,7 +391,10 @@ function TrainerSight.engage(game, eo, dist)
     local scriptKey = eo.scriptKey or (eo.def and eo.def.scriptKey)
 
     local function finishEngagement()
-      P.facing = playerFacing
+      -- pokeemerald/src/trainer_see.c:501
+      Objs.facePlayer(eo.localId)
+      -- pokeruby/src/trainer_see.c:327, pokeemerald/src/trainer_see.c:526, pokefirered/src/trainer_see.c:359
+      if isRse() then P.facing = OPPOSITE_FACING[eo.facing] or P.facing end
       -- pokefirered/src/trainer_see.c:349-351 SetTrainerMovementType, OverrideMovementTypeForObjectEvent, OverrideTemplateCoordsForObjectEvent
       local faceMt = ({ down = 0x08, up = 0x07, left = 0x09, right = 0x0A })[eo.facing] or 0x08
       if Objs.setTrainerMovementType then
@@ -331,18 +443,305 @@ function TrainerSight.engage(game, eo, dist)
     end
 
     -- Walk-up Approach Tracking: walk dist - 1 steps toward player, or skip if adjacent (dist == 1)
-    local walkSteps = dist - 1
-    if walkSteps <= 0 then
-      finishEngagement()
-    else
-      local actions = {}
-      for _ = 1, walkSteps do
-        actions[#actions + 1] = { kind = "step", dir = eo.facing }
-      end
-      Objs.startTrack(eo.localId, actions, function()
+    TrainerSight.revealThen(eo, facing, function()
+      local walkSteps = dist - 1
+      if walkSteps <= 0 then
         finishEngagement()
-      end)
+      else
+        local actions = {}
+        for _ = 1, walkSteps do
+          actions[#actions + 1] = { kind = "step", dir = eo.facing }
+        end
+        Objs.startTrack(eo.localId, actions, function()
+          finishEngagement()
+        end)
+      end
+    end)
+  end)
+end
+
+local function battleRow(eo)
+  local Sp = Space()
+  local scriptKey = eo.scriptKey or (eo.def and eo.def.scriptKey)
+  local list = scriptKey and Sp and Sp.bundle and Sp.bundle.scripts and Sp.bundle.scripts[scriptKey]
+  for _, row in ipairs(type(list) == "table" and list or {}) do
+    if row.op == "trainerbattle" then return row end
+  end
+  return nil
+end
+
+local function twoTrainerApproach()
+  local ok, bp = pcall(function() return require("src.core.game3.battle.profile").get() end)
+  return ok and bp and bp.kinds and bp.kinds.twoOpponents == true
+end
+TrainerSight.twoTrainerApproach = twoTrainerApproach
+
+local function canDouble()
+  local Party = require("src.core.game3.party")
+  local Runtime = package.loaded["src.core.game3.runtime"]
+  local session = Runtime and Runtime.getSession and Runtime.getSession()
+  return Party.monsStateToDoubles(session and session.party) == Party.PLAYER_HAS_TWO_USABLE_MONS
+end
+
+local DOUBLE_TYPES = { [4] = true, [6] = true, [7] = true, [8] = true }
+
+local function playEncounterMusic(tid, row)
+  -- pokeemerald/src/battle_setup.c:1440
+  local mode = tonumber(row and row.type) or 0
+  if mode == 1 or mode == 8 then return end
+  local musicId = TrainerSight.encounterMusic(tid)
+  if musicId == nil then
+    local okT, Trainers = pcall(require, "src.core.game3.scripting.trainers")
+    musicId = okT and Trainers and Trainers.getEncounterMusic and Trainers.getEncounterMusic(tid)
+  end
+  local okA, Audio = pcall(require, "src.core.game3.audio")
+  if musicId and okA and Audio and Audio.playSong then Audio.playSong(musicId) end
+end
+
+-- pokeemerald/src/trainer_see.c:422
+local function approach(eo, dist, facing, done)
+  local P = Player()
+  local Objs = Objects()
+  eo.frozen = true
+  eo.scriptBusy = true
+  FieldEffects().startExclamation(eo, function()
+    local function arrive()
+      -- pokeemerald/src/trainer_see.c:501
+      Objs.facePlayer(eo.localId)
+      -- pokeemerald/src/trainer_see.c:509
+      local faceMt = ({ down = 0x08, up = 0x07, left = 0x09, right = 0x0A })[eo.facing] or 0x08
+      if Objs.setTrainerMovementType then Objs.setTrainerMovementType(eo, faceMt) end
+      if Objs.overrideTemplateMovementType then Objs.overrideTemplateMovementType(eo.localId, faceMt) end
+      eo.homeX, eo.homeY = eo.cellX, eo.cellY
+      if eo.def then
+        eo.def.movementType = faceMt
+        eo.def.movement = "STAY"
+        eo.def.x, eo.def.y = eo.cellX, eo.cellY
+        eo.def.range = (eo.facing or "down"):upper()
+      end
+      if Objs.rememberPerm and Objs._mapId then
+        Objs.rememberPerm(Objs._mapId, eo.localId, { x = eo.cellX, y = eo.cellY, movementType = faceMt, facing = eo.facing })
+      end
+      -- pokeruby/src/trainer_see.c:327, pokeemerald/src/trainer_see.c:526, pokefirered/src/trainer_see.c:359
+      if isRse() then P.facing = OPPOSITE_FACING[eo.facing] or P.facing end
+      eo.frozen = false
+      eo.scriptBusy = false
+      done()
     end
+    TrainerSight.revealThen(eo, facing, function()
+      if dist - 1 <= 0 then return arrive() end
+      local actions = {}
+      for _ = 1, dist - 1 do actions[#actions + 1] = { kind = "step", dir = eo.facing } end
+      Objs.startTrack(eo.localId, actions, arrive)
+    end)
+  end)
+end
+
+local function introSpeech(eo, tid, row, done)
+  local Sp = Space()
+  local text
+  if row and row.introText and Sp and Sp.vm and Sp.vm.getText then
+    text = Sp.vm:getText(row.introText)
+  end
+  if not text then
+    local okT, Trainers = pcall(require, "src.core.game3.scripting.trainers")
+    text = okT and Trainers.dialogs(tid).intro or ""
+  end
+  -- pokeemerald/src/battle_setup.c:1378
+  require("src.ui.game3.hud").openMessage(nil, text, { done = done })
+end
+
+-- pokeemerald/data/scripts/trainer_battle.inc:1
+function TrainerSight.engagePair(game, a, b)
+  local F = Field()
+  local Sp = Space()
+  F.locked = true
+  a.eo.frozen, b.eo.frozen = true, true
+
+  local okPyr, Pyramid = pcall(require, "src.core.game3.rse.frontier.pyramid")
+  local inPyramid = okPyr and Pyramid and Pyramid.inPyramid and Pyramid.inPyramid()
+
+  local tidA, tidB
+  local sess = nil
+  local D = nil
+  local partyA, partyB = {}, {}
+  local combinedParty = {}
+  local half = 0
+  local foeAInfo, foeBInfo = {}, {}
+  local nameA, nameB = "", ""
+  local defeatTextA, defeatTextB = nil, nil
+
+  if inPyramid then
+    local Rse = require("src.core.game3.rse.init")
+    sess = Rse.session()
+    D = require("src.core.game3.rse.frontier.trainers")
+    local TextIR = require("src.core.game3.scripting.text_ir")
+    local PYRAMID = D.FACILITY.PYRAMID
+    tidA = Pyramid.localIdToTrainerId(sess, a.eo.localId)
+    tidB = Pyramid.localIdToTrainerId(sess, b.eo.localId)
+    sess.frontierOpponentA = tidA
+    sess.frontierOpponentB = tidB
+    -- pokeemerald/src/battle_tower.c:1620
+    D.fillTrainerParty(sess, tidA, 0, 1, partyA, { facility = PYRAMID })
+    D.fillTrainerParty(sess, tidB, 0, 1, partyB, { facility = PYRAMID, setOwner = tidA })
+    for _, m in ipairs(partyA) do combinedParty[#combinedParty + 1] = m end
+    half = #combinedParty
+    for _, m in ipairs(partyB) do combinedParty[#combinedParty + 1] = m end
+    -- pokeemerald/src/battle_tower.c:1436
+    local function foeInfo(tid)
+      local classId = D.opponentClass(sess, tid, PYRAMID)
+      return { class = classId, className = D.className(sess, classId), pic = D.frontSpriteId(sess, tid, PYRAMID) }
+    end
+    foeAInfo, foeBInfo = foeInfo(tidA), foeInfo(tidB)
+    nameA = D.trainerName(sess, tidA, PYRAMID) or ""
+    nameB = D.trainerName(sess, tidB, PYRAMID) or ""
+    -- pokeemerald/include/constants/frontier_util.h:6
+    defeatTextA = TextIR.toPlain(Pyramid.speech(sess, tidA, 2), {})
+    defeatTextB = TextIR.toPlain(Pyramid.speech(sess, tidB, 2), {})
+  else
+    tidA = TrainerSight.getTrainerId(a.eo)
+    tidB = TrainerSight.getTrainerId(b.eo)
+  end
+
+  local rowA, rowB = battleRow(a.eo), battleRow(b.eo)
+  TrainerSight._pair = { a = tidA, b = tidB }
+
+  local function finishBattle(result)
+    local store = Sp and Sp.store
+    local ctx = Sp and Sp.vm and Sp.vm.ctx
+    TrainerSight._pair = nil
+    F.locked = false
+    a.eo.frozen, b.eo.frozen = false, false
+    if inPyramid then
+      Pyramid.markBattled(sess, tidA, a.eo.localId)
+      Pyramid.markBattled(sess, tidB, b.eo.localId)
+      local N = require("src.core.game3.scripting.natives")
+      sess.battleOutcome = N.outcome_to_code(result or "win")
+      return
+    end
+    if result == "lose" or result == "whiteout" or result == "blackout" then return end
+    -- pokeemerald/src/battle_setup.c:1245
+    for _, tid in ipairs({ tidB, tidA }) do
+      local fid = Flags.trainerFlagId(tid)
+      if store then Flags.setFlag(store, ctx, fid, true) end
+      local a2 = Sp and Sp.vm and Sp.vm.adapters
+      if a2 and a2.onFlagChanged then a2.onFlagChanged(fid, true) end
+    end
+    -- pokeemerald/src/battle_setup.c:1313
+    TrainerSight.retScriptCount = 2
+    TrainerSight.checkTrainerB = false
+    local modeB = tonumber(rowB and rowB.type) or 0
+    TrainerSight.trainerBRet = rowB and (modeB == 1 or modeB == 2) and rowB.eventScript or nil
+    -- pokeemerald/src/battle_setup.c:1412
+    for i, pick in ipairs({ { rowA, a.eo }, { rowB, b.eo } }) do
+      local row, eo = pick[1], pick[2]
+      local mode = tonumber(row and row.type) or 0
+      if row and row.eventScript and (mode == 1 or mode == 2) and Sp and Sp.startScript then
+        -- pokeemerald/data/scripts/trainer_script.inc:13
+        if i == 2 then TrainerSight.retScriptCount = 0 end
+        Sp.startScript(row.eventScript, eo.localId)
+        return
+      end
+    end
+  end
+
+  local function startBattle()
+    local Runtime = package.loaded["src.core.game3.runtime"] or require("src.core.game3.runtime")
+    local foe
+    local battleOpts
+    if inPyramid then
+      foe = {
+        party = combinedParty,
+        trainerId = tidA,
+        trainerClass = foeAInfo.class,
+        trainerClassName = foeAInfo.className,
+        trainerName = nameA,
+        trainerPicId = foeAInfo.pic,
+      }
+      battleOpts = {
+        wild = false,
+        trainerId = tidA,
+        trainerIdB = tidB,
+        twoOpponents = true,
+        double = true,
+        frontierFoeHalf = half,
+        pyramid = true,
+        frontier = true,
+        frontierTrainer = { class = foeAInfo.class, className = foeAInfo.className, name = nameA, pic = foeAInfo.pic },
+        frontierTrainerB = { class = foeBInfo.class, className = foeBInfo.className, name = nameB, pic = foeBInfo.pic },
+        defeatText = defeatTextA,
+        defeatTextB = defeatTextB,
+        transitionId = D and D.specialTransition(sess, "B_PYRAMID", combinedParty) or nil,
+        done = finishBattle,
+      }
+    else
+      local okT, Trainers = pcall(require, "src.core.game3.scripting.trainers")
+      foe = okT and Trainers.foeFromId(tidA)
+      local dlgA, dlgB = Trainers.dialogs(tidA) or {}, Trainers.dialogs(tidB) or {}
+      local function text(row, key, dlg)
+        if row and row[key] and Sp and Sp.vm and Sp.vm.getText then
+          local t = Sp.vm:getText(row[key])
+          if t then return t end
+        end
+        return dlg
+      end
+      battleOpts = {
+        wild = false,
+        trainerId = tidA,
+        trainerIdB = tidB,
+        twoOpponents = true,
+        double = true,
+        defeatText = text(rowA, "defeatText", dlgA.defeat),
+        defeatTextB = text(rowB, "defeatText", dlgB.defeat),
+        done = finishBattle,
+      }
+    end
+    -- pokeemerald/src/battle_setup.c:1272
+    local ok, err = require("src.core.game3.battle_bridge").start(Runtime._mod, game or Runtime._game, foe, battleOpts)
+    if not ok then
+      print("[game3/trainer_sight] two-trainer battle did not start: " .. tostring(err))
+      finishBattle("lose")
+    end
+  end
+
+  local function showIntroA(onDone)
+    if inPyramid then
+      local introA = Pyramid.speech(sess, tidA, 0)
+      require("src.ui.game3.hud").openMessage(nil, introA, { done = onDone })
+    else
+      introSpeech(a.eo, tidA, rowA, onDone)
+    end
+  end
+
+  local function showIntroB(onDone)
+    if inPyramid then
+      local introB = Pyramid.speech(sess, tidB, 0)
+      require("src.ui.game3.hud").openMessage(nil, introB, { done = onDone })
+    else
+      introSpeech(b.eo, tidB, rowB, onDone)
+    end
+  end
+
+  if inPyramid then
+    local Audio = require("src.core.game3.audio")
+    Audio.playSong(Pyramid.encounterMusic(sess, tidA))
+  else
+    playEncounterMusic(tidA, rowA)
+  end
+
+  approach(a.eo, a.dist, a.facing, function()
+    showIntroA(function()
+      -- pokeemerald/src/trainer_see.c:666
+      if inPyramid then
+        local Audio = require("src.core.game3.audio")
+        Audio.playSong(Pyramid.encounterMusic(sess, tidB))
+      else
+        playEncounterMusic(tidB, rowB)
+      end
+      approach(b.eo, b.dist, b.facing, function()
+        showIntroB(startBattle)
+      end)
+    end)
   end)
 end
 
@@ -350,6 +749,8 @@ end
 -- @param game game instance
 -- @param specificTrainer optional specific EventObject to check (e.g. from spinning NPC turn update)
 -- @return boolean true if an encounter was triggered
+local approachFound = {}
+
 function TrainerSight.check(game, specificTrainer)
   local F = Field()
   if F.locked then return false end
@@ -385,9 +786,9 @@ function TrainerSight.check(game, specificTrainer)
       local sight = tonumber(eo.sight or (eo.def and (eo.def.sight or eo.def.trainerRange))) or 0
       if sight > 0 and TrainerSight.isTrainerType(eo)
         and not TrainerSight.isDefeated(eo, store, ctx) then
-        local spotted, dist = TrainerSight.checkLineOfSight(eo, P, game)
+        local spotted, dist, dir = TrainerSight.checkLineOfSight(eo, P, game)
         if spotted and not TrainerSight.blockedByDoubles(eo) then
-          TrainerSight.engage(game, eo, dist)
+          TrainerSight.engage(game, eo, dist, dir)
           return true
         end
       end
@@ -395,18 +796,49 @@ function TrainerSight.check(game, specificTrainer)
     return false
   end
 
-  -- Simultaneous Spot Prioritization: iterate candidates in strict ascending localId order
   local order = Objs._order or {}
+  if twoTrainerApproach() then
+    -- pokeemerald/src/trainer_see.c:191
+    local found = approachFound
+    for i = #found, 1, -1 do found[i] = nil end
+    local doubles = canDouble()
+    for _, lid in ipairs(order) do
+      local eo = Objs.find(lid)
+      if eo and eo ~= P and eo.visible and not eo.hidden and not eo.scriptBusy and not eo.frozen then
+        local sight = tonumber(eo.sight or (eo.def and (eo.def.sight or eo.def.trainerRange))) or 0
+        if sight > 0 and TrainerSight.isTrainerType(eo) and not TrainerSight.isDefeated(eo, store, ctx) then
+          local spotted, dist, facing = TrainerSight.checkLineOfSight(eo, P, game)
+          local isDouble = spotted and DOUBLE_TYPES[TrainerSight.battleType(eo) or 0]
+          if spotted and not (isDouble and not doubles) then
+            found[#found + 1] = { eo = eo, dist = dist, facing = facing }
+            if isDouble or #found > 1 or not doubles then break end
+          end
+        end
+      end
+    end
+    -- pokeemerald/src/trainer_see.c:225
+    TrainerSight._approached = found[1] and found[1].eo or nil
+    if #found == 1 then
+      TrainerSight.engage(game, found[1].eo, found[1].dist, found[1].facing)
+      return true
+    elseif #found == 2 then
+      TrainerSight.engagePair(game, found[1], found[2])
+      return true
+    end
+    return false
+  end
+
+  -- Simultaneous Spot Prioritization: iterate candidates in strict ascending localId order
   for _, lid in ipairs(order) do
     local eo = Objs.find(lid)
     if eo and eo ~= P and eo.visible and not eo.hidden and not eo.scriptBusy and not eo.frozen then
       local sight = tonumber(eo.sight or (eo.def and (eo.def.sight or eo.def.trainerRange))) or 0
       if sight > 0 and TrainerSight.isTrainerType(eo)
         and not TrainerSight.isDefeated(eo, store, ctx) then
-        local spotted, dist = TrainerSight.checkLineOfSight(eo, P, game)
+        local spotted, dist, dir = TrainerSight.checkLineOfSight(eo, P, game)
         if spotted and not TrainerSight.blockedByDoubles(eo) then
           -- Immediately engage and break iterator to suppress any other simultaneous spots
-          TrainerSight.engage(game, eo, dist)
+          TrainerSight.engage(game, eo, dist, dir)
           return true
         end
       end

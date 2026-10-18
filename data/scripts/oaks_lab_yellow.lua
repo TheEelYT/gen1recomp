@@ -11,8 +11,12 @@
 -- a lab loss (OaksLabRivalEndBattleScript), and Route 22's first battle
 -- upgrades FLAREON back to JOLTEON (Route22Rival1AfterBattleScript).
 
+local Sound = require("src.core.Sound")
+
 local OAK1 = 3
 local RIVAL = 1
+-- pokeyellow engine/overworld/movement.asm:871
+local FAST = { stepFrames = 16 }
 
 -- engine/overworld/pathfinding.asm:36-70 (FindPathToPlayer): step whichever
 local function findPathRows(rows, objIndex, sx, sy, tx, ty)
@@ -64,7 +68,7 @@ return {
       { "show_text", "_OaksLabOak1ParcelThanksText" },
       { "take_item", "OAKS_PARCEL", 1 },
       { "stop_music" },
-      { "play_music", "Music_MeetRival" },
+      { "play_music", "Music_MeetRival", { start = "rival" } }, -- pokeyellow scripts/OaksLab.asm:502
       { "show_text", "_OaksLabRivalGrampsText" },
       -- callfar OaksLabPikachuMovementScript, before ShowObject (#1021)
       { "pikachu_make_way" },
@@ -101,7 +105,7 @@ return {
       { "hide_object", "VIRIDIAN_CITY", "VIRIDIANCITY_OLD_MAN_SLEEPY" },
       { "show_object", "VIRIDIAN_CITY", "VIRIDIANCITY_OLD_MAN2" },
       { "stop_music" },
-      { "play_music", "Music_MeetRival" },
+      { "play_music", "Music_MeetRival", { start = "rival" } }, -- pokeyellow scripts/OaksLab.asm:605
       { "move_npc_to", RIVAL, 4, 7 },
       { "hide_object", "OAKS_LAB", "OAKSLAB_RIVAL" },
       { "play_music", "Music_OaksLab" },
@@ -170,27 +174,18 @@ return {
         -- OaksLabRivalExclamationScript: "!" over the rival
         { "emote", RIVAL, "shock" },
       }
-      -- .RivalPushesPlayerAwayFromEeveeBall is DOWN then RIGHT x3 (the $07
-      -- bytes are Yellow's own step-right encoding, decoded by
-      -- engine/overworld/movement.asm Func_5288 -> Func_532b), and the
-      -- PAD_RIGHT x2 shove is NOT queued alongside it:
-      -- OaksLabRivalTakesPokeballScript .asm_1c564 polls every frame and
-      -- only simulates the pair once wNPCNumScriptedSteps reads 1 -- i.e.
-      -- as the rival begins the LAST byte, the step onto the tile the
-      -- player is standing on.  Starting both on one row had Red stroll
-      -- off the Eevee while the rival was still at the top of the table
-      -- (#559).
+      -- pokeyellow scripts/OaksLab.asm:211-216
+      rows[#rows + 1] = { "walk_npc", RIVAL, { "down" } }
       if py == 4 then
-        rows[#rows + 1] = { "walk_npc", RIVAL, { "down", "right", "right" } }
-        -- this one runs concurrently with the shove below
-        rows[#rows + 1] = { "walk_npc", RIVAL, { "right" }, { wait = false } }
+        rows[#rows + 1] = { "walk_npc", RIVAL, { "right", "right" }, FAST }
+        -- pokeyellow scripts/OaksLab.asm:245-259
+        rows[#rows + 1] = { "walk_npc", RIVAL, { "right" },
+          { wait = false, stepFrames = FAST.stepFrames } }
         rows[#rows + 1] = { "face_player_dir", "left" }
         rows[#rows + 1] = { "move_player", "right", 2 }
-        -- move_player blocks for both tiles, so the rival has already
-        -- landed on (7,4); this is just the beat before he turns up
         rows[#rows + 1] = { "wait", 20 }
       else
-        rows[#rows + 1] = { "move_npc_to", RIVAL, 7, 4 }
+        rows[#rows + 1] = { "walk_npc", RIVAL, { "right", "right", "right" }, FAST }
       end
       rows[#rows + 1] = { "face_object", RIVAL, "up" }
       rows[#rows + 1] = { "hide_object", "OAKS_LAB", "OAKSLAB_EEVEE_POKE_BALL" }
@@ -220,6 +215,7 @@ return {
       rows[#rows + 1] = { "text_sound", "Get_Key_Item" }
       rows[#rows + 1] = { "show_text", "_OaksLabReceivedText", { RAM = "PIKACHU" } }
       rows[#rows + 1] = { "give_pokemon", "PIKACHU", 5 }
+      rows[#rows + 1] = { "set_catch_rate", 1, 0xA3 }
       -- DisablePikachuOverworldSpriteDrawing keeps it in the ball (#1009)
       rows[#rows + 1] = { "set_field", "pikachuInBall", true }
       rows[#rows + 1] = { "set_flag", "EVENT_GOT_STARTER" }
@@ -337,17 +333,20 @@ return {
       table.insert(rows, { "move_npc", RIVAL, side, 1 })
       table.insert(rows, { "move_npc", RIVAL, "down", 1 })
       table.insert(rows, { "face_player_dir", side })
-      table.insert(rows, { "move_npc", RIVAL, "down", 1 })
+      -- pokeyellow scripts/OaksLab.asm:431
+      table.insert(rows, { "walk_npc", RIVAL, { "down" }, FAST })
       table.insert(rows, { "face_player_dir", "down" })
-      table.insert(rows, { "move_npc", RIVAL, "down", 4 })
+      table.insert(rows, { "walk_npc", RIVAL, { "down", "down", "down", "down" }, FAST })
       table.insert(rows, { "hide_object", "OAKS_LAB", "OAKSLAB_RIVAL" })
       table.insert(rows, { "play_music", "Music_OaksLab" })
       -- OaksLabPikachuEscapesPokeballScript: the follower reaches the map (#1009)
       table.insert(rows, { "face_player_dir", "up" })
       table.insert(rows, { "set_field", "pikachuInBall", false })
+      -- pokeyellow scripts/OaksLab.asm:1094
+      table.insert(rows, { "show_text", "_OaksLabPikachuDislikesPokeballsText1", false,
+        { preSound = function() return Sound.playPikaCry(game.data, 2) end } })
+      -- pokeyellow scripts/OaksLab.asm:478
       table.insert(rows, { "spawn_pikachu_follower" })
-      table.insert(rows, { "play_cry", "PIKACHU" })
-      table.insert(rows, { "show_text", "_OaksLabPikachuDislikesPokeballsText1" })
       table.insert(rows, { "show_text", "_OaksLabPikachuDislikesPokeballsText2" })
       ow.runner:run(rows, { npc = rival })
       return true

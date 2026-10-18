@@ -57,6 +57,7 @@ function TrainerPic.install(cache)
   TrainerPic._cache = resolve_cache(cache)
   TrainerPic._front = {}
   TrainerPic._back = {}
+  TrainerPic._anims = nil
 end
 
 --- Opponent trainer front pic (64×64). Returns nil if unavailable (no placeholder).
@@ -77,12 +78,13 @@ end
 --- Player back pic strip (64×320, 5 frames). gender 0=boy, 1=girl.
 function TrainerPic.back(gender)
   gender = tonumber(gender) or 0
-  if gender < 0 or gender > 5 then gender = 0 end
+  if gender < 0 then return nil end
+  -- pokefirered/src/data/trainer_graphics/back_pic_tables.h:2
+  if gender > 5 and require("src.core.game3.profile").family() ~= "rse" then gender = 0 end
   if TrainerPic._back[gender] then return TrainerPic._back[gender] end
   if not TrainerPic._cache then TrainerPic.install(nil) end
   local rel = cache_root() .. "/back_" .. gender .. ".rgba"
-  local frames = (gender == 0 or gender == 1) and 5 or 4
-  local rgba = read_pic_rgba(rel, frames)
+  local rgba = read_pic_rgba(rel, 1)
   if not rgba then return nil end
   local actualFrames = math.floor(#rgba / (64 * 64 * 4))
   if actualFrames <= 0 then return nil end
@@ -91,6 +93,24 @@ function TrainerPic.back(gender)
   local entry = { image = image, w = 64, h = 64 * actualFrames, frames = actualFrames }
   TrainerPic._back[gender] = entry
   return entry
+end
+
+-- pokeemerald/src/data/trainer_graphics/back_pic_anims.h:119
+function TrainerPic.backAnims(gender)
+  gender = tonumber(gender) or 0
+  if gender > 5 and require("src.core.game3.profile").family() ~= "rse" then gender = 0 end
+  if not TrainerPic._anims then
+    if not TrainerPic._cache then TrainerPic.install(nil) end
+    local rel = cache_root() .. "/back_anims.lua"
+    local src = assert(TrainerPic._cache:read(rel), "trainer back pic anims missing from the cache")
+    TrainerPic._anims = assert(load(src, "@" .. rel, "t", {}))()
+  end
+  return assert(TrainerPic._anims[gender], "no back pic anims for " .. gender)
+end
+
+-- pokeemerald/src/data.c:121
+function TrainerPic.backIdleFrame(gender)
+  return TrainerPic.backAnims(gender).idle[1][1]
 end
 
 return TrainerPic

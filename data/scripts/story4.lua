@@ -463,29 +463,48 @@ local function vendingMachine(game, ow, npc, done)
   local t = text(game)
   local Menu = require("src.ui.Menu")
   local Font = require("src.render.Font")
+  local TextBox = require("src.render.TextBox")
   local money = function() return game.save.money end
-  local function closeSession(msg, menuPopped)
-    if not menuPopped then game.stack:pop() end
-    game.stack:pop()
-    push(game, msg, done, { money = money })
+  local greeting, menu
+  -- home/text_script.asm:92-109
+  local function closeAll()
+    local st = game.stack
+    while st:top() == menu or st:top() == greeting do st:pop() end
+    done()
+  end
+  local function result(msg, price)
+    local box = TextBox.new(game, msg, closeAll)
+    if price then
+      local update, paid = box.update, false
+      box.update = function(self, dt)
+        update(self, dt)
+        -- engine/events/vending_machine.asm:67-75
+        if self.done and not paid then
+          paid = true
+          -- engine/math/bcd.asm:208-215
+          game.save.money = math.max(0, game.save.money - price)
+        end
+      end
+    end
+    game.stack:push(box)
   end
   local function notThirsty()
-    closeSession(t._VendingMachineText7 or "Not thirsty!", true)
+    result(t._VendingMachineText7 or "Not thirsty!")
   end
   local function buy(d)
-    if game.save.money < d.price then
-      closeSession(t._VendingMachineText4 or "Oops, not enough\nmoney!")
+    -- engine/events/vending_machine.asm:39-45
+    if game.save.money < 200 then
+      result(t._VendingMachineText4 or "Oops, not enough\nmoney!")
       return
     end
     if not require("src.inventory.Bag").add(game.save, d.id, 1, game.data) then
-      closeSession(t._VendingMachineText6 or "There's no more\nroom for stuff!")
+      result(t._VendingMachineText6 or "There's no more\nroom for stuff!")
       return
     end
     game.stack:push(deliveryRumble(game, function()
-      game.save.money = game.save.money - d.price
-      closeSession(fill(t._VendingMachineText5
-                        or "{RAM:wStringBuffer}\npopped out!",
-                        { ram = game.data.items[d.id].name }))
+      result(fill(t._VendingMachineText5
+                  or "{RAM:wStringBuffer}\npopped out!",
+                  { ram = game.data.items[d.id].name }), d.price)
     end))
   end
   local items = {}
@@ -496,14 +515,17 @@ local function vendingMachine(game, ow, npc, done)
       onSelect = function() buy(d) end,
     }
   end
-  items[#items + 1] = { label = "CANCEL", onSelect = notThirsty }
-  push(game, t._VendingMachineText1 or "A vending machine!\nHere's the menu!",
+  items[#items + 1] = { label = "CANCEL", keepOpen = true, onSelect = notThirsty }
+  greeting = TextBox.new(game,
+    t._VendingMachineText1 or "A vending machine!\nHere's the menu!",
     nil, {
       money = money,
+      moneyOnShown = true,
       stay = { prompt = true, onShown = function()
-        local menu = Menu.new(game, items, {
+        menu = Menu.new(game, items, {
           tx = 0, ty = 3, tw = 14, th = 10, itemY = 2,
           noWrap = true,
+          keepOnCancel = true,
           onCancel = notThirsty,
         })
         menu.draw = function(self)
@@ -517,6 +539,7 @@ local function vendingMachine(game, ow, npc, done)
         game.stack:push(menu)
       end },
     })
+  game.stack:push(greeting)
 end
 
 -- drink -> TM (CeladonMartRoof.asm .gaveFreshWater/.gaveSodaPop/
@@ -638,6 +661,8 @@ M.ROUTE_24 = {
   talk = {
     TEXT_ROUTE24_COOLTRAINER_M1 = function(game, ow, npc, done)
       local flags = game.save.flags
+      -- scripts/Route24.asm:109
+      flags.EVENT_NUGGET_REWARD_AVAILABLE = nil
       local function battleOrDone()
         if ow:trainerDefeated(npc) then
           push(game, text(game)._Route24CooltrainerM1YouCouldBecomeATopLeaderText,
@@ -662,6 +687,8 @@ M.ROUTE_24 = {
           if not require("src.inventory.Bag").add(game.save, "NUGGET", 1,
               game.data) then
             push(game, t._Route24CooltrainerM1NoRoomText, done)
+            -- scripts/Route24.asm:145
+            flags.EVENT_NUGGET_REWARD_AVAILABLE = true
             return
           end
           flags.EVENT_GOT_NUGGET = true
@@ -681,7 +708,9 @@ M.ROUTE_24 = {
         end, require("src.render.TextBox").soundOpts(game, "Get_Item1"))
         return
       end
-      battleOrDone()
+      -- scripts/Route24.asm:138
+      push(game, text(game)._Route24CooltrainerM1YouCouldBecomeATopLeaderText,
+        done)
     end,
   },
   -- Route24DefaultScript forces TEXT_ROUTE24_COOLTRAINER_M1 whenever the
@@ -700,8 +729,27 @@ M.ROUTE_24 = {
       end
     end
     if not recruiter then return false end
-    ow:showMapText("TEXT_ROUTE24_COOLTRAINER_M1", recruiter)
+    ow:showMapText("TEXT_ROUTE24_COOLTRAINER_M1", recruiter, function()
+      -- scripts/Route24.asm:36
+      local flags = game.save.flags
+      if not flags.EVENT_NUGGET_REWARD_AVAILABLE then return end
+      flags.EVENT_NUGGET_REWARD_AVAILABLE = nil
+      ow:scriptMove(ow.player, "down", 1, nil, { collide = true })
+    end)
     return true
+  end,
+}
+
+-- scripts/SilphCo1F.asm:1-9
+M.SILPH_CO_1F = {
+  onEnter = function(game, ow)
+    local flags = game.save.flags
+    if not flags.EVENT_BEAT_SILPH_CO_GIOVANNI then return end
+    if flags.EVENT_SILPH_CO_RECEPTIONIST_AT_DESK then return end
+    flags.EVENT_SILPH_CO_RECEPTIONIST_AT_DESK = true
+    require("src.script.Commands").show_object(
+      { game = game, save = game.save, overworld = ow },
+      "SILPH_CO_1F", "SILPHCO1F_LINK_RECEPTIONIST")
   end,
 }
 
@@ -776,9 +824,10 @@ M.NAME_RATERS_HOUSE = {
                       title = require("src.core.Strings")("NICKNAME?"),
                       maxLen = 10,
                       mon = mon,
-                      default = mon.nickname,
                       onDone = function(name)
-                        if name and #name > 0 and name ~= def.name then
+                        -- engine/menus/naming_screen.asm:66
+                        if not name or #name == 0 then bye() return end
+                        if name ~= def.name then
                           mon.nickname = name
                         else
                           mon.nickname = nil
@@ -846,20 +895,19 @@ M.SAFFRON_CITY = {
 -- -------------------------------------------------------------------
 
 local function e4ExitSeal(flag, closedBlock, openBlock, dontRunText, autoFlag)
+  local function door(game, ow)
+    ow:replaceBlock(2, 0, game.save.flags[flag] and openBlock or closedBlock)
+  end
   local seal = function(game, ow)
-    local open = game.save.flags[flag]
-    ow:replaceBlock(2, 0, open and openBlock or closedBlock)
+    door(game, ow)
     -- the auto walk-in on first (south) entry (LoreleiScriptWalkIntoRoom)
     if autoFlag and not game.save.flags[autoFlag] and ow.player.cellY >= 10 then
       game.save.flags[autoFlag] = true
       ow:scriptMove(ow.player, "up", 6)
     end
   end
-  -- onVictory re-runs the seal so the door opens right after the
-  -- battle, like pokered's post-battle map reload
   return {
     onEnter = seal,
-    onVictory = seal,
     -- retreating toward the entrance gets "Don't run away!" and a
     -- shove back up (the entrance coords rows in each room script)
     onStep = function(game, ow, x, y)
@@ -871,14 +919,14 @@ local function e4ExitSeal(flag, closedBlock, openBlock, dontRunText, autoFlag)
       end))
       return true
     end,
-  }
+  }, door
 end
 
 -- Lorelei/Bruno/Agatha EndBattleScript (pokered): EndTrainerBattle then
 -- DisplayTextID -> TalkToTrainer, which prints the AfterBattle text on a
 -- win.  engageTrainer only shows the won line, so wrap talk like Lance /
 -- Game Corner Rocket and push header.after immediately after a win.
-local function e4LeaderTalk(afterLabel)
+local function e4LeaderTalk(afterLabel, door)
   return function(game, ow, npc, done)
     done = done or function() end
     if ow:trainerDefeated(npc) then
@@ -891,26 +939,33 @@ local function e4LeaderTalk(afterLabel)
         done()
         return
       end
+      -- scripts/AgathasRoom.asm:2
+      local function reopen()
+        door(game, ow)
+        done()
+      end
       local after = text(game)[afterLabel]
-      if after then push(game, after, done) else done() end
+      if after then push(game, after, reopen) else reopen() end
     end)
   end
 end
 
-M.LORELEIS_ROOM = e4ExitSeal("EVENT_BEAT_LORELEIS_ROOM_TRAINER_0", 0x24, 0x05,
+local loreleiDoor, brunoDoor, agathaDoor
+M.LORELEIS_ROOM, loreleiDoor = e4ExitSeal("EVENT_BEAT_LORELEIS_ROOM_TRAINER_0", 0x24, 0x05,
   "_LoreleisRoomLoreleiDontRunAwayText", "EVENT_AUTOWALKED_INTO_LORELEIS_ROOM")
 M.LORELEIS_ROOM.talk = {
-  TEXT_LORELEISROOM_LORELEI = e4LeaderTalk("_LoreleisRoomLoreleiAfterBattleText"),
+  TEXT_LORELEISROOM_LORELEI = e4LeaderTalk("_LoreleisRoomLoreleiAfterBattleText",
+                                           loreleiDoor),
 }
-M.BRUNOS_ROOM = e4ExitSeal("EVENT_BEAT_BRUNOS_ROOM_TRAINER_0", 0x24, 0x05,
+M.BRUNOS_ROOM, brunoDoor = e4ExitSeal("EVENT_BEAT_BRUNOS_ROOM_TRAINER_0", 0x24, 0x05,
   "_BrunosRoomBrunoDontRunAwayText", "EVENT_AUTOWALKED_INTO_BRUNOS_ROOM")
 M.BRUNOS_ROOM.talk = {
-  TEXT_BRUNOSROOM_BRUNO = e4LeaderTalk("_BrunoAfterBattleText"),
+  TEXT_BRUNOSROOM_BRUNO = e4LeaderTalk("_BrunoAfterBattleText", brunoDoor),
 }
-M.AGATHAS_ROOM = e4ExitSeal("EVENT_BEAT_AGATHAS_ROOM_TRAINER_0", 0x3b, 0x0e,
+M.AGATHAS_ROOM, agathaDoor = e4ExitSeal("EVENT_BEAT_AGATHAS_ROOM_TRAINER_0", 0x3b, 0x0e,
   "_AgathasRoomAgathaDontRunAwayText", "EVENT_AUTOWALKED_INTO_AGATHAS_ROOM")
 M.AGATHAS_ROOM.talk = {
-  TEXT_AGATHASROOM_AGATHA = e4LeaderTalk("_AgathaAfterBattleText"),
+  TEXT_AGATHASROOM_AGATHA = e4LeaderTalk("_AgathaAfterBattleText", agathaDoor),
 }
 
 -- -------------------------------------------------------------------
@@ -932,21 +987,15 @@ M.AGATHAS_ROOM.talk = {
 --   (5,11)/(6,11) the doorway -> CheckAndSetEvent
 --                 EVENT_LANCES_ROOM_LOCK_DOOR: first crossing seals
 --                 the door behind the player with SFX_GO_INSIDE
---   (24,16)       the entrance staircase -> WalkToLance: an auto-walk
---                 landing on (6,11). Vanilla WalkToLance_RLEList is
---                 up 12 / left 12 / down 7 / left 6 and skips collision
---                 through void tiles; our camera follows that literally
---                 and briefly shows the empty upper chamber (reads as
---                 "Gary's room"). We keep the same landing cell but
---                 route along the open-door floor corridor instead.
+--   (24,16)       the entrance staircase -> WalkToLance
 -- -------------------------------------------------------------------
 
--- Floor corridor (24,16) -> (6,11) with EVENT_LANCES_ROOM_LOCK_DOOR
--- unset (entrance blocks $31/$32). Exposed for parity tests.
-local LANCE_WALK_IN = {
-  { "down", 2 }, { "left", 6 }, { "down", 5 }, { "left", 10 },
-  { "up", 9 }, { "left", 2 }, { "up", 3 },
-}
+-- scripts/LancesRoom.asm:111
+-- home/overworld.asm:1845
+local function lanceWalkInRoute(yellow)
+  return { { "left", 6 }, { "down", 7 }, { "left", 12 }, { "up", yellow and 13 or 12 } }
+end
+local LANCE_WALK_IN = lanceWalkInRoute(false)
 
 local function lanceEntranceBlocks(game, ow)
   local locked = game.save.flags.EVENT_LANCES_ROOM_LOCK_DOOR
@@ -962,15 +1011,17 @@ local function lanceLockDoor(game, ow)
 end
 
 local function lanceWalkIn(game, ow)
+  local route = lanceWalkInRoute(require("src.core.GameVersion").isYellow())
   local i = 0
   local function step()
     i = i + 1
-    local seg = LANCE_WALK_IN[i]
+    local seg = route[i]
     if not seg then
-      -- lands on (6,11); vanilla's per-frame coord poll then locks the
-      -- door at once. scriptMove landings do not fire onStep, so lock
-      -- here.
-      lanceLockDoor(game, ow)
+      -- scripts/LancesRoom.asm:82
+      local p = ow.player
+      if (p.cellX == 5 or p.cellX == 6) and p.cellY == 11 then
+        lanceLockDoor(game, ow)
+      end
       return
     end
     ow:scriptMove(ow.player, seg[1], seg[2], step)
@@ -980,6 +1031,7 @@ end
 
 M.LANCES_ROOM = {
   walkInRoute = LANCE_WALK_IN,
+  walkInRouteFor = lanceWalkInRoute,
   onEnter = function(game, ow)
     lanceEntranceBlocks(game, ow)
     -- the warp arrival lands ON the staircase trigger, and onStep only
@@ -998,7 +1050,6 @@ M.LANCES_ROOM = {
         if npc.def and npc.def.name == "LANCESROOM_LANCE" then lance = npc break end
       end
       if not lance or ow:trainerDefeated(lance) then return false end
-      lance:facePlayer(ow.player)
       -- LancesRoomLanceEndBattleScript DisplayTextID -> TalkToTrainer
       -- after-battle text (rival became champion first). engageTrainer
       -- only shows the won line, so push the after text on a win.

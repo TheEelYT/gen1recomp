@@ -11,9 +11,8 @@
 -- no network) so the engine tier can table-drive it, and the fetch/cache half
 -- reaches for curl and options.lua.
 --
--- Sources are never added automatically.  options.modIndexes is a player-built
--- list -- adding an index is a deliberate act of trusting whoever publishes it,
--- so the launcher ships with none and asks.
+-- The main index is built in and cannot be removed.  options.modIndexes keeps
+-- player-added sources, including main-index rows saved by older launchers.
 --
 -- schema_version is a hard gate, not a hint: a bumped feed may reuse a field
 -- name for something else, so an unknown version is refused outright rather
@@ -558,11 +557,9 @@ function ModIndex.filter(mods, opts)
         keep = wantGames[tostring(entry.base or ""):lower()] == true
       else
         local ids = ModIndex.targets(entry)
-        if #ids > 0 then
-          keep = false
-          for _, id in ipairs(ids) do
-            if wantGames[id] then keep = true; break end
-          end
+        keep = false
+        for _, id in ipairs(ids) do
+          if wantGames[id] then keep = true; break end
         end
       end
     end
@@ -639,17 +636,33 @@ local function loadOptions()
   return require("src.core.SaveData").loadOptions()
 end
 
--- The player's index list, normalised.  Rows are { url, feed, base, fallback,
+local BUILTIN = ModIndex.resolveSource("bryanthaboi/gen1recomp-mod-index")
+BUILTIN.url = "bryanthaboi/gen1recomp-mod-index"
+
+function ModIndex.isBuiltIn(feed)
+  return feed == BUILTIN.feed
+end
+
+-- The player's index list plus the built-in source.  Rows are { url, feed, base, fallback,
 -- label }; `url` is what they typed, kept so the row reads back the way they
--- entered it.
+-- entered it.  Keep an existing main-index row in place to preserve source
+-- precedence and its cache; otherwise append it without rewriting options.
 function ModIndex.sources()
   local ok, opts = pcall(loadOptions)
-  if not ok or type(opts) ~= "table" then return {} end
-  local out = {}
-  for _, row in ipairs(opts.modIndexes or {}) do
+  local saved = ok and type(opts) == "table" and opts.modIndexes or {}
+  local out, hasBuiltin = {}, false
+  for _, row in ipairs(type(saved) == "table" and saved or {}) do
     if type(row) == "table" and type(row.feed) == "string" then
-      out[#out + 1] = row
+      if not ModIndex.isBuiltIn(row.feed) or not hasBuiltin then
+        out[#out + 1] = row
+      end
+      if ModIndex.isBuiltIn(row.feed) then hasBuiltin = true end
     end
+  end
+  if not hasBuiltin then
+    local row = {}
+    for k, v in pairs(BUILTIN) do row[k] = v end
+    out[#out + 1] = row
   end
   return out
 end
@@ -659,6 +672,7 @@ end
 function ModIndex.addSource(input)
   local source, err = ModIndex.resolveSource(input)
   if not source then return nil, err end
+  if ModIndex.isBuiltIn(source.feed) then return nil, "that index is already added" end
   local ok, result, addErr = pcall(function()
     local SaveData = require("src.core.SaveData")
     local opts = loadOptions()
@@ -682,6 +696,7 @@ end
 -- outlives the index it came from.
 function ModIndex.removeSource(feed)
   if type(feed) ~= "string" or feed == "" then return nil, "missing index" end
+  if ModIndex.isBuiltIn(feed) then return nil, "the built-in index cannot be removed" end
   local ok, result = pcall(function()
     local SaveData = require("src.core.SaveData")
     local opts = loadOptions()
@@ -691,27 +706,131 @@ function ModIndex.removeSource(feed)
     end
     if not found then return nil end
     opts.modIndexes = kept
-    if type(opts.modIndexCache) == "table" then opts.modIndexCache[feed] = nil end
     SaveData.saveOptions(opts)
     return true
   end)
   if not ok then return nil, tostring(result) end
   if not result then return nil, "that index is not in the list" end
+  pcall(function()
+    local all = ModIndex._cacheTree()
+    if all and all[feed] ~= nil then
+      all[feed] = nil
+      ModIndex._writeCacheTree(all)
+    end
+  end)
   return true
 end
 
--- ------- cache (options.modIndexCache[feed])
+-- ------- cache (mod_index_cache.lua beside options.lua)
+
+ModIndex.CACHE_FILE = "mod_index_cache.lua"
+
+local cacheTrees = setmetatable({}, { __mode = "k" })
+local migrated = setmetatable({}, { __mode = "k" })
+
+local function deepCopy(v)
+  if type(v) ~= "table" then return v end
+  local out = {}
+  for k, val in pairs(v) do out[k] = deepCopy(val) end
+  return out
+end
+
+local function cacheFs()
+  local SaveData = require("src.core.SaveData")
+  if type(SaveData.persistenceFs) ~= "function" then return nil end
+  return SaveData.persistenceFs()
+end
+
+local function readCacheFile(fs)
+  if not (fs.getInfo and fs.getInfo(ModIndex.CACHE_FILE)) then return {} end
+  local body = fs.read(ModIndex.CACHE_FILE)
+  if type(body) ~= "string" then return {} end
+  local ok, t = pcall(require("src.core.SaveSerializer").decode, body)
+  return (ok and type(t) == "table") and t or {}
+end
+
+function ModIndex._writeCacheTree(all)
+  local fs = cacheFs()
+  if not fs then return false end
+  local ok = fs.write(ModIndex.CACHE_FILE, require("src.core.SaveSerializer").encode(all))
+  cacheTrees[fs] = ok and all or nil
+  return ok and true or false
+end
+
+local function readRawOptions(fs)
+  local name = require("src.core.SaveData").OPTIONS_FILENAME
+  if type(name) ~= "string" or not (fs.getInfo and fs.getInfo(name)) then return nil end
+  local body = fs.read(name)
+  if type(body) ~= "string" then return nil end
+  local ok, t = pcall(require("src.core.SaveSerializer").decode, body)
+  return (ok and type(t) == "table") and t or nil
+end
+
+local function moveLegacy(fs, all)
+  if migrated[fs] then return false end
+  migrated[fs] = true
+  local raw = readRawOptions(fs)
+  local legacy = raw and raw.modIndexCache
+  if type(legacy) ~= "table" or next(legacy) == nil then return false end
+  for feed, entry in pairs(legacy) do
+    local have = all[feed]
+    if type(entry) == "table" and (type(have) ~= "table"
+        or (tonumber(entry.checkedAt) or 0) > (tonumber(have.checkedAt) or 0)) then
+      all[feed] = entry
+    end
+  end
+  ModIndex._writeCacheTree(all)
+  return true
+end
+
+local function loadedTree(fs)
+  local all = cacheTrees[fs]
+  if not all then
+    all = readCacheFile(fs)
+    cacheTrees[fs] = all
+  end
+  return all
+end
+
+function ModIndex._migrateLegacy()
+  local fs = cacheFs()
+  if not fs then return false end
+  return moveLegacy(fs, loadedTree(fs))
+end
+
+local function stripLegacyOptions()
+  pcall(function() require("src.mods.ModUpdate")._migrateLegacy() end)
+  local SaveData = require("src.core.SaveData")
+  local ok, opts = pcall(SaveData.loadOptions)
+  if not ok or type(opts) ~= "table" then return end
+  opts.modIndexCache = nil
+  opts.modUpdateCache = nil
+  pcall(SaveData.saveOptions, opts)
+end
+
+function ModIndex._cacheTree()
+  local fs = cacheFs()
+  if not fs then return nil end
+  local all = loadedTree(fs)
+  if moveLegacy(fs, all) then stripLegacyOptions() end
+  return cacheTrees[fs] or all
+end
+
+function ModIndex._resetCacheForTests()
+  cacheTrees = setmetatable({}, { __mode = "k" })
+  migrated = setmetatable({}, { __mode = "k" })
+end
 
 function ModIndex.readCache(feed)
   if type(feed) ~= "string" or feed == "" then return nil end
-  local ok, opts = pcall(loadOptions)
-  if not ok or type(opts) ~= "table" then return nil end
-  local entry = opts.modIndexCache and opts.modIndexCache[feed]
+  local ok, all = pcall(ModIndex._cacheTree)
+  if not ok or type(all) ~= "table" then return nil end
+  local entry = all[feed]
   if type(entry) ~= "table" or type(entry.checkedAt) ~= "number" then
     return nil
   end
   if type(entry.mods) ~= "table" then return nil end
-  return entry
+  return deepCopy(entry)
 end
 
 function ModIndex.cacheFresh(entry, now, ttl)
@@ -724,11 +843,10 @@ end
 
 function ModIndex.writeCache(feed, index)
   if type(feed) ~= "string" or feed == "" then return false end
-  local ok = pcall(function()
-    local SaveData = require("src.core.SaveData")
-    local opts = loadOptions()
-    opts.modIndexCache = opts.modIndexCache or {}
-    opts.modIndexCache[feed] = {
+  local ok, wrote = pcall(function()
+    local all = ModIndex._cacheTree()
+    if not all then return false end
+    all[feed] = deepCopy({
       checkedAt = os.time(),
       version = ModIndex.CACHE_VERSION,
       generatedAt = index.generatedAt,
@@ -736,10 +854,10 @@ function ModIndex.writeCache(feed, index)
       baseGames = index.baseGames,
       mods = index.mods,
       carts = index.carts,
-    }
-    SaveData.saveOptions(opts)
+    })
+    return ModIndex._writeCacheTree(all)
   end)
-  return ok
+  return ok and wrote == true
 end
 
 -- ------- host I/O (HostShell's transport: curl, or the Android JNI bridge)
@@ -834,7 +952,7 @@ function ModIndex.beginFetch(source, opts)
 end
 
 -- Shared with the sync path's `cached` closure: read whatever is in the
--- options cache and shape it like a parsed index.
+-- index cache and shape it like a parsed index.
 local function cachedIndex(feed, stale)
   local entry = ModIndex.readCache(feed)
   if not entry then return nil end

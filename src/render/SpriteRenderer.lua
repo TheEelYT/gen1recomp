@@ -40,8 +40,21 @@ end
 -- hardware, where sprite palette index 0 is unconditionally transparent
 -- (same rule TileRenderer's getColor0KeyShader documents for tall grass).
 local obpCache = {}
+-- obpCache is keyed by the string `path .. "#obp" .. group`; this indexes the
+-- same entries by path then group, so a draw that hits the cache (every draw
+-- after the first) builds no key string.  A numeric group is looked up by
+-- its string form, since the concatenation cannot tell 1 from "1" either.
+local obpByPath = {}
+local groupStrings = {}
 
 local function getObpImage(path, colors, group)
+  local byGroup = type(path) == "string" and obpByPath[path]
+  if byGroup then
+    local g = group
+    if type(g) == "number" then g = groupStrings[g] end
+    local hit = g ~= nil and byGroup[g]
+    if hit then return hit end
+  end
   local key = path .. "#obp" .. group
   if not obpCache[key] then
     local img
@@ -59,16 +72,43 @@ local function getObpImage(path, colors, group)
     end
     obpCache[key] = img
   end
-  return obpCache[key]
+  local img = obpCache[key]
+  -- only string/number groups get here: concatenating anything else raised
+  if group ~= group or type(path) ~= "string" then return img end -- NaN key
+  if type(group) == "number" then
+    local g = groupStrings[group]
+    if not g then
+      g = "" .. group
+      groupStrings[group] = g
+    end
+    group = g
+  end
+  byGroup = obpByPath[path]
+  if not byGroup then
+    byGroup = {}
+    obpByPath[path] = byGroup
+  end
+  byGroup[group] = img
+  return img
 end
 
 SpriteRenderer.obpImage = getObpImage
+
+-- any OBJ-palette bake exists for the sheet (obpByPath indexes every one)
+function SpriteRenderer.hasObp(path) return obpByPath[path] ~= nil end
+
+-- the sheet's Image and an OBJ bake are both held, keyed by the RAW def.image
+-- path (no Assets.resolve, so mod overrides / derived paths still match)
+function SpriteRenderer.isBaked(path)
+  return obpByPath[path] ~= nil and imageCache[path] ~= nil
+end
 
 -- hot reload drops the sheets; live instances hold their own image, so
 -- the world rebuilds them (MapLoader.invalidateAll) rather than this
 function SpriteRenderer.invalidate()
   imageCache = {}
   obpCache = {}
+  obpByPath = {}
 end
 
 Assets.register(SpriteRenderer.invalidate)
@@ -132,12 +172,23 @@ local function pose(self, facing, walkPhase, stepFlip)
   return frame, flip
 end
 
+-- The image path SpriteRenderer.new loads for a sprite def (nil when the def
+-- names none, or carries an in-memory ImageData/Image as mods build at
+-- runtime -- nothing to prefetch then).  Pure: the prefetch code asks this
+-- instead of re-deriving the path.
+function SpriteRenderer.imagePath(spriteDef)
+  local path = spriteDef and spriteDef.image
+  if type(path) == "string" then return path end
+  return nil
+end
+
 -- seed: any stable per-instance value (e.g. an NPC's `id`) used to resolve
 -- RED++'s per-instance "random" OBP sentinel (PaletteFX.spriteObp)
 function SpriteRenderer.new(spriteDef, seed)
   local self = setmetatable({}, SpriteRenderer)
   self.def = spriteDef
   self.seed = seed
+  -- raw def.image: a mod may hand over an ImageData instead of a path
   self.image = getImage(spriteDef.image)
   self.frameCount = positiveInteger(spriteDef.frames, 1)
   self.frameWidth = positiveInteger(spriteDef.frameWidth, DEFAULT_FRAME_WIDTH)
@@ -288,10 +339,10 @@ function SpriteRenderer:resolveImage()
     local colors, group = PaletteFX.spriteObp(self.def, self.seed)
     if colors then return getObpImage(self.def.image, colors, group) end
   elseif PaletteFX.usesSpriteObp() then
-    -- OG boot-ROM OBJ palette: green on Red, pink on Blue (PaletteFX.ogObj
+    -- OG boot-ROM OBJ palette: green on Red, pink on Blue (PaletteFX.ogObjWorld
     -- returns colors + a version-distinct cache group so the two never
     -- collide in obpCache) -- see issue #155
-    return getObpImage(self.def.image, PaletteFX.ogObj())
+    return getObpImage(self.def.image, PaletteFX.ogObjWorld())
   end
   -- Every other mode (SGB and the mono/inverted novelties) leaves the sprite
   -- in DMG shades so the zone shader colors it out of the map's own palette,
@@ -404,11 +455,11 @@ function SpriteRenderer:draw(px, py, camX, camY, facing, walkPhase, stepFlip,
   elseif PaletteFX.usesSpriteObp() and PaletteFX.spriteRedrawPassActive() then
     -- OG RED (GBC boot-ROM look): every OBJ wears the one global object
     -- palette -- green over Red's red background, pink over Blue's blue
-    -- background (PaletteFX.ogObj, #155).  The BG zone shader still runs over
+    -- background (PaletteFX.ogObjWorld, #155).  The BG zone shader still runs over
     -- the world canvas, so the baked sprite is queued for a post-zone redraw
     -- (PaletteFX.markSpriteRedraw) that restores its object-colored pixels on
     -- top.
-    image = getObpImage(self.def.image, PaletteFX.ogObj())
+    image = getObpImage(self.def.image, PaletteFX.ogObjWorld())
     redraw = true
   else
     -- SGB and the mono/inverted modes (and OG RED's tilt upright pass, which
@@ -498,7 +549,7 @@ function SpriteRenderer:drawTile(path, x, y, flip, quad)
     local colors, group = PaletteFX.spriteObp(self.def, self.seed)
     if colors then image = getObpImage(path, colors, group) end
   elseif PaletteFX.usesSpriteObp() and PaletteFX.spriteRedrawPassActive() then
-    image, redraw = getObpImage(path, PaletteFX.ogObj()), true
+    image, redraw = getObpImage(path, PaletteFX.ogObjWorld()), true
   else
     image = getObpImage(path, PaletteFX.dmgObj())
   end

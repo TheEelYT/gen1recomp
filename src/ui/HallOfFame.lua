@@ -23,8 +23,13 @@ HallOfFame.isOpaque = true
 -- SGB: SetPal_PokemonWholeScreen for the mon on display
 function HallOfFame:sgbPalettes(game)
   local P = require("src.render.PaletteFX")
-  if self.phase == "player" or self.phase == "player_stats"
-      or self.phase == "player_dex" or self.phase == "player_rating" then
+  if self.phase == "intro" then
+    local ow = game.overworld
+    if ow and ow.sgbPalettes then return ow:sgbPalettes(game) end
+    return nil
+  end
+  if self.phase == "player" or self.phase == "player_dex"
+      or self.phase == "player_rating" then
     return P.wholeNamed(game.data, "MEWMON")
   end
   local mon = game.save.party[self.index or 0]
@@ -67,6 +72,13 @@ local INFO_HOLD = 80
 local HOF_HOLD = 180
 local FADE_FRAMES = 20
 
+-- scripts/HallOfFame.asm:24
+local INTRO_DELAY = 3
+-- home/fade.asm:26
+local INTRO_FADE = 24
+-- engine/movie/hall_of_fame.asm:4
+local INTRO_HOLD = 100
+
 -- HoFPrintTextAndDelay after each dex line
 local DEX_HOLD = 120
 
@@ -91,7 +103,10 @@ function HallOfFame.new(game, onDone)
   self.onDone = onDone
   self.index = 0
   self.timer = 0
-  self.phase = "mons"
+  self.phase = "intro"
+  self.introT = 0
+  self.isOpaque = false
+  self.introFade = require("src.render.Transition").whiteOut(game)
   self.sprites = {} -- species -> image or false
   self.spriteTrueColor = {} -- species -> full-color art flag (#637)
   self.backs = {} -- species (or "@player") -> back image or false (#847)
@@ -107,12 +122,21 @@ function HallOfFame.new(game, onDone)
   return self
 end
 
-function HallOfFame:enter()
-  local data = self.game.data
-  if data.audio and data.audio.songs and data.audio.songs.Music_HallOfFame then
-    pcall(Music.play, data, "Music_HallOfFame")
+function HallOfFame:updateIntro()
+  self.introT = self.introT + 1
+  if self.introT == INTRO_DELAY + 1 then
+    -- engine/movie/hall_of_fame.asm:283
+    Music.fadeOut(10)
   end
-  self:nextMon()
+  if self.introT > INTRO_DELAY + INTRO_FADE then self.isOpaque = true end
+  if self.introT >= INTRO_DELAY + INTRO_FADE + INTRO_HOLD then
+    -- engine/movie/hall_of_fame.asm:38
+    local data = self.game.data
+    if data.audio and data.audio.songs and data.audio.songs.Music_HallOfFame then
+      pcall(Music.play, data, "Music_HallOfFame")
+    end
+    self:nextMon()
+  end
 end
 
 function HallOfFame:nextMon()
@@ -191,12 +215,13 @@ function HallOfFame:advanceMonPhase()
 end
 
 function HallOfFame:update(dt)
-  local input = self.game.input
-  local skip = input:wasPressed("a")
-
   -- .ScrollPic with d = $a0, e = 4: the back pic crosses the screen right to
   -- left and is gone before the front pic starts.  Both scrolls are plain
   -- DelayFrame loops in the ROM, so neither takes a button (#847).
+  if self.phase == "intro" then
+    self:updateIntro()
+    return
+  end
   if self.phase == "back" then
     self.scrollX = self.scrollX - SCROLL_SPEED
     if self.scrollX <= BACK_END_X then
@@ -221,11 +246,11 @@ function HallOfFame:update(dt)
     if self.phase == "fade" then
       self.timer = self.timer - 1
       self.fade = 1 - math.max(0, self.timer) / FADE_FRAMES
-      if self.timer <= 0 or skip then self:advanceMonPhase() end
+      if self.timer <= 0 then self:advanceMonPhase() end
       return
     end
     self.timer = self.timer - 1
-    if skip or self.timer <= 0 then
+    if self.timer <= 0 then
       self:advanceMonPhase()
     end
   elseif self.phase == "player" then
@@ -233,15 +258,9 @@ function HallOfFame:update(dt)
       self.scrollX = math.min(PIC_X, self.scrollX + SCROLL_SPEED)
       return
     end
-    self.phase = "player_stats"
-    self.timer = DEX_HOLD
-  elseif self.phase == "player_stats" then
-    -- name / play time / money boxes are up; then the dex texts
-    self.timer = self.timer - 1
-    if skip or self.timer <= 0 then
-      self.phase = "player_dex"
-      self:showDexTexts()
-    end
+    -- engine/movie/hall_of_fame.asm:242
+    self.phase = "player_dex"
+    self:showDexTexts()
   end
   -- player_dex / player_rating are driven by the TextBox chain that
   -- showDexTexts pushes; nothing is timed here
@@ -269,17 +288,18 @@ function HallOfFame:showDexTexts()
     game.stack:pop()
     if self.onDone then self.onDone() end
   end
-  local function showRating()
-    game.stack:push(TextBox.new(game, rating, finish,
-                                { auto = { delay = DEX_HOLD } }))
+  -- engine/movie/hall_of_fame.asm:24
+  local function dexBox(str, nextFn)
+    game.stack:push(TextBox.new(game, str, nextFn,
+                                { auto = { delay = DEX_HOLD },
+                                  noLetterDelay = true }))
   end
+  local function showRating() dexBox(rating, finish) end
   local function showHeader()
     self.phase = "player_rating"
-    game.stack:push(TextBox.new(game, header, showRating,
-                                { auto = { delay = DEX_HOLD } }))
+    dexBox(header, showRating)
   end
-  game.stack:push(TextBox.new(game, seenOwned, showHeader,
-                              { auto = { delay = DEX_HOLD } }))
+  dexBox(seenOwned, showHeader)
 end
 
 -- HoFDisplayMonInfo: TextBoxBorder (0,2) b=9,c=10 + LEVEL/TYPE labels
@@ -323,16 +343,18 @@ end
 function HallOfFame:drawPic(img, trueColor)
   if not img then return end
   love.graphics.setColor(1, 1, 1, 1)
-  local x = self.scrollX or PIC_X
-  love.graphics.draw(img, x, PIC_Y)
+  local w, h = img:getDimensions()
+  -- home/pics.asm:68-76
+  local x = (self.scrollX or PIC_X) + math.floor((8 - w / 8) / 2) * 8
+  local y = PIC_Y + math.max(0, 56 - h)
+  love.graphics.draw(img, x, y)
   -- SET_PAL_POKEMON_WHOLE_SCREEN (HoFShowMonOrPlayer) colors the WHOLE
   -- screen in the mon's palette, so sgbPalettes above hands the blit a
   -- whole-canvas zone -- and a full-color pic has to sit that remap out.
   -- Report the rect the pic covers for the unshaded pass, the way
   -- SummaryMenu does for the status screen pic (#637; #430).
   if trueColor then
-    require("src.render.PaletteFX").markTrueColor(x, PIC_Y,
-                                                 img:getDimensions())
+    require("src.render.PaletteFX").markTrueColor(x, y, w, h)
   end
 end
 
@@ -373,11 +395,19 @@ function HallOfFame:drawPlayerStats()
   Font.draw(("%3d:%02d"):format(math.floor(t / 3600), math.floor(t / 60) % 60),
             5 * 8, 7 * 8)
   Font.draw(Strings("MONEY"), 1 * 8, 9 * 8)
-  -- PrintBCDNumber with MONEY_SIGN; port uses ¥ like TrainerCard
-  Font.draw(("¥%d"):format(save.money or 0), 4 * 8, 10 * 8)
+  -- engine/movie/hall_of_fame.asm:238-241
+  local digits = tostring(math.max(0, math.floor(save.money or 0)))
+  Font.draw("¥" .. digits, (4 + 6 - #digits) * 8, 10 * 8)
 end
 
 function HallOfFame:draw()
+  if self.phase == "intro" and not self.isOpaque then
+    if self.introT > INTRO_DELAY then
+      self.introFade.t = self.introT - INTRO_DELAY
+      self.introFade:draw()
+    end
+    return
+  end
   love.graphics.setColor(1, 1, 1, 1)
   love.graphics.rectangle("fill", 0, 0, 160, 144)
 
@@ -401,9 +431,6 @@ function HallOfFame:draw()
     end
   elseif self.phase == "player" then
     self:drawPic(self.playerPic, self.playerTrueColor)
-  elseif self.phase == "player_stats" then
-    self:drawPic(self.playerPic, self.playerTrueColor)
-    self:drawPlayerStats()
   elseif self.phase == "player_dex" or self.phase == "player_rating" then
     -- the TextBox chain draws the dex texts over the stat boxes
     self:drawPic(self.playerPic, self.playerTrueColor)

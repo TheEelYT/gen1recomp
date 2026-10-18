@@ -2,6 +2,7 @@
 -- Field dialogue must use this — Gen2 Font.lua is fixed 8px and overflows the 208px box.
 
 local TextIR = require("src.core.game3.scripting.text_ir")
+local CacheBlob = require("src.import.CacheBlob")
 
 local FrlgFont = {}
 
@@ -77,7 +78,47 @@ FrlgFont.COLOR = {
   STAT = { fg = FrlgFont.STDPAL[4], shadow = FrlgFont.STDPAL[5], bg = FrlgFont.STDPAL[0] },
   DARK_GRAY = { fg = FrlgFont.STDPAL[2], shadow = FrlgFont.STDPAL[3], bg = FrlgFont.STDPAL[0] },
   DARK = { fg = FrlgFont.STDPAL[2], shadow = FrlgFont.STDPAL[3], bg = FrlgFont.STDPAL[0] },
+  -- src/option_menu.c:180
+  OPTION_VALUE = { fg = FrlgFont.STDPAL[5], shadow = FrlgFont.STDPAL[4], bg = FrlgFont.STDPAL[0] },
 }
+
+local FRLG_COLOR_IDS = {}
+for k, v in pairs(FrlgFont.COLOR_IDS) do FRLG_COLOR_IDS[k] = v end
+
+-- pokeruby/charmap.txt:391
+local RS_COLOR_IDS = {
+  TRANSPARENT = 0, DARK_GRAY = 1, DARK_GREY = 1, RED = 2, LIGHT_RED = 2, GREEN = 3, LIGHT_GREEN = 3,
+  BLUE = 4, YELLOW = 5, CYAN = 6, MAGENTA = 7, LIGHT_GRAY = 8, LIGHT_GREY = 8, BLACK = 9,
+  WHITE = 12, SKY_BLUE = 13, LIGHT_BLUE = 14, WHITE2 = 15,
+}
+
+local FRLG_COLOR_SLOTS = {
+  MALE = { 9, 8 }, GENDER_MALE = { 9, 8 }, FEMALE = { 5, 4 }, GENDER_FEMALE = { 5, 4 },
+  MALE_NPC = { 8, 3 }, FEMALE_NPC = { 4, 3 }, BLUE = { 8, 3 }, RED = { 4, 5 }, GREEN = { 6, 7 },
+  WHITE = { 1, 2 }, LIGHT = { 1, 2 }, PARTY = { 1, 2 }, STAT = { 4, 5 }, DARK_GRAY = { 2, 3 }, DARK = { 2, 3 },
+  OPTION_VALUE = { 5, 4 },
+}
+
+-- pokeruby/src/text.c:247
+local RS_COLOR_SLOTS = {
+  MALE = { 4, 8 }, GENDER_MALE = { 4, 8 }, FEMALE = { 2, 8 }, GENDER_FEMALE = { 2, 8 },
+  MALE_NPC = { 4, 8 }, FEMALE_NPC = { 2, 8 }, BLUE = { 4, 8 }, RED = { 2, 8 }, GREEN = { 3, 8 },
+  WHITE = { 12, 1 }, LIGHT = { 12, 1 }, PARTY = { 12, 1 }, STAT = { 2, 8 }, DARK_GRAY = { 1, 8 }, DARK = { 1, 8 },
+  OPTION_VALUE = { 2, 8 },
+}
+
+local function applyColorSlots(rs)
+  local slots = rs and RS_COLOR_SLOTS or FRLG_COLOR_SLOTS
+  for name, s in pairs(slots) do
+    local c = FrlgFont.COLOR[name]
+    c.fg, c.shadow = FrlgFont.STDPAL[s[1]], FrlgFont.STDPAL[s[2]]
+  end
+  local ids = rs and RS_COLOR_IDS or FRLG_COLOR_IDS
+  for k in pairs(FrlgFont.COLOR_IDS) do FrlgFont.COLOR_IDS[k] = nil end
+  for k, v in pairs(ids) do FrlgFont.COLOR_IDS[k] = v end
+end
+
+FrlgFont.applyColorSlots = applyColorSlots
 
 -- include/constants/vars.h:340
 FrlgFont.NPC_TEXT_COLOR = {
@@ -172,6 +213,8 @@ local sTextColorTable = {
 --- Lookup NPC text color enum from graphicsId (0=Male, 1=Female, 2=Mon, 3=Neutral).
 function FrlgFont.getNpcTextColor(graphicId)
   if not graphicId then return FrlgFont.NPC_TEXT_COLOR.NEUTRAL end
+  local spec = FrlgFont.sync and FrlgFont.sync()
+  if spec and spec.npcTextColors == false then return FrlgFont.NPC_TEXT_COLOR.NEUTRAL end
   graphicId = tonumber(graphicId)
   if not graphicId or graphicId < 0 then return FrlgFont.NPC_TEXT_COLOR.NEUTRAL end
   local idx = math.floor(graphicId / 2)
@@ -244,15 +287,15 @@ local function loadImage(candidates)
       end
     end
     if not data and love and love.filesystem and love.filesystem.read then
-      data = love.filesystem.read(path)
+      data = CacheBlob.readFs(path)
       if not data then
-        data = love.filesystem.read("data/generated/gba/" .. (path:gsub("^data/generated/gba/", "")))
+        data = CacheBlob.readFs("data/generated/gba/" .. (path:gsub("^data/generated/gba/", "")))
       end
     end
     if not data then
       local f = io.open(path, "rb") or io.open("data/generated/gba/" .. (path:gsub("^data/generated/gba/", "")), "rb")
       if f then
-        data = f:read("*a")
+        data = CacheBlob.decode(path, f:read("*a"))
         f:close()
       end
     end
@@ -262,7 +305,7 @@ local function loadImage(candidates)
         if okId and id then
           local img = love.graphics.newImage(id)
           if img and img.setFilter then img:setFilter("nearest", "nearest") end
-          return img, path
+          return img, path, id
         end
       elseif love and love.filesystem and love.image and love.graphics then
         local okFd, fd = pcall(love.filesystem.newFileData, data, path)
@@ -271,7 +314,7 @@ local function loadImage(candidates)
           if okId and id then
             local img = love.graphics.newImage(id)
             if img and img.setFilter then img:setFilter("nearest", "nearest") end
-            return img, path
+            return img, path, id
           end
         end
       end
@@ -285,6 +328,208 @@ local function loadImage(candidates)
     end
   end
   return nil, nil
+end
+
+-- Pack a sheet's fg and shadow images into one texture (fg on top, shadow
+-- below a transparent gap) with matching quads.  Each glyph still draws its
+-- shadow then its fg, but from the same texture, so LOVE's autobatcher keeps
+-- a whole string in one draw call instead of flushing on every texture swap.
+-- Pixels are copied verbatim, so the output is unchanged.  nil (draw from the
+-- separate sheets) when either ImageData is missing or they do not match.
+local ATLAS_GAP = 16
+local function pack_atlas(fgData, shData, quads)
+  if not (fgData and shData and quads and love and love.image and love.image.newImageData
+      and love.graphics and love.graphics.newImage and love.graphics.newQuad) then
+    return nil
+  end
+  local ok, atlas = pcall(function()
+    local w, h = fgData:getDimensions()
+    local sw, shh = shData:getDimensions()
+    if sw ~= w or shh ~= h then return nil end
+    if fgData.getFormat and shData.getFormat and fgData:getFormat() ~= shData:getFormat() then return nil end
+    local off = h + ATLAS_GAP
+    local fmt = fgData.getFormat and fgData:getFormat() or "rgba8"
+    local data = love.image.newImageData(w, off + h, fmt)
+    data:paste(fgData, 0, 0, 0, 0, w, h)
+    data:paste(shData, 0, off, 0, 0, w, h)
+    local img = love.graphics.newImage(data)
+    if img.setFilter then img:setFilter("nearest", "nearest") end
+    local aw, ah = img:getDimensions()
+    local fq, sq = {}, {}
+    for id, q in pairs(quads) do
+      local qx, qy, qw, qh = q:getViewport()
+      fq[id] = love.graphics.newQuad(qx, qy, qw, qh, aw, ah)
+      sq[id] = love.graphics.newQuad(qx, qy + off, qw, qh, aw, ah)
+    end
+    return { image = img, fg = fq, sh = sq, src = quads }
+  end)
+  return ok and atlas or nil
+end
+
+local function loadTable(path)
+  local okC, CacheFs = pcall(require, "src.import.CacheFs")
+  if not (okC and CacheFs and CacheFs.readActive) then return nil end
+  local src = CacheFs.readActive(path)
+  if type(src) ~= "string" then return nil end
+  local chunk = load(src, "@" .. path, "t", {})
+  if not chunk then return nil end
+  local ok, t = pcall(chunk)
+  return ok and type(t) == "table" and t or nil
+end
+
+FrlgFont._syncVersion = nil
+FrlgFont._spec = nil
+FrlgFont._faces = {}
+FrlgFont._stdpalSaved = nil
+
+local function applyPalette(spec)
+  local pal = spec and spec.palette and loadTable(spec.palette.file)
+  if pal and spec.palette.key then pal = pal[spec.palette.key] end
+  if type(pal) == "table" then
+    if not FrlgFont._stdpalSaved then
+      FrlgFont._stdpalSaved = {}
+      for i = 1, 15 do
+        local c = FrlgFont.STDPAL[i]
+        FrlgFont._stdpalSaved[i] = { c[1], c[2], c[3], c[4] }
+      end
+    end
+    for i = 1, 15 do
+      local rgb, c = pal[i], FrlgFont.STDPAL[i]
+      if type(rgb) == "table" then
+        c[1], c[2], c[3], c[4] = rgb[1] / 255, rgb[2] / 255, rgb[3] / 255, 1
+      end
+    end
+  elseif FrlgFont._stdpalSaved then
+    for i = 1, 15 do
+      local s, c = FrlgFont._stdpalSaved[i], FrlgFont.STDPAL[i]
+      c[1], c[2], c[3], c[4] = s[1], s[2], s[3], s[4]
+    end
+    FrlgFont._stdpalSaved = nil
+  end
+  local colors = spec and spec.defaultColors or { fg = 2, shadow = 3, bg = 0 }
+  FrlgFont.COLOR.NORMAL.fg = FrlgFont.STDPAL[colors.fg]
+  FrlgFont.COLOR.NORMAL.shadow = FrlgFont.STDPAL[colors.shadow]
+  FrlgFont.COLOR.NORMAL.bg = FrlgFont.STDPAL[colors.bg]
+  applyColorSlots(spec and spec.nativeLayout == "rs")
+end
+
+local function resolveSpec()
+  local Profile = package.loaded["src.core.game3.profile"]
+  if not Profile then
+    local ok, P = pcall(require, "src.core.game3.profile")
+    if not ok then return nil, nil end
+    Profile = P
+  end
+  local ok, row = pcall(Profile.forSession)
+  local font = ok and type(row) == "table" and row.font or nil
+  if type(font) == "table" and type(font.faces) == "table" then return font, row.id end
+  return nil, nil
+end
+
+local function sync()
+  local Runtime = package.loaded["src.core.game3.runtime"]
+  local session = Runtime and Runtime.session
+  local GV = package.loaded["src.core.GameVersion"]
+  local v = (type(session) == "table" and session.version) or (GV and GV.current) or ""
+  if v == FrlgFont._syncVersion then return FrlgFont._spec end
+  FrlgFont._syncVersion = v
+  local spec, id = resolveSpec()
+  local key = spec and id or "frlg"
+  if FrlgFont._specKey ~= key then
+    if FrlgFont._specKey ~= nil then FrlgFont.invalidate() end
+    FrlgFont._specKey = key
+    applyPalette(spec)
+  end
+  FrlgFont._spec = spec
+  return spec
+end
+
+FrlgFont.sync = sync
+
+local function metricsFor(spec, fontId)
+  if FrlgFont._metrics == nil then
+    FrlgFont._metrics = spec.metrics and loadTable(spec.metrics) or false
+  end
+  for _, m in pairs(FrlgFont._metrics or {}) do
+    if type(m) == "table" and m.name == fontId then return m end
+  end
+  return nil
+end
+
+local function faceName(opts)
+  return (opts and opts.font) or ((opts and opts.small) and "small") or "normal"
+end
+
+local function loadFace(spec, name, language, textMode)
+  local key = language and language .. ":" .. name or name
+  if spec.nativeLayout == "rs" and textMode == 1 then key = key .. ":monospace" end
+  local cached = FrlgFont._faces[key]
+  if cached ~= nil then return cached or nil end
+  if spec.palette and not FrlgFont._stdpalSaved then applyPalette(spec) end
+  if spec.faceLoader then
+    local face = require(spec.faceLoader).load(spec, name, language or "latin", loadImage, loadTable, FrlgFont.STDPAL, textMode)
+    FrlgFont._faces[key] = face
+    return face
+  end
+  local fs = spec.faces[name]
+  if type(fs) ~= "table" then
+    error("FrlgFont: the active profile has no font face '" .. tostring(name) .. "'", 0)
+  end
+  local dir = spec.dir or ""
+  local fg, fgp, fgData = loadImage({ { path = dir .. fs.sheet .. "_fg.rgba", w = 256, h = 512 } })
+  local sh, _, shData = loadImage({ { path = dir .. fs.sheet .. "_shadow.rgba", w = 256, h = 512 } })
+  local widths = fs.widths and loadTable(dir .. fs.widths)
+  local m = metricsFor(spec, fs.fontId)
+  if not (fg and widths and m) then
+    log(fs.sheet .. " missing from the cache")
+    FrlgFont._faces[name] = false
+    return nil
+  end
+  local iw, ih = fg:getDimensions()
+  local quads = {}
+  for id = 0, 511 do
+    local gw = tonumber(widths[id] or widths[0]) or 16
+    if gw <= 0 or gw > 16 then gw = 16 end
+    -- pokeemerald/src/text.c:608
+    quads[id] = love.graphics.newQuad((id % 16) * 16, math.floor(id / 16) * 16, gw, 16, iw, ih)
+  end
+  local face = {
+    name = name, fg = fg, sh = sh, quads = quads, widths = widths,
+    height = m.maxLetterHeight, pitch = m.maxLetterHeight + (m.lineSpacing or 0),
+    letterSpacing = m.letterSpacing or 0,
+    atlas = pack_atlas(fgData, shData, quads),
+  }
+  FrlgFont._faces[name] = face
+  log(fs.sheet .. " ready " .. tostring(fgp))
+  return face
+end
+
+local function faceFor(opts, glyphId)
+  local spec = sync()
+  if not spec then return nil end
+  local language = spec.nativeLayout == "rs" and ((glyphId and glyphId >= FrlgFont.JAPANESE_BASE) or (opts and opts.japanese)) and "japanese" or nil
+  return loadFace(spec, faceName(opts), language, opts and opts.textMode)
+end
+
+FrlgFont.face = faceFor
+
+local function nativeQuad(face, glyphId, x)
+  if face.boundaryQuads and x % 8 == 5 and face.boundaryQuads[glyphId] then
+    return face.boundaryQuads[glyphId]
+  end
+  return face.quads[glyphId]
+end
+
+local function faceAdvance(face, glyphId)
+  local w = face.widths[glyphId]
+  if w == nil then w = face.widths[0] or 0 end
+  return w
+end
+
+function FrlgFont.linePitch(opts)
+  local face = faceFor(opts)
+  if face then return face.pitch end
+  return (opts and opts.small) and FrlgFont.SMALL_LINE_PITCH or FrlgFont.LINE_PITCH
 end
 
 local function ensure()
@@ -324,8 +569,8 @@ local function ensure()
   end
   FrlgFont._widths = widths or {}
 
-  local fg, fgp = loadImage(FG_PATHS)
-  local sh = loadImage(SH_PATHS)
+  local fg, fgp, fgData = loadImage(FG_PATHS)
+  local sh, _, shData = loadImage(SH_PATHS)
   if not fg then
     if not FrlgFont._logged then
       log("latin_normal font missing")
@@ -343,6 +588,7 @@ local function ensure()
     quads[id] = love.graphics.newQuad(col * 16, row * 16, 16, 16, iw, ih)
   end
   FrlgFont._quads = quads
+  FrlgFont._atlas = pack_atlas(fgData, shData, quads)
   if not FrlgFont._logged then
     log("latin_normal ready " .. tostring(fgp))
     FrlgFont._logged = true
@@ -382,8 +628,8 @@ local function ensure_small()
       if chunk then widths = chunk() end
     end
   end
-  local fg, fgp = loadImage(SMALL_FG_PATHS)
-  local sh = loadImage(SMALL_SH_PATHS)
+  local fg, fgp, fgData = loadImage(SMALL_FG_PATHS)
+  local sh, _, shData = loadImage(SMALL_SH_PATHS)
   if not fg then return false end
   local iw, ih = fg:getDimensions()
   local quads = {}
@@ -398,6 +644,7 @@ local function ensure_small()
   -- Sheets from extract_latin_small.py (ROM hwlat @ 0x1EAF00), CHARMAP-ordered.
   FrlgFont._small = {
     fg = fg, sh = sh, quads = quads, widths = widths or {}, _romBaked = true,
+    atlas = pack_atlas(fgData, shData, quads),
   }
   log("latin_small ready " .. tostring(fgp) .. " (ROM FONT_SMALL)")
   return true
@@ -465,18 +712,18 @@ FrlgFont.JAPANESE_GLYPHS = japanese_glyphs()
 
 local function load_japanese(key, fgPaths, shPaths)
   if FrlgFont[key] ~= nil then return FrlgFont[key] or nil end
-  local fg = loadImage(fgPaths)
+  local fg, _, fgData = loadImage(fgPaths)
   if not fg then
     FrlgFont[key] = false
     return nil
   end
-  local sh = loadImage(shPaths)
+  local sh, _, shData = loadImage(shPaths)
   local iw, ih = fg:getDimensions()
   local quads = {}
   for code = 0, 511 do
     quads[code] = love.graphics.newQuad((code % 16) * 16, math.floor(code / 16) * 16, 16, 16, iw, ih)
   end
-  FrlgFont[key] = { fg = fg, sh = sh, quads = quads }
+  FrlgFont[key] = { fg = fg, sh = sh, quads = quads, atlas = pack_atlas(fgData, shData, quads) }
   return FrlgFont[key]
 end
 
@@ -502,7 +749,7 @@ local function japanese_quad(glyphId, small)
   local sheet = small and load_japanese("_jpSmall", JP_SMALL_FG_PATHS, JP_SMALL_SH_PATHS)
     or load_japanese("_jpNormal", JP_FG_PATHS, JP_SH_PATHS)
   if not sheet then return nil end
-  return sheet.fg, sheet.sh, sheet.quads[glyphId - FrlgFont.JAPANESE_BASE]
+  return sheet.fg, sheet.sh, sheet.quads[glyphId - FrlgFont.JAPANESE_BASE], sheet.atlas
 end
 
 -- The remaining single characters of the Latin block of pret
@@ -600,6 +847,11 @@ FrlgFont.GLYPH_TAGS = {
   SUPER_ER = { 0x2C },
   SUPER_E = { 0x84 },
   SUPER_RE = { 0xA0 },
+  UNK_SPACER = { 0x77 },
+  UP_ARROW = { 0x79 },
+  DOWN_ARROW = { 0x7A },
+  LEFT_ARROW = { 0x7B },
+  RIGHT_ARROW = { 0x7C },
 }
 for id, sym in pairs(TextIR.EXTRA_SYMBOL) do
   local name = sym:match("^{(.+)}$")
@@ -630,6 +882,33 @@ local KEYPAD_PATHS = {
   { path = "chrome/fonts/keypad_icons.rgba", w = 128, h = 32 },
   { path = "data/generated/gba/chrome/fonts/keypad_icons.rgba", w = 128, h = 32 },
 }
+
+FrlgFont.KEYPAD_WORDS = {
+  [0x00] = "A", [0x01] = "B", [0x02] = "L", [0x03] = "R", [0x04] = "START", [0x05] = "SELECT",
+  [0x06] = "UP", [0x07] = "DOWN", [0x08] = "LEFT", [0x09] = "RIGHT", [0x0A] = "UP/DN",
+  [0x0B] = "L/R", [0x0C] = "DPAD",
+}
+
+local keypadQuads = nil
+
+local function keypadWord(iconId)
+  return (FrlgFont.KEYPAD_WORDS[iconId] or "?") .. " "
+end
+
+local function keypadKnownMissing()
+  local spec = FrlgFont.sync and FrlgFont.sync()
+  if spec and spec.nativeLayout == "rs" then return true end
+  return FrlgFont._keypad == false
+end
+
+function FrlgFont.hasKeypadIcons()
+  if keypadKnownMissing() then return false end
+  if not FrlgFont._keypad then
+    FrlgFont._keypad = loadImage(KEYPAD_PATHS) or false
+    keypadQuads = nil
+  end
+  return FrlgFont._keypad ~= false
+end
 
 local reportedTags = {}
 local function unknownTag(tag)
@@ -664,13 +943,14 @@ local colorScratchIdx = 0
 local function acquireColorScratch(c)
   colorScratchIdx = (colorScratchIdx % 4) + 1
   local cur = colorScratchPool[colorScratchIdx]
+  local normal = FrlgFont.COLOR.NORMAL
   if not c then
-    cur.fg = FrlgFont.STDPAL[2]
-    cur.shadow = FrlgFont.STDPAL[3]
+    cur.fg = normal.fg
+    cur.shadow = normal.shadow
     cur.bg = FrlgFont.STDPAL[0]
   else
-    cur.fg = c.fg or FrlgFont.STDPAL[2]
-    cur.shadow = c.shadow or FrlgFont.STDPAL[3]
+    cur.fg = c.fg or normal.fg
+    cur.shadow = c.shadow or normal.shadow
     cur.bg = c.bg or FrlgFont.STDPAL[0]
   end
   return cur
@@ -733,21 +1013,29 @@ function FrlgFont.scanTokens(text, initialColors)
           return "ctrl", "COLOR_HIGHLIGHT_SHADOW", curColors
         elseif cmd == 0x06 and i + 2 <= n then -- EXT_CTRL_CODE_FONT (3 bytes)
           local fontId = s:byte(i + 2)
-          if fontId == 0x04 then -- FONT_MALE
+          if sync() and FrlgFont._spec.nativeLayout == "rs" then
+            i = i + 3
+            return "font", "native_" .. fontId, curColors
+          end
+          local fontName = TextIR.dialect().FONT_IDS[fontId]
+          if fontName == "FONT_MALE" then
             curColors.fg = FrlgFont.STDPAL[8]
             curColors.shadow = FrlgFont.STDPAL[3]
             curColors.bg = FrlgFont.STDPAL[0]
-          elseif fontId == 0x05 then -- FONT_FEMALE
+          elseif fontName == "FONT_FEMALE" then
             curColors.fg = FrlgFont.STDPAL[4]
             curColors.shadow = FrlgFont.STDPAL[3]
             curColors.bg = FrlgFont.STDPAL[0]
-          elseif fontId == 0x02 then -- FONT_NORMAL
+          elseif fontName == "FONT_NORMAL" then
             curColors.fg = FrlgFont.STDPAL[2]
             curColors.shadow = FrlgFont.STDPAL[3]
             curColors.bg = FrlgFont.STDPAL[0]
           end
           i = i + 3
           return "ctrl", "FONT", curColors
+        elseif cmd == 0x07 and sync() and FrlgFont._spec.nativeLayout == "rs" then
+          i = i + 2
+          return "font", false, curColors
         elseif PEN_CODES[cmd] and i + 2 <= n then
           local arg = s:byte(i + 2)
           i = i + 3
@@ -804,6 +1092,8 @@ function FrlgFont.scanTokens(text, initialColors)
             local col = resolveColorId(val)
             if col then curColors.bg = col end
             return "ctrl", tag, curColors
+          elseif sync() and FrlgFont._spec.nativeLayout == "rs" and (upperTag:match("^FONT_RS_%d$") or upperTag == "FONT_BRAILLE") then
+            return "font", "native_" .. (upperTag:match("%d$") or "6"), curColors
           elseif FrlgFont.GLYPH_TAGS[upperTag] then
             local ids = FrlgFont.GLYPH_TAGS[upperTag]
             if #ids > 1 then
@@ -862,12 +1152,20 @@ end
 
 function FrlgFont.advance(glyphId, opts)
   opts = opts or {}
+  local spec = sync()
+  if spec and spec.nativeLayout == "rs" then
+    local face = faceFor(opts, glyphId)
+    local id = glyphId >= FrlgFont.JAPANESE_BASE and glyphId - FrlgFont.JAPANESE_BASE or glyphId
+    return faceAdvance(face, id)
+  end
   if glyphId >= FrlgFont.JAPANESE_BASE then
     -- pokefirered/src/text.c:1391 (small: 8px), :1492 (normal: its width table).
     -- The window's letter spacing is added by japanese_step, as the cart does.
     if opts.small then return 8 end
     return japanese_widths()[glyphId - FrlgFont.JAPANESE_BASE] or 10
   end
+  local face = faceFor(opts)
+  if face then return faceAdvance(face, glyphId) end
   if opts.small then
     ensure_small()
     local sw = FrlgFont._small and FrlgFont._small.widths
@@ -903,12 +1201,14 @@ end
 -- (new_menu_helpers.c:413), 0 for the small one (gFontInfos, :65).
 local function japanese_step(glyphId, w, minW, jpn, opts, small)
   local ls = opts.letterSpacing
+  if FrlgFont._spec and FrlgFont._spec.nativeLayout == "rs" then return glyph_step(w, minW, jpn, ls or 0) end
   if glyphId < FrlgFont.JAPANESE_BASE then return glyph_step(w, minW, jpn, ls or 0) end
   return glyph_step(w, minW, true, ls or (small and 0 or 1))
 end
 
 function FrlgFont.measure(text, opts)
   opts = opts or {}
+  local activeOpts = opts
   local ls = opts.letterSpacing or 0
   local minW, jpn = 0, false
   local line, maxLine = 0, 0
@@ -918,11 +1218,13 @@ function FrlgFont.measure(text, opts)
       line = 0
     elseif ttype == "char" then
       local id = FrlgFont.glyphId(val)
-      line = line + japanese_step(id, FrlgFont.advance(id, opts), minW, jpn, opts, opts.small)
+      line = line + japanese_step(id, FrlgFont.advance(id, activeOpts), minW, jpn, activeOpts, activeOpts.small)
     elseif ttype == "glyph" then
-      line = line + japanese_step(val, FrlgFont.advance(val, opts), minW, jpn, opts, opts.small)
+      line = line + japanese_step(val, FrlgFont.advance(val, activeOpts), minW, jpn, activeOpts, activeOpts.small)
+    elseif ttype == "font" then
+      activeOpts = { font = val or opts.font, small = opts.small, letterSpacing = opts.letterSpacing, japanese = opts.japanese, textMode = opts.textMode }
     elseif ttype == "icon" then
-      line = line + FrlgFont.KEYPAD_ICONS[val].w + ls
+      line = line + FrlgFont.keypadIconWidth(val, activeOpts) + ls
     elseif ttype == "clear" then
       line = line + val
     elseif ttype == "skip" then
@@ -939,17 +1241,25 @@ function FrlgFont.measure(text, opts)
   return maxLine
 end
 
-local keypadQuads = nil
+function FrlgFont.keypadIconWidth(iconId, opts)
+  if not FrlgFont.hasKeypadIcons() then return FrlgFont.measure(keypadWord(iconId), opts) end
+  return FrlgFont.KEYPAD_ICONS[iconId].w
+end
+
+local WORD_OPTS = { colors = nil, font = nil, small = nil }
 
 -- src/text.c:1335
-function FrlgFont.drawKeypadIcon(iconId, x, y)
+function FrlgFont.drawKeypadIcon(iconId, x, y, opts)
   local icon = FrlgFont.KEYPAD_ICONS[iconId]
-  if not FrlgFont._keypad then
-    FrlgFont._keypad = loadImage(KEYPAD_PATHS)
-    if not FrlgFont._keypad then
-      error("FrlgFont: keypad_icons.rgba is not in the cache", 0)
+  if not FrlgFont.hasKeypadIcons() then
+    local word = keypadWord(iconId)
+    if opts then
+      WORD_OPTS.colors, WORD_OPTS.font, WORD_OPTS.small = opts.colors, opts.font, opts.small
+    else
+      WORD_OPTS.colors, WORD_OPTS.font, WORD_OPTS.small = nil, nil, nil
     end
-    keypadQuads = nil
+    FrlgFont.draw(word, x, y, WORD_OPTS)
+    return FrlgFont.measure(word, WORD_OPTS)
   end
   if not keypadQuads then
     local iw, ih = FrlgFont._keypad:getDimensions()
@@ -1006,6 +1316,16 @@ end
 
 local ADVANCE_SMALL = { small = true }
 local ADVANCE_NORMAL = {}
+local ICON_COLORS = { fg = nil, shadow = nil, bg = nil }
+local ICON_OPTS = { colors = ICON_COLORS, font = nil, small = nil }
+
+local function set_col(c)
+  if type(c) == "table" then
+    love.graphics.setColor(c[1] or 1, c[2] or 1, c[3] or 1, c[4] or 1)
+  else
+    love.graphics.setColor(1, 1, 1, 1)
+  end
+end
 
 --- Draw full string at pixel (x,y).
 -- opts.maxWidth clips (CopyGlyphToWindow). opts.colors = COLOR.NORMAL etc.
@@ -1013,11 +1333,17 @@ local ADVANCE_NORMAL = {}
 -- opts.small: use FONT_SMALL (party menu).
 function FrlgFont.draw(text, x, y, opts)
   opts = opts or {}
+  local activeOpts = opts
+  local face = faceFor(opts)
   local useSmall = false
-  if opts.small then
-    useSmall = ensure_small() and FrlgFont._small and FrlgFont._small._romBaked
+  if face then
+    useSmall = face.name == "small"
+  else
+    if opts.small then
+      useSmall = ensure_small() and FrlgFont._small and FrlgFont._small._romBaked
+    end
+    if not useSmall and not ensure() then return 0 end
   end
-  if not useSmall and not ensure() then return 0 end
 
   local baseColors = opts.colors
   if not baseColors then
@@ -1048,22 +1374,17 @@ function FrlgFont.draw(text, x, y, opts)
   local minW, jpn = 0, false
   local penX, penY = 0, 0
   local drawn = 0
-  local pitch = opts.linePitch
+  local pitch = opts.linePitch or (face and face.pitch)
     or (useSmall and FrlgFont.SMALL_LINE_PITCH or FrlgFont.LINE_PITCH)
-  local fg, sh, quads
-  if useSmall then
-    fg, sh, quads = FrlgFont._small.fg, FrlgFont._small.sh, FrlgFont._small.quads
+  local fg, sh, quads, atlas
+  if face then
+    fg, sh, quads, atlas = face.fg, face.sh, face.quads, face.atlas
+  elseif useSmall then
+    fg, sh, quads, atlas = FrlgFont._small.fg, FrlgFont._small.sh, FrlgFont._small.quads, FrlgFont._small.atlas
   else
-    fg, sh, quads = FrlgFont._fg, FrlgFont._sh, FrlgFont._quads
+    fg, sh, quads, atlas = FrlgFont._fg, FrlgFont._sh, FrlgFont._quads, FrlgFont._atlas
   end
-
-  local function set_col(c)
-    if type(c) == "table" then
-      love.graphics.setColor(c[1] or 1, c[2] or 1, c[3] or 1, c[4] or 1)
-    else
-      love.graphics.setColor(1, 1, 1, 1)
-    end
-  end
+  if atlas and (atlas.src ~= quads or not sh) then atlas = nil end
 
   for ttype, val, curCol in FrlgFont.scanTokens(text, baseColors) do
     if limit and drawn >= limit then break end
@@ -1072,11 +1393,15 @@ function FrlgFont.draw(text, x, y, opts)
       penY = penY + pitch
       drawn = drawn + 1
     elseif ttype == "icon" then
-      local w = FrlgFont.KEYPAD_ICONS[val].w
+      local cfg, csh, cbg = curCol.fg, curCol.shadow, curCol.bg
+      local w = FrlgFont.keypadIconWidth(val, activeOpts)
       if penX + w <= maxW or penX == 0 then
-        FrlgFont.drawKeypadIcon(val, x + penX, y + penY)
+        ICON_COLORS.fg, ICON_COLORS.shadow, ICON_COLORS.bg = cfg, csh, cbg
+        ICON_OPTS.font, ICON_OPTS.small = activeOpts.font, activeOpts.small
+        FrlgFont.drawKeypadIcon(val, x + penX, y + penY, ICON_OPTS)
         penX = penX + w + ls
       end
+      curCol.fg, curCol.shadow, curCol.bg = cfg, csh, cbg
       drawn = drawn + 1
     elseif ttype == "shiftx" or ttype == "skip" then
       penX = val
@@ -1090,14 +1415,32 @@ function FrlgFont.draw(text, x, y, opts)
       minW = val
     elseif ttype == "jpn" then
       jpn = val
+    elseif ttype == "font" then
+      activeOpts = { font = val or opts.font, small = opts.small, letterSpacing = opts.letterSpacing, japanese = opts.japanese, textMode = opts.textMode }
+      face = faceFor(activeOpts)
+      fg, sh, quads, atlas = face.fg, face.sh, face.quads, face.atlas
     elseif ttype == "char" or ttype == "glyph" then
       local id = ttype == "glyph" and val or FrlgFont.glyphId(val)
-      local adv = FrlgFont.advance(id, useSmall and ADVANCE_SMALL or ADVANCE_NORMAL)
+      local nativeFace = face and face.nativeIndexed and faceFor(activeOpts, id)
+      local nativeId = id >= FrlgFont.JAPANESE_BASE and id - FrlgFont.JAPANESE_BASE or id
+      local adv
+      if nativeFace then
+        adv = faceAdvance(nativeFace, nativeId)
+      elseif face and id < FrlgFont.JAPANESE_BASE then
+        adv = faceAdvance(face, id)
+      else
+        adv = FrlgFont.advance(id, useSmall and ADVANCE_SMALL or ADVANCE_NORMAL)
+      end
       if penX + adv <= maxW or penX == 0 then
         local dx, dy = x + penX, y + penY
-        local gfg, gsh, q = fg, sh, quads[id]
-        if id >= FrlgFont.JAPANESE_BASE then
-          gfg, gsh, q = japanese_quad(id, useSmall)
+        local gfg, gsh, q, gat = fg, sh, quads[id], atlas
+        local aid = id
+        if nativeFace then
+          gfg, gsh, q, gat = nativeFace.fg, nativeFace.sh, nativeQuad(nativeFace, nativeId, dx), nil
+        elseif id >= FrlgFont.JAPANESE_BASE then
+          gfg, gsh, q, gat = japanese_quad(id, useSmall)
+          aid = id - FrlgFont.JAPANESE_BASE
+          if not gsh then gat = nil end
         end
         if q then
           -- Draw background / highlight fill if bg is not transparent
@@ -1105,18 +1448,40 @@ function FrlgFont.draw(text, x, y, opts)
             set_col(curCol.bg)
             love.graphics.rectangle("fill", dx, dy, adv, pitch)
           end
+          local aq, ash = gat and gat.fg[aid], gat and gat.sh[aid]
+          -- R/S native faces pack fg, shadow and embedded colours into one
+          -- texture (rs/font_faces.lua), keyed by the source quad
+          local nq = nativeFace and nativeFace.atlas and nativeFace.atlas.of[q]
+          local aimg = gat and gat.image
+          if nq then aq, ash, aimg = nq.fg, nq.sh, nativeFace.atlas.image end
           -- Draw shadow
           if gsh and curCol.shadow and (not curCol.shadow[4] or curCol.shadow[4] > 0) then
             set_col(curCol.shadow)
-            love.graphics.draw(gsh, q, dx, dy)
+            if aq then
+              love.graphics.draw(aimg, ash, dx, dy)
+            else
+              love.graphics.draw(gsh, q, dx, dy)
+            end
           end
           -- Draw foreground
           if curCol.fg and (not curCol.fg[4] or curCol.fg[4] > 0) then
             set_col(curCol.fg)
-            love.graphics.draw(gfg, q, dx, dy)
+            if aq then
+              love.graphics.draw(aimg, aq, dx, dy)
+            else
+              love.graphics.draw(gfg, q, dx, dy)
+            end
+          end
+          if nativeFace and nativeFace.fixed then
+            love.graphics.setColor(1, 1, 1, 1)
+            if nq and nq.fixed then
+              love.graphics.draw(aimg, nq.fixed, dx, dy)
+            else
+              love.graphics.draw(nativeFace.fixed, q, dx, dy)
+            end
           end
         end
-        penX = penX + japanese_step(id, adv, minW, jpn, opts, useSmall)
+        penX = penX + japanese_step(id, adv, minW, jpn, activeOpts, useSmall)
       end
       drawn = drawn + 1
     end
@@ -1130,24 +1495,31 @@ end
 function FrlgFont.drawGlyph(glyphId, x, y, opts)
   opts = opts or {}
   glyphId = tonumber(glyphId) or 0
-  local useSmall = opts.small and ensure_small() and FrlgFont._small and FrlgFont._small._romBaked
-  if useSmall then
-    -- ok
-  elseif not ensure() then
-    return 0
+  local face = faceFor(opts, glyphId)
+  if face and face.nativeIndexed and glyphId >= FrlgFont.JAPANESE_BASE then glyphId = glyphId - FrlgFont.JAPANESE_BASE end
+  local useSmall
+  if face then
+    useSmall = face.name == "small"
+  else
+    useSmall = opts.small and ensure_small() and FrlgFont._small and FrlgFont._small._romBaked
+    if not useSmall and not ensure() then
+      return 0
+    end
   end
   local colors = opts.colors or (useSmall and FrlgFont.COLOR.PARTY) or FrlgFont.COLOR.NORMAL
   local fg, sh, quads
-  if useSmall then
+  if face then
+    fg, sh, quads = face.fg, face.sh, face.quads
+  elseif useSmall then
     fg, sh, quads = FrlgFont._small.fg, FrlgFont._small.sh, FrlgFont._small.quads
   else
     fg, sh, quads = FrlgFont._fg, FrlgFont._sh, FrlgFont._quads
   end
-  local q = quads[glyphId]
+  local q = face and face.nativeIndexed and nativeQuad(face, glyphId, x) or quads[glyphId]
   if not q then return 0 end
   if colors.bg and colors.bg[4] and colors.bg[4] > 0 then
     love.graphics.setColor(colors.bg)
-    love.graphics.rectangle("fill", x, y, FrlgFont.advance(glyphId, useSmall and ADVANCE_SMALL or ADVANCE_NORMAL), useSmall and FrlgFont.SMALL_LINE_PITCH or FrlgFont.LINE_PITCH)
+    love.graphics.rectangle("fill", x, y, face and faceAdvance(face, glyphId) or FrlgFont.advance(glyphId, useSmall and ADVANCE_SMALL or ADVANCE_NORMAL), face and face.pitch or (useSmall and FrlgFont.SMALL_LINE_PITCH or FrlgFont.LINE_PITCH))
   end
   if sh and colors.shadow and (not colors.shadow[4] or colors.shadow[4] > 0) then
     love.graphics.setColor(colors.shadow)
@@ -1159,7 +1531,12 @@ function FrlgFont.drawGlyph(glyphId, x, y, opts)
     love.graphics.setColor(1, 1, 1, 1)
   end
   love.graphics.draw(fg, q, x, y)
+  if face and face.fixed then
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.draw(face.fixed, q, x, y)
+  end
   love.graphics.setColor(1, 1, 1, 1)
+  if face then return faceAdvance(face, glyphId) end
   return FrlgFont.advance(glyphId, useSmall and ADVANCE_SMALL or ADVANCE_NORMAL)
 end
 
@@ -1202,9 +1579,12 @@ function FrlgFont.countChars(text)
 end
 
 function FrlgFont.invalidate()
+  FrlgFont._faces = {}
+  FrlgFont._metrics = nil
   FrlgFont._fg = nil
   FrlgFont._sh = nil
   FrlgFont._quads = nil
+  FrlgFont._atlas = nil
   FrlgFont._small = nil
   FrlgFont._keypad = nil
   FrlgFont._jpNormal = nil

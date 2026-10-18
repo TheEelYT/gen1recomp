@@ -79,21 +79,16 @@ GB_SHADES = (
 
 
 def _apply_title_obp0(image):
-    """Title rOBP0=%11100000 ($E0): OBJ shades 1 and 2 → white, 3 → black.
-
-    Eye OAM is baked into the MEWMON-colored BG PNG; without this remap the
-    shade-1 glints become body yellow under the title palette
-    (pokeyellow engine/movie/title.asm after PlacePikachu).
-    """
+    # engine/movie/title.asm:76
     pixels = image.load()
     w, h = image.size
-    mid, dark = GB_SHADES[1][0], GB_SHADES[2][0]
+    light = GB_SHADES[1][0]
     for y in range(h):
         for x in range(w):
             r, g, b, a = pixels[x, y]
             if a == 0:
                 continue
-            if abs(r - mid) <= 2 or abs(r - dark) <= 2:
+            if abs(r - light) <= 2:
                 pixels[x, y] = GB_SHADES[0]
     return image
 
@@ -1029,6 +1024,27 @@ def extract_battle_anims(
             delta_symbol.bank, delta_symbol.address, 64))
     }
 
+    # data/battle_anims/special_effects.asm:6
+    routine_by_address = {}
+    for routine in (
+            "AnimationFlashScreen", "DoBlizzardSpecialEffects",
+            "DoExplodeSpecialEffects", "DoRockSlideSpecialEffects",
+            "FlashScreenEveryEightFrameBlocks",
+            "FlashScreenEveryFourFrameBlocks"):
+        routine_by_address[_symbol(symbols, routine).address] = routine
+    id_symbol = _symbol(symbols, "AnimationIdSpecialEffects")
+    id_effects = {}
+    for entry in range(64):
+        at = id_symbol.address + entry * 3
+        anim_id = rom.byte(id_symbol.bank, at)
+        if anim_id == 0xFF:
+            break
+        routine = routine_by_address.get(rom.word(id_symbol.bank, at + 1))
+        if routine:
+            id_effects[move_names[anim_id - 1]] = routine
+    else:
+        raise ValueError("AnimationIdSpecialEffects: unterminated table")
+
     out = {
         "tilesheets": tilesheets,
         "baseCoords": base_coords,
@@ -1036,6 +1052,7 @@ def extract_battle_anims(
         "subanims": subanims,
         "moveAnims": move_anims,
         "fallingDeltaXs": falling_delta_xs,
+        "idEffects": id_effects,
     }
     util.write_lua(
         os.path.join(out_dir, "battle_anims.lua"), out,
@@ -1799,7 +1816,7 @@ def extract_field(rom, symbols, manifest, out_dir, assets_dir):
     raw_1bpp("Version_GFX", 80, 8, "title/red_version.png")
     raw_2bpp(
         "PlayerCharacterTitleGraphics", 40, 56, "title/player.png",
-        matte=True)
+        transparent=True)
     raw_2bpp(
         "NintendoCopyrightLogoGraphics", 152, 8,
         "title/copyright.png")
@@ -1923,7 +1940,7 @@ def extract_field(rom, symbols, manifest, out_dir, assets_dir):
             pikachu.paste(eye, (px, py), eye)
         _save_png(pikachu, os.path.join(assets_dir, "title/pikachu.png"))
 
-        # Blink overlays (half/closed) — same OBP remap as open eyes.
+        # Blink overlays (half/closed): same OBP remap as open eyes.
         eye_layout = (
             (1, 24, 16, True), (0, 32, 16, True),
             (3, 24, 24, True), (2, 32, 24, True),

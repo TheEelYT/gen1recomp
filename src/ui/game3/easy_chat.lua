@@ -10,7 +10,7 @@ local Chrome = require("src.ui.game3.chrome")
 local Strings = require("src.core.Strings")
 local RomText = require("src.core.game3.rom_text")
 
-local EasyChat = {}
+local EasyChat = { isMenu = true }
 
 EasyChat.openFlag = false
 EasyChat._state = nil
@@ -50,6 +50,15 @@ local FOOTER_X = 32
 -- src/easy_chat_3.c:2314
 function EasyChat.footerLabels()
   local out, xs = {}, { 0 }
+  if not RomText.has("gText_DelAllCancelOk") then
+    -- pokeemerald/src/easy_chat.c:1201
+    local offsets = { 16, 111, 196 }
+    for i, key in ipairs({ "gText_DelAll", "gText_Cancel5", "gText_Ok2" }) do
+      out[i] = RomText.plain(key)
+      xs[i] = 8 + offsets[i] - FOOTER_X
+    end
+    return out, xs
+  end
   for _, seg in ipairs(RomText.ir("gText_DelAllCancelOk")) do
     if seg.t == "text" then
       out[#out + 1] = Strings(seg.s)
@@ -109,10 +118,59 @@ local function unlocked_words(gid, dex)
   return out
 end
 
+-- pokeemerald/src/easy_chat.c:5806
+local function rse_group_words(gid, sess, Town)
+  local g = EasyChatText.group(gid)
+  if not (g and g.words) then return nil end
+  local G = Town.EC_GROUP
+  local out = {}
+  for k, v in pairs(g) do out[k] = v end
+  out.words = {}
+  if gid == G.POKEMON or gid == G.POKEMON_NATIONAL or gid == G.MOVE_1 or gid == G.MOVE_2 then
+    local Dex = require("src.core.game3.dex")
+    for _, w in ipairs(g.words) do
+      if gid ~= G.POKEMON or (sess.dex and Dex.isSeen(sess.dex, w.value)) then out.words[#out.words + 1] = w end
+    end
+  else
+    -- pokeemerald/src/easy_chat.c:5775
+    for _, w in ipairs(g.words) do
+      local idx = tonumber(w.alphabeticalOrder) or 0
+      local entry = g.words[idx + 1]
+      local on
+      if gid == G.TRENDY_SAYING then
+        on = require("src.core.game3.rse.old_man").isTrendySayingUnlocked(idx, sess)
+      else
+        on = entry and entry.enabled ~= false
+      end
+      if entry and on then out.words[#out.words + 1] = entry end
+    end
+  end
+  return out
+end
+
+-- pokeemerald/src/easy_chat.c:5613
+local function rse_populate_groups(session)
+  local Town = require("src.core.game3.rse.town_common")
+  local G = Town.EC_GROUP
+  local ids = {}
+  if Town.numWordsInGroup(G.POKEMON, session) > 0 then ids[#ids + 1] = G.POKEMON end
+  for gid = G.TRAINER, G.ADJECTIVES do ids[#ids + 1] = gid end
+  for _, gid in ipairs({ G.EVENTS, G.MOVE_1, G.MOVE_2, G.TRENDY_SAYING, G.POKEMON_NATIONAL }) do
+    if Town.groupUnlocked(gid, session) then ids[#ids + 1] = gid end
+  end
+  local list = {}
+  for _, gid in ipairs(ids) do
+    local g = rse_group_words(gid, session, Town)
+    if g then list[#list + 1] = g end
+  end
+  return list
+end
+
 -- pokefirered/src/easy_chat.c:500 PopulateECGroups
 function EasyChat.populateGroups(session)
   local flag
   session, flag = session_state(session)
+  if require("src.core.game3.profile").family(session) == "rse" then return rse_populate_groups(session) end
   local Dex = require("src.core.game3.dex")
   local PokedexData = require("src.core.game3.pokedex_data")
   local dex = session.dex
@@ -133,27 +191,62 @@ function EasyChat.populateGroups(session)
   return list
 end
 
+local templatePack
+
+-- pokeemerald/src/easy_chat.c:428
+local function rse_template(session, chatType)
+  if require("src.core.game3.profile").family(session) ~= "rse" then return nil end
+  if templatePack == nil then
+    local src = require("src.core.game3.dataset").cache():read(EasyChatText.FILE)
+    local chunk = src and load(src, "@" .. EasyChatText.FILE, "t", {})
+    templatePack = chunk and chunk() or false
+  end
+  if not (templatePack and templatePack.templates) then return nil end
+  for _, t in ipairs(templatePack.templates) do
+    if t.type == chatType then return t, templatePack.frames[t.frameId] end
+  end
+  return nil
+end
+EasyChat.rseTemplate = rse_template
+
+-- pokeemerald/src/easy_chat.c:345
+local FRAMEID_MAIL, FRAMEID_QUIZ_QUESTION, FRAMEID_QUIZ_SET_QUESTION = 2, 7, 8
+
 function EasyChat.open(opts)
   opts = opts or {}
+  local tmpl, frame = rse_template(opts.session, tonumber(opts.type) or 0)
+  local cols, rows = 2, 2
+  if tmpl then cols, rows = tmpl.numColumns, tmpl.numRows end
+  local count = cols * rows
+  if tmpl and (tmpl.frameId == FRAMEID_MAIL or tmpl.frameId == FRAMEID_QUIZ_QUESTION
+    or tmpl.frameId == FRAMEID_QUIZ_SET_QUESTION) then
+    -- pokeemerald/src/easy_chat.c:4108
+    count = cols * rows - 1
+  end
   local okF, Fade = pcall(require, "src.ui.game3.fade")
   if okF and Fade and Fade.clear then
     Fade.clear()
   end
 
   local initialWords = {}
-  local srcWords = opts.words or EasyChatText.DEFAULT_PROFILE
-  for i = 1, 4 do
-    initialWords[i] = tonumber(srcWords[i]) or EasyChatText.DEFAULT_PROFILE[i] or EasyChatText.EC_WORD_UNDEFINED
+  local srcWords = opts.words or (tmpl and {} or EasyChatText.DEFAULT_PROFILE)
+  for i = 1, count do
+    initialWords[i] = tonumber(srcWords[i]) or (not tmpl and EasyChatText.DEFAULT_PROFILE[i]) or EasyChatText.EC_WORD_UNDEFINED
   end
 
   local groupList = EasyChat.populateGroups(opts.session)
 
-  local keys = SCREEN_TEXT[opts.type] or SCREEN_TEXT[0]
-  local title = RomText.plain(keys[1])
-  local instr1 = RomText.plain(keys[2])
-  local instr2 = RomText.plain(keys[3])
-  local confirm1 = RomText.plain(keys[4])
-  local confirm2 = RomText.plain(keys[5])
+  local title, instr1, instr2, confirm1, confirm2
+  if tmpl then
+    title, instr1, instr2, confirm1, confirm2 = tmpl.title, tmpl.instructions1, tmpl.instructions2, tmpl.confirm1, tmpl.confirm2
+  else
+    local keys = SCREEN_TEXT[opts.type] or SCREEN_TEXT[0]
+    title = RomText.plain(keys[1])
+    instr1 = RomText.plain(keys[2])
+    instr2 = RomText.plain(keys[3])
+    confirm1 = RomText.plain(keys[4])
+    confirm2 = RomText.plain(keys[5])
+  end
 
   local st = {
     type = opts.type or 0,
@@ -163,7 +256,11 @@ function EasyChat.open(opts)
     confirm1 = confirm1,
     confirm2 = confirm2,
     words = initialWords,
-    origWords = { initialWords[1], initialWords[2], initialWords[3], initialWords[4] },
+    origWords = { unpack(initialWords, 1, count) },
+    cols = cols,
+    rows = rows,
+    count = count,
+    frame = frame,
     selectedSlot = 1,
     mode = "SLOT", -- "SLOT", "FOOTER", "GROUP", "WORD", "CONFIRM", "CANCEL_CONFIRM", "DEL_ALL_CONFIRM"
     footerIdx = 3, -- 1 = DEL ALL, 2 = CANCEL, 3 = OK
@@ -230,7 +327,7 @@ function EasyChat.handleInput(inp)
         end
       elseif st.mode == "DEL_ALL_CONFIRM" then
         if st.confirmChoice == 1 then
-          for i = 1, 4 do st.words[i] = EasyChatText.EC_WORD_UNDEFINED end
+          for i = 1, st.count do st.words[i] = EasyChatText.EC_WORD_UNDEFINED end
         end
         st.mode = "SLOT"
       end
@@ -251,28 +348,29 @@ function EasyChat.handleInput(inp)
 
   -- Slot Navigation
   if st.mode == "SLOT" then
+    local col = (st.selectedSlot - 1) % st.cols
     if inp:wasPressed("left") then
-      if st.selectedSlot % 2 == 0 then
+      if col > 0 then
         st.selectedSlot = st.selectedSlot - 1
         play_se(5)
       end
     elseif inp:wasPressed("right") then
-      if st.selectedSlot % 2 == 1 then
+      if col < st.cols - 1 and st.selectedSlot < st.count then
         st.selectedSlot = st.selectedSlot + 1
         play_se(5)
       end
     elseif inp:wasPressed("up") then
-      if st.selectedSlot > 2 then
-        st.selectedSlot = st.selectedSlot - 2
+      if st.selectedSlot > st.cols then
+        st.selectedSlot = st.selectedSlot - st.cols
         play_se(5)
       end
     elseif inp:wasPressed("down") then
-      if st.selectedSlot <= 2 then
-        st.selectedSlot = st.selectedSlot + 2
+      if st.selectedSlot + st.cols <= st.count then
+        st.selectedSlot = st.selectedSlot + st.cols
         play_se(5)
       else
         st.mode = "FOOTER"
-        st.footerIdx = (st.selectedSlot == 3) and 1 or 3
+        st.footerIdx = (col == 0) and 1 or 3
         play_se(5)
       end
     elseif inp:wasPressed("a") then
@@ -298,7 +396,8 @@ function EasyChat.handleInput(inp)
       end
     elseif inp:wasPressed("up") then
       st.mode = "SLOT"
-      st.selectedSlot = (st.footerIdx <= 1) and 3 or 4
+      local lastRow = st.count - (st.count - 1) % st.cols
+      st.selectedSlot = (st.footerIdx <= 1) and lastRow or math.min(lastRow + 1, st.count)
       play_se(5)
     elseif inp:wasPressed("a") then
       play_se(5)
@@ -421,7 +520,7 @@ function EasyChat.handleInput(inp)
         st.words[st.selectedSlot] = wEntry.id
         play_se(5)
         -- Advance slot to next
-        st.selectedSlot = (st.selectedSlot % 4) + 1
+        st.selectedSlot = (st.selectedSlot % st.count) + 1
         st.mode = "SLOT"
       end
     elseif inp:wasPressed("b") then
@@ -550,6 +649,10 @@ function EasyChat.draw()
 
   -- 3. Top Phrase Frame Box (pret sPhraseFrameDimensions[0]: tile x=2, y=3, w=26, h=6 -> pixel x=16, y=24, w=208, h=48)
   local pX, pY, pW, pH = 16, 24, 208, 48
+  if st.frame then
+    local f = st.frame
+    pX, pY, pW, pH = (f.left - 1) * 8, (f.top - 1) * 8, (f.width + 2) * 8, (f.height + 2) * 8
+  end
   drawOrangeFrame(pX, pY, pW, pH)
 
   -- Draw the 4 slots inside the phrase frame (pret easy_chat_3.c: PrintECFields & ECInterfaceCmd_02)
@@ -564,7 +667,18 @@ function EasyChat.draw()
     { x = 136, y = 50, cursorX = 126, cursorY = 53 },
   }
 
-  for i = 1, 4 do
+  if st.frame then
+    -- pokeemerald/src/easy_chat.c:4051
+    local f = st.frame
+    slotPositions = {}
+    for i = 1, st.count do
+      local c, r = (i - 1) % st.cols, math.floor((i - 1) / st.cols)
+      local x = f.left * 8 + 17 + c * 104
+      local y = f.top * 8 + 1 + r * 16
+      slotPositions[i] = { x = x, y = y, cursorX = x - 10, cursorY = y + 3 }
+    end
+  end
+  for i = 1, st.count do
     local s = slotPositions[i]
     local wid = st.words[i]
     local isSelected = (st.mode == "SLOT" and st.selectedSlot == i)
@@ -580,7 +694,7 @@ function EasyChat.draw()
     else
       local wText = EasyChatText.word(wid)
       if wText and wText ~= "" then
-        FrlgFont.draw(wText, s.x, s.y, { maxWidth = slotWidth(i, s.x), colors = FrlgFont.COLOR.NORMAL })
+        FrlgFont.draw(wText, s.x, s.y, { maxWidth = st.frame and 96 or slotWidth(i, s.x), colors = FrlgFont.COLOR.NORMAL })
       else
         FrlgFont.draw("_______", s.x, s.y, { colors = FrlgFont.COLOR.RED })
       end

@@ -21,7 +21,8 @@ Records.BOARD_WINDOW_ID = 1
 -- pokefirered/include/global.h:238
 Records.LINK_ROWS = 5
 -- pokefirered/include/constants/songs.h:9
-local SE_SELECT = 5
+local SE = require("src.core.game3.se_ids")
+local CacheBlob = require("src.import.CacheBlob")
 
 Records.CACHE_BG = "data/generated/gba/trainer_tower/records_bg.rgba"
 Records.CACHE_MANIFEST = "data/generated/gba/trainer_tower/manifest.lua"
@@ -78,12 +79,12 @@ local function read_bytes(rel)
     if okR and type(d) == "string" and #d > 0 then return d end
   end
   if type(love) == "table" and love.filesystem and love.filesystem.read then
-    local okR, d = pcall(love.filesystem.read, rel)
+    local okR, d = pcall(CacheBlob.readFs, rel)
     if okR and type(d) == "string" and #d > 0 then return d end
   end
   local f = io.open(rel, "rb")
   if f then
-    local d = f:read("*a")
+    local d = CacheBlob.decode(rel, f:read("*a"))
     f:close()
     if type(d) == "string" and #d > 0 then return d end
   end
@@ -315,7 +316,7 @@ function Records.handleInput(input)
   if not Records.open or not input then return end
   if Records._phase ~= "wait" or Records._kind == "board" then return end
   if input:wasPressed("a") or input:wasPressed("b") then
-    se(SE_SELECT)
+    se(SE.SE_SELECT)
     Records.close()
   end
 end

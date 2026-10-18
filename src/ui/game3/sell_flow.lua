@@ -10,12 +10,20 @@ local Trig = require("src.core.game3.trig")
 local SellFlow = {}
 SellFlow.__index = SellFlow
 
-local SE_SELECT = 5
 -- include/constants/songs.h:254
-local SE_SHOP = 248
+local SE = require("src.core.game3.se_ids")
 
 local function se(id)
   pcall(function() require("src.core.game3.audio").playSe(id) end)
+end
+
+local function is_rse(session)
+  return require("src.core.game3.profile").family(session) == "rse"
+end
+
+local function box(self, key, ctx)
+  if self.nativeShop then return self.nativeShop.box(key, ctx) end
+  return RomText.box(key, ctx)
 end
 
 local function price_of(itemId)
@@ -41,6 +49,9 @@ function SellFlow.start(opts)
   self.itemId = opts.itemId
   self.name = ItemsData.displayName(opts.itemId)
   self.session = opts.session
+  local ui = require("src.core.game3.profile").forSession(self.session).ui
+  local shop = ui and ui.shopMenu
+  self.nativeShop = type(shop) == "string" and require(shop) or shop
   self.bag = opts.bag
   self.onDone = opts.onDone
   self.qty = 1
@@ -50,20 +61,34 @@ function SellFlow.start(opts)
   self.colors = dialog_colors()
   if price_of(opts.itemId) == 0 then
     self.state = "cant"
-    self.text = RomText.box("gText_OhNoICantBuyThat", { stringVars = { self.name } })
+    if is_rse(self.session) then
+      self.text = box(self, "gText_CantBuyKeyItem", { stringVars = { [2] = self.name } })
+    else
+      self.text = RomText.box("gText_OhNoICantBuyThat", { stringVars = { self.name } })
+    end
     self.textColors = self.colors
     return self
   end
   local owned = math.max(1, tonumber(opts.owned) or 1)
-  self.owned = math.min(99, owned)
-  if owned == 1 then
+  self.owned = math.min(self:rseBerry() and 999 or 99, owned)
+  if owned == 1 and not (self.nativeShop and self.nativeShop.alwaysQuantity) then
     self:ask()
   else
     self.state = "qty"
-    self.text = RomText.box("gText_HowManyWouldYouLikeToSell", { stringVars = { self.name } })
+    if is_rse(self.session) then
+      self.text = box(self, "gText_HowManyToSell", { stringVars = { [2] = self.name } })
+    else
+      self.text = RomText.box("gText_HowManyWouldYouLikeToSell", { stringVars = { self.name } })
+    end
     self.textColors = self.colors
   end
   return self
+end
+
+function SellFlow:rseBerry()
+  if not is_rse(self.session) then return false end
+  local ok, BagMenu = pcall(require, "src.ui.game3.bag_menu")
+  return ok and BagMenu.currentPocket and BagMenu.currentPocket() == "BERRY_POUCH" or false
 end
 
 function SellFlow:total()
@@ -74,25 +99,36 @@ end
 function SellFlow:ask()
   self.state = "confirm"
   self.yesNo = 1
-  self.text = RomText.box("gText_ICanPayThisMuch_WouldThatBeOkay",
-    { stringVars = { [3] = tostring(self:total()) } })
+  if is_rse(self.session) then
+    self.text = box(self, "gText_ICanPayVar1", { stringVars = { tostring(self:total()) } })
+  else
+    self.text = RomText.box("gText_ICanPayThisMuch_WouldThatBeOkay",
+      { stringVars = { [3] = tostring(self:total()) } })
+  end
   self.textColors = self.colors
 end
 
 -- src/item_menu.c:1917 Task_SellItem_Yes, :1928 Task_FinalizeSaleToShop
 function SellFlow:commit()
   local earn = self:total()
-  self.text = RomText.box("gText_TurnedOverItemsWorthYen",
-    { stringVars = { self.name, [3] = tostring(earn) } })
+  if is_rse(self.session) then
+    self.text = box(self, "gText_TurnedOverVar1ForVar2", { stringVars = { tostring(earn), self.name } })
+  else
+    self.text = RomText.box("gText_TurnedOverItemsWorthYen",
+      { stringVars = { self.name, [3] = tostring(earn) } })
+  end
   self.textColors = FrlgFont.COLOR.NORMAL
   self.state = "done"
-  se(SE_SHOP)
+  se(SE.SE_SHOP)
   if self.bag and Bag.remove(self.bag, self.itemId, self.qty) and self.session then
     self.session.money = math.max(0, math.floor(tonumber(self.session.money) or 0)) + earn
-    local Q = require("src.core.game3.quest_log_recorder")
-    local rt = package.loaded["src.core.game3.runtime"]
-    Q.event(self.session, "SoldItemsIncludingItem",
-      { D0 = Q.location(rt and rt._game, self.session), D1 = self.name, D2 = earn })
+    if self.nativeShop and self.nativeShop.saleMoney then self.session.money = self.nativeShop.saleMoney(self.session.money) end
+    if not self.nativeShop or self.nativeShop.questLog ~= false then
+      local Q = require("src.core.game3.quest_log_recorder")
+      local rt = package.loaded["src.core.game3.runtime"]
+      Q.event(self.session, "SoldItemsIncludingItem",
+        { D0 = Q.location(rt and rt._game, self.session), D1 = self.name, D2 = earn })
+    end
   end
   self.sold = true
 end
@@ -129,35 +165,36 @@ function SellFlow:handleInput(input)
   self.k = self.k + 1
   local st = self.state
   if st == "cant" or st == "done" then
-    if input:wasPressed("a") or input:wasPressed("b") then
-      se(SE_SELECT)
+    if input:wasPressed("a") or (input:wasPressed("b") and
+      not (st == "done" and self.nativeShop and self.nativeShop.doneCancel == false)) then
+      se(SE.SE_SELECT)
       self:finish()
     end
   elseif st == "qty" then
     local q, changed = adjust(self.qty, self.owned, input)
     if changed then
       self.qty = q
-      se(SE_SELECT)
+      se(SE.SE_SELECT)
     elseif input:wasPressed("a") then
-      se(SE_SELECT)
+      se(SE.SE_SELECT)
       self:ask()
     elseif input:wasPressed("b") then
-      se(SE_SELECT)
+      se(SE.SE_SELECT)
       self:finish()
     end
   elseif st == "confirm" then
     -- src/menu_helpers.c:47 Task_CallYesOrNoCallback
     if input:wasPressed("up") and self.yesNo ~= 1 then
       self.yesNo = 1
-      se(SE_SELECT)
+      se(SE.SE_SELECT)
     elseif input:wasPressed("down") and self.yesNo ~= 2 then
       self.yesNo = 2
-      se(SE_SELECT)
+      se(SE.SE_SELECT)
     elseif input:wasPressed("a") then
-      se(SE_SELECT)
+      se(SE.SE_SELECT)
       if self.yesNo == 1 then self:commit() else self:finish() end
     elseif input:wasPressed("b") then
-      se(SE_SELECT)
+      se(SE.SE_SELECT)
       self:finish()
     end
   end
@@ -185,9 +222,42 @@ local function draw_money_box(amount)
   Window.printPx(s, 8 + 64 - w, 8 + 12, { small = true })
 end
 
+-- pokeemerald/src/item_menu.c:2120 InitSellHowManyInput, :1201 PrintItemSoldAmount
+function SellFlow:drawRse()
+  if self.nativeShop and self.nativeShop.drawSell then return self.nativeShop.drawSell(self) end
+  local st = self.state
+  local Shop = require("src.ui.game3.rse.shop_menu")
+  local Chrome = require("src.ui.game3.chrome")
+  if st ~= "cant" then
+    Shop.drawMoneyBox(tonumber(self.session and self.session.money) or 0)
+  end
+  Window.dialogueFrame()
+  local w = Chrome.DLG_W * 8
+  FrlgFont.draw(FrlgFont.wrap(self.text, w), Chrome.DLG_LEFT * 8, Chrome.DLG_TOP * 8 + 1,
+    { maxWidth = w, colors = FrlgFont.COLOR.NORMAL })
+  if st == "qty" then
+    local q = Shop.WIN.qty
+    Window.stdFrame(q)
+    Window.fill(q, 1, 1, 1, 1)
+    local digits = self:rseBerry() and 3 or 2
+    Window.printPx(RomText.plain("gText_xVar1", { stringVars = { string.format("%0" .. digits .. "d", self.qty) } }),
+      q.left * 8, q.top * 8 + 1)
+    Shop.drawMoneyAmount(nil, q, self:total())
+  elseif st == "confirm" then
+    local yn = Shop.WIN.yesno
+    Window.stdFrame(yn)
+    Window.fill(yn, 1, 1, 1, 1)
+    local pitch = Window.optionHeight()
+    Window.printPx(RomText.plain("gText_Yes"), yn.left * 8 + 8, yn.top * 8 + 1)
+    Window.printPx(RomText.plain("gText_No"), yn.left * 8 + 8, yn.top * 8 + 1 + pitch)
+    Window.cursorPx(yn.left * 8, yn.top * 8 + 1 + (self.yesNo - 1) * pitch)
+  end
+end
+
 function SellFlow:draw()
   local st = self.state
   if not st then return end
+  if is_rse(self.session) then return self:drawRse() end
   local Chrome = require("src.ui.game3.chrome")
   if st ~= "cant" then
     draw_money_box(tonumber(self.session and self.session.money) or 0)

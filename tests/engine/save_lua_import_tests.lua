@@ -123,9 +123,11 @@ for _, version in ipairs({ "firered", "leafgreen" }) do
     check(info == nil, version .. " " .. shape[1] .. " never asks to confirm")
     eq(#SaveData.listSlots(version), 1, version .. " " .. shape[1] .. " creates one slot")
     eq(SaveData.activeSlot(version), slotId, version .. " " .. shape[1] .. " is made active")
-    eq(files[("saves/%s/%s.cart"):format(version, tostring(slotId))], shape[2],
-      version .. " " .. shape[1] .. " keeps the cart image beside the slot")
+    eq(files[("saves/%s/%s.cart"):format(version, tostring(slotId))], nil,
+      version .. " " .. shape[1] .. " writes no sidecar cart image")
     local back = SaveSerializer.decode(SaveData.readSlotSource(version, slotId) or "")
+    check(back and back.modData and type(back.modData.cartImage) == "string",
+      version .. " " .. shape[1] .. " keeps the cart image inside the slot")
     eq(back and back.version, version, version .. " " .. shape[1] .. " slot is tagged " .. version)
     eq(back and back.money, 123456, version .. " " .. shape[1] .. " money")
     eq(back and back.party and #back.party, 4, version .. " " .. shape[1] .. " party")
@@ -162,6 +164,8 @@ for _, version in ipairs({ "firered", "leafgreen" }) do
   local ok, slotId = SaveFileIO.importToSlot(writeTmp(files, "picked_save.sav", FR_CART), version)
   eq(ok, true, version .. " cart imported for the stale-template check")
   local cartFile = ("saves/%s/%s.cart"):format(version, tostring(slotId))
+  eq(files[cartFile], nil, version .. " the import writes no sidecar")
+  files[cartFile] = FR_CART
   local same = SaveSerializer.decode(SaveData.readSlotSource(version, slotId))
   check(SaveData.save(same) ~= false, version .. " the imported player saves")
   check(files[cartFile] ~= nil, version .. " the imported player's cart stays")
@@ -233,8 +237,26 @@ for _, version in ipairs(GameVersion.ORDER) do
   check(slotId ~= nil and slotId ~= src, version .. " the import is a new slot")
   eq(SaveData.activeSlot(version), slotId, version .. " the imported slot is made active")
   local back = SaveSerializer.decode(SaveData.readSlotSource(version, slotId) or "")
+  local newId = back and back.meta and back.meta.playthroughId
+  check(type(newId) == "string" and newId ~= "" and newId ~= original.meta.playthroughId,
+    version .. " an import beside its source gets its own playthroughId")
+  eq(SaveData.loadOptions().playthroughIds[version][slotId], newId,
+    version .. " and the new slot is mapped to it")
+  if back then back.meta.playthroughId = original.meta.playthroughId end
   eq(back and SaveSerializer.encode(back), SaveSerializer.encode(original),
-    version .. " the imported slot matches the exported save")
+    version .. " the imported slot matches the exported save apart from its id")
+  local srcBack = SaveSerializer.decode(SaveData.readSlotSource(version, src) or "")
+  eq(srcBack and SaveSerializer.encode(srcBack), SaveSerializer.encode(original),
+    version .. " the source slot is untouched")
+
+  local body = files[rel]
+  local files2 = fresh()
+  local path = writeTmp(files2, "picked_save.sav", body)
+  local again, slot2 = SaveFileIO.importToSlot(path, version)
+  eq(again, true, version .. " the export imports on a fresh install")
+  local restored = SaveSerializer.decode(SaveData.readSlotSource(version, slot2) or "")
+  eq(restored and SaveSerializer.encode(restored), SaveSerializer.encode(original),
+    version .. " a fresh-install restore keeps the save byte-identical, id included")
 end
 
 local mismatches = {

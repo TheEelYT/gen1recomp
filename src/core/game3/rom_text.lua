@@ -9,18 +9,61 @@ local function bundle()
   return require("src.core.game3.scripting.space").ensureBundle()
 end
 
+local function alias(key)
+  local ok, row = pcall(function() return require("src.core.game3.profile").forSession() end)
+  local aliases = ok and type(row) == "table" and type(row.ui) == "table" and row.ui.textAliases or nil
+  return aliases and aliases[key] or nil
+end
+
+local function cachedText(b, key)
+  local text = b and b.text
+  if not text then return nil end
+  if text[key] ~= nil then return text[key] end
+  local to = alias(key)
+  if type(to) == "string" then return text[to] end
+  if type(to) == "table" and to.key and to.line then
+    local source = text[to.key]
+    if not source then return nil end
+    local out, header, line, leading, found = {}, {}, 1, true, false
+    for _, seg in ipairs(source) do
+      if leading and seg.t == "ext" then header[#header + 1] = seg
+      else leading = false end
+      if seg.t == "nl" then
+        line = line + 1
+        if line == to.line then
+          for _, control in ipairs(header) do out[#out + 1] = control end
+        end
+      elseif line == to.line then
+        out[#out + 1] = seg
+        found = true
+      end
+    end
+    return found and out or nil
+  end
+end
+
 function RomText.ir(key)
   local over = RomText.overrides[key]
   if over ~= nil then return over end
   local b = bundle()
-  local ir = b and b.text and b.text[key]
+  local ir = cachedText(b, key)
   return assert(ir, "ROM text " .. tostring(key) .. " is not in the script cache")
 end
 
 function RomText.has(key)
   if RomText.overrides[key] ~= nil then return true end
   local b = bundle()
-  return (b and b.text and b.text[key]) ~= nil
+  return cachedText(b, key) ~= nil
+end
+
+function RomText.irOr(key, fallback)
+  if key ~= nil and RomText.has(key) then return RomText.ir(key) end
+  return fallback
+end
+
+function RomText.refIr(ref)
+  if type(ref) ~= "table" then return nil end
+  return RomText.irOr(ref.name, RomText.irOr(ref.key, ref.ir))
 end
 
 local SOURCE_FORMS = {}
@@ -89,7 +132,37 @@ function RomText.box(key, ctx)
   return TextIR.toTextBox(RomText.translate(RomText.ir(key), ctx, key), ctx)
 end
 
+-- Segment types whose expansion reads nothing but the segment itself.  An IR
+-- made only of these expands to the same plain string every time.
+local PURE_SEG = { text = true, tag = true, nl = true, para = true, scroll = true, eos = true, ext = true }
+
+-- plain() results for pure IRs, keyed by the IR table itself (false = not
+-- pure).  Keying on the IR follows overrides, profile aliases and bundle
+-- reloads for free: each resolves to a different table.
+local plainCache = setmetatable({}, { __mode = "k" })
+
+local function pure_ir(ir)
+  if type(ir) ~= "table" then return false end
+  for i = 1, #ir do
+    local seg = ir[i]
+    if type(seg) ~= "table" or not PURE_SEG[seg.t] then return false end
+  end
+  return true
+end
+
 function RomText.plain(key, ctx)
+  if ctx == nil and not Strings.active() then
+    local ir = RomText.ir(key)
+    local hit = plainCache[ir]
+    if hit then return hit end
+    if hit == nil then
+      local pure = pure_ir(ir)
+      local out = TextIR.toPlain(ir, {})
+      plainCache[ir] = pure and out or false
+      return out
+    end
+    return TextIR.toPlain(ir, {})
+  end
   ctx = ctx or {}
   return TextIR.toPlain(RomText.translate(RomText.ir(key), ctx, key), ctx)
 end

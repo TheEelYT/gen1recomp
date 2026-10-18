@@ -1,3 +1,4 @@
+local CacheBlob = require("src.import.CacheBlob")
 local Tower = {}
 
 -- pokefirered/include/constants/trainer_tower.h:30
@@ -48,7 +49,7 @@ Tower.PRIZE_ITEMS = {
 -- pokefirered/include/constants/event_objects.h:24
 Tower.GFX_YOUNGSTER = 18
 -- pokefirered/include/constants/songs.h:293
-Tower.MUS_ENCOUNTER_BOY = 285
+require("src.core.game3.song_fields")(Tower)
 
 -- pokefirered/include/constants/layouts.h:286
 Tower.LAYOUT_LOBBY = 297
@@ -152,12 +153,12 @@ local function read_bytes(rel)
     if okR and type(d) == "string" and #d > 0 then return d end
   end
   if type(love) == "table" and love.filesystem and love.filesystem.read then
-    local okR, d = pcall(love.filesystem.read, rel)
+    local okR, d = pcall(CacheBlob.readFs, rel)
     if okR and type(d) == "string" and #d > 0 then return d end
   end
   local f = io.open(rel, "rb")
   if f then
-    local d = f:read("*a")
+    local d = CacheBlob.decode(rel, f:read("*a"))
     f:close()
     if type(d) == "string" and #d > 0 then return d end
   end

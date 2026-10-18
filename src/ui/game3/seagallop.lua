@@ -6,8 +6,8 @@ local Fade = require("src.ui.game3.fade")
 local Seagallop = {}
 
 local W, H = 240, 160
-local SE_SHIP = 19 -- pokefirered/include/constants/songs.h:23
-local SE_EXIT = 9  -- pokefirered/include/constants/songs.h:13
+local SE = require("src.core.game3.se_ids") -- pokefirered/include/constants/songs.h:23
+local CacheBlob = require("src.import.CacheBlob")
 local CROSSING_FRAMES = 140
 local MUSIC_FADE_FRAMES = 64
 
@@ -55,10 +55,10 @@ local function read_bytes(rel)
     if type(d) == "string" and #d > 0 then return d end
   end
   if love and love.filesystem and love.filesystem.read then
-    local d = love.filesystem.read(rel)
+    local d = CacheBlob.readFs(rel)
     if type(d) == "string" and #d > 0 then return d end
     local alt = "data/generated/gba/" .. (rel:gsub("^data/generated/gba/", ""))
-    d = love.filesystem.read(alt)
+    d = CacheBlob.readFs(alt)
     if type(d) == "string" and #d > 0 then return d end
   end
   local home = os.getenv("HOME") or ""
@@ -72,7 +72,7 @@ local function read_bytes(rel)
   for _, p in ipairs(candidates) do
     local f = io.open(p, "rb")
     if f then
-      local d = f:read("*a")
+      local d = CacheBlob.decode(p, f:read("*a"))
       f:close()
       if d and #d > 0 then return d end
     end
@@ -124,6 +124,10 @@ local function loadAssets()
 end
 
 function Seagallop.start(originId, destId, onWarp, onDone)
+  do
+    local StayMessage = package.loaded["src.ui.game3.message"]
+    if StayMessage and StayMessage.closeStay then StayMessage.closeStay() end
+  end
   local dir = Seagallop.directionOfTravel(originId, destId)
   local run = {
     origin = originId,
@@ -142,7 +146,7 @@ function Seagallop.start(originId, destId, onWarp, onDone)
 
   local okA, Audio = pcall(require, "src.core.game3.audio")
   if okA and Audio and Audio.playSe then
-    pcall(Audio.playSe, SE_SHIP)
+    pcall(Audio.playSe, SE.SE_SHIP)
   end
 
   Seagallop._run = run
@@ -227,7 +231,7 @@ local function stepTick(run)
   run.state = "done"
   Seagallop.stop()
   if Audio and Audio.playSe then
-    pcall(Audio.playSe, SE_EXIT)
+    pcall(Audio.playSe, SE.SE_EXIT)
   end
   if run.onWarp then
     run.onWarp()

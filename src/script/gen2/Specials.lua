@@ -490,29 +490,36 @@ H.CheckMagikarpLength = function(vm)
     Specials.magikarpLength(mon.otId, Specials.dvWord(mon.dvs))
   vm:setStringBuffer(magikarpLengthText(feet, inches))
   local record = save(vm)
-  local best = record and record.magikarpRecord
-  local total = (feet or 0) * 12 + (inches or 0)
-  local bestTotal = best and ((best.feet or 0) * 12 + (best.inches or 0)) or 0
-  if total <= bestTotal then
+  local best = Specials.magikarpBest(record)
+  -- pokecrystal engine/events/magikarp.asm:39
+  if feet < best.feet or (feet == best.feet and inches <= best.inches) then
     answer(vm, 2)
     return
   end
   if record then
     record.magikarpRecord = {
       feet = feet, inches = inches,
-      name = record.player and record.player.name,
+      -- pokecrystal engine/events/magikarp.asm:54
+      name = mon.ot or (record.player and record.player.name),
     }
   end
   answer(vm, 3)
 end
 
--- MagikarpHouseSign: the record on the wall, in the string buffer for the
--- writetext that follows.  A house nobody has beaten yet reads 0'00", which is
--- what InitializeMagikarpHouse leaves behind.
-H.MagikarpHouseSign = function(vm)
-  local record = save(vm)
+-- pokecrystal engine/menus/intro_menu.asm:267
+Specials.MAGIKARP_DEFAULT_RECORD = { feet = 3, inches = 6, name = "RALPH" }
+
+function Specials.magikarpBest(record)
   local best = record and record.magikarpRecord
-  vm:setStringBuffer(magikarpLengthText(best and best.feet, best and best.inches))
+  local d = Specials.MAGIKARP_DEFAULT_RECORD
+  if not best then return { feet = d.feet, inches = d.inches, name = d.name } end
+  return { feet = best.feet or 0, inches = best.inches or 0, name = best.name or d.name }
+end
+
+-- pokecrystal engine/events/magikarp.asm:302
+H.MagikarpHouseSign = function(vm)
+  local best = Specials.magikarpBest(save(vm))
+  vm:setStringBuffer(magikarpLengthText(best.feet, best.inches))
 end
 
 -- ---- 27-29 the Pokecenter -------------------------------------------------
@@ -1343,16 +1350,10 @@ H.SelectRandomBugContestContestants = function(vm)
   if vm.events and vm.onFlagsChanged then vm.onFlagsChanged() end
 end
 
--- ActivateFishingSwarm: wFishingSwarmFlag takes wScriptVar, and the routine
--- FALLS THROUGH into SetSwarmFlag -- so the map pair and DAILYFLAGS1_SWARM are
--- both live afterwards.  A port that set only the flag would leave the Qwilfish
--- swarm on for good.
 H.ActivateFishingSwarm = function(vm)
   local record = save(vm)
   if not record then return end
-  record.dailyFlags = record.dailyFlags or {}
-  record.dailyFlags.fishingSwarm = vm.scriptVar or 0
-  record.dailyFlags.swarm = true
+  Roamers.Swarm.setFishing(record, vm.scriptVar or 0)
 end
 
 -- ---- 74-77 gifts and health -----------------------------------------------
@@ -1626,7 +1627,7 @@ H.ResetLuckyNumberShowFlag = function(vm)
   timer.day = now.day
   local h = hooks(vm)
   if h.setEngineFlag then h.setEngineFlag("ENGINE_LUCKY_NUMBER_SHOW", nil) end
-  record.luckyNumber = Specials.random(0, 99999)
+  record.luckyNumber = Specials.random(0, 65535) -- pokecrystal engine/menus/intro_menu.asm:312
 end
 
 -- PrintTodaysLuckyNumber: five digits with leading zeros, into the buffer the
@@ -2588,7 +2589,7 @@ H.UnusedBattleTowerDummySpecial2 = function() end
 -- which ../pokecrystal/maps/Route45.asm:50 reads back through VAR_KENJI_BREAK.
 H.SampleKenjiBreakCountdown = function(vm)
   local h = hooks(vm)
-  if h.setKenjiBreak then h.setKenjiBreak(Specials.random(4) - 1 + 3) end
+  if h.setKenjiBreak then h.setKenjiBreak(Apricorns.sampleKenjiBreak(Specials.random)) end
 end
 
 --------------------------------------------------------------------------

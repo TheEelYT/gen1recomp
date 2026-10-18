@@ -7,6 +7,11 @@ TouchSkin.EXPORT_ROOT = "skins/_export"
 TouchSkin.GB_BUTTONS = {
   a = "a", b = "b", start = "start", select = "select",
   up = "up", down = "down", left = "left", right = "right",
+  l = "l", r = "r",
+  l1 = "l", r1 = "r",
+  l2 = "l", r2 = "r",
+  trigger_l = "l", trigger_r = "r",
+  shoulder_l = "l", shoulder_r = "r",
 }
 
 TouchSkin.HOTKEYS = {
@@ -30,6 +35,10 @@ local function trim(s)
 end
 
 local function unquote(s)
+  s = trim(s)
+  local quoted = s:match('^"([^"]*)"')
+  if quoted then return quoted end
+  s = s:gsub("%s*//.*$", ""):gsub("%s*#.*$", "")
   s = trim(s)
   local inner = s:match('^"(.*)"$')
   return inner or s
@@ -342,7 +351,7 @@ local function readFile(path)
     local ok, data = pcall(love.filesystem.read, path)
     if ok and data then return data end
   end
-  local handle = io.open(path, "rb")
+  local handle = require("src.core.SaveData").openNative(path, "rb")
   if not handle then return nil end
   local data = handle:read("*a")
   handle:close()
@@ -355,6 +364,10 @@ local function listDir(path)
     if ok and items then return items end
   end
   return {}
+end
+
+local function wfs()
+  return require("src.core.SaveData").persistenceFs(love.filesystem)
 end
 
 local function isDir(path)
@@ -733,7 +746,7 @@ function TouchSkin.list()
     end
   end
   if love and love.filesystem and love.filesystem.createDirectory then
-    pcall(love.filesystem.createDirectory, TouchSkin.USER_ROOT)
+    pcall(wfs().createDirectory, TouchSkin.USER_ROOT)
   end
   scan(TouchSkin.USER_ROOT, "user")
   scan(TouchSkin.BUNDLED_ROOT, "bundled")
@@ -756,19 +769,19 @@ function TouchSkin.installArchive(name, data)
   local id = TouchSkin.archiveId(name)
   if not id then return nil, "not a .zip or .deltaskin" end
 
-  pcall(love.filesystem.createDirectory, TouchSkin.USER_ROOT)
+  pcall(wfs().createDirectory, TouchSkin.USER_ROOT)
   local dest = TouchSkin.USER_ROOT .. "/" .. name
-  local ok, err = love.filesystem.write(dest, data)
+  local ok, err = wfs().write(dest, data)
   if not ok then return nil, tostring(err) end
 
   local entry = TouchSkin.find(id)
   if not entry then
-    love.filesystem.remove(dest)
+    wfs().remove(dest)
     return nil, "no skin.lua, .cfg or info.json inside " .. name
   end
   local skin = TouchSkin.load(entry.root, entry.id)
   if skin and require("src.core.DeltaSkin").needsConversion(skin) then
-    love.filesystem.remove(dest)
+    wfs().remove(dest)
     return nil, TouchSkin.PDF_ONLY_MESSAGE
   end
   return id, skin and skin.warnings or nil
@@ -798,7 +811,7 @@ function TouchSkin.remove(id)
         if not ok then return nil, err end
       end
     end
-    local ok, err = love.filesystem.remove(path)
+    local ok, err = wfs().remove(path)
     return ok and true or nil, err
   end
   return removeTree(entry.archive or (TouchSkin.USER_ROOT .. "/" .. entry.id))
@@ -827,10 +840,10 @@ local function writeArchive(entries, destPath)
   local absolute = destPath:sub(1, 1) == "/" or destPath:match("^%a:[/\\]") ~= nil
   if not absolute and love and love.filesystem and love.filesystem.createDirectory then
     local dir = destPath:match("^(.*)/[^/]+$")
-    if dir then pcall(love.filesystem.createDirectory, dir) end
+    if dir then pcall(wfs().createDirectory, dir) end
   end
   if not absolute and love and love.filesystem and love.filesystem.write then
-    local ok, err = love.filesystem.write(destPath, blob)
+    local ok, err = wfs().write(destPath, blob)
     if not ok then return nil, tostring(err) end
   else
     local handle = io.open(destPath, "wb")
@@ -1001,7 +1014,7 @@ end
 TouchSkin.BINDS = {
   "nul",
   "up", "down", "left", "right",
-  "a", "b", "start", "select",
+  "a", "b", "l", "r", "start", "select",
   "left|up", "right|up", "left|down", "right|down",
   "hold_fast_forward", "toggle_fast_forward", "reset", "menu_toggle",
   "overlay_next",
@@ -1130,9 +1143,9 @@ function TouchSkin.importImage(skin, name, data)
     local saved, err = TouchSkin.saveTo(skin, skin.id)
     if not saved then return nil, tostring(err) end
   end
-  pcall(love.filesystem.createDirectory, dest .. "/img")
+  pcall(wfs().createDirectory, dest .. "/img")
   local rel = "img/" .. name
-  local ok, err = love.filesystem.write(dest .. "/" .. rel, data)
+  local ok, err = wfs().write(dest .. "/" .. rel, data)
   if not ok then return nil, tostring(err) end
   return rel
 end
@@ -1162,25 +1175,25 @@ function TouchSkin.saveTo(skin, id)
     return nil, "no writable filesystem"
   end
   local dest = TouchSkin.USER_ROOT .. "/" .. id
-  pcall(love.filesystem.createDirectory, dest)
+  pcall(wfs().createDirectory, dest)
 
   local copied, failed = 0, {}
   for _, rel in ipairs(TouchSkin.assetPaths(skin)) do
     local target = dest .. "/" .. rel
     local dir = target:match("^(.*)/[^/]+$")
-    if dir then pcall(love.filesystem.createDirectory, dir) end
+    if dir then pcall(wfs().createDirectory, dir) end
     if skin.root ~= dest then
       local data = readFile(joinPath(skin.root, rel))
       if data then
-        if love.filesystem.write(target, data) then copied = copied + 1 end
+        if wfs().write(target, data) then copied = copied + 1 end
       else
         failed[#failed + 1] = rel
       end
     end
   end
 
-  local ok, err = love.filesystem.write(dest .. "/" .. TouchSkin.NATIVE_NAME,
-                                        TouchSkin.serialize(skin))
+  local ok, err = wfs().write(dest .. "/" .. TouchSkin.NATIVE_NAME,
+                              TouchSkin.serialize(skin))
   if not ok then return nil, tostring(err) end
   skin.id, skin.root, skin.format = id, dest, "native"
   return dest, failed, copied

@@ -7,7 +7,7 @@ local Version = {
   engine = "0.0.0-dev",   -- game/engine release (semver).  Repo default is the
                           -- "-dev" placeholder; CI stamps the real X.Y.Z into
                           -- the packed game.love only, never the working tree.
-  shell = 2,              -- native-shell contract this build implements
+  shell = 3,              -- native-shell contract this build implements
   payloadHost = "love",   -- native host family for in-place Lua payloads.
                           -- A payload must name the same family; this prevents
                           -- mounting code packaged for a different native host.
@@ -17,7 +17,7 @@ local Version = {
                           -- refuses to chainload a payload whose minShell
                           -- exceeds the shell it provides.
   modApi = 2,             -- mod API major (manifest `api`)
-  linkProtocol = 2,       -- link handshake wire version (Handshake.PROTOCOL)
+  linkProtocol = 3,       -- link handshake wire version (Handshake.PROTOCOL)
   saveFormat = 5,         -- save.meta.format
   cache = "rom-cache-v5", -- ROM import cache generation (RomImporter marker)
 }

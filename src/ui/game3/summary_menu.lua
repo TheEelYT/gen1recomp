@@ -16,8 +16,9 @@ local SummaryData = require("src.core.game3.summary_data")
 local Strings = require("src.core.Strings")
 local RomText = require("src.core.game3.rom_text")
 local ItemsData = require("src.core.game3.items_data")
+local Screens = require("src.ui.game3.screens")
 
-local SummaryMenu = {}
+local SummaryMenu = { isMenu = true }
 
 -- pokefirered/src/pokemon_summary_screen.c:2139
 function SummaryMenu.heldItemText(mon)
@@ -149,7 +150,15 @@ local function moves_for_mon(mon)
   end
 
   if SummaryMenu._mode == "select_move" and SummaryMenu._moveToLearn then
-    local newId = tonumber(SummaryMenu._moveToLearn) or SummaryMenu._moveToLearn
+    local newId = tonumber(SummaryMenu._moveToLearn)
+    if not newId and type(SummaryMenu._moveToLearn) == "string" then
+      local C = require("src.core.game3.constants").of(SummaryMenu._playerState or SummaryMenu._session)
+      newId = C and C:id("moves", SummaryMenu._moveToLearn)
+    end
+    if not newId and type(SummaryMenu._moveToLearn) == "string" and Pokemon.battleMoveId then
+      newId = Pokemon.battleMoveId(SummaryMenu._moveToLearn)
+    end
+    newId = newId or SummaryMenu._moveToLearn
     local mdef = Pokemon.battleMove(newId)
     local name = Pokemon.moveName(newId)
     if not name or name == "" or name:match("^MOVE ") then
@@ -173,11 +182,24 @@ local function moves_for_mon(mon)
 end
 
 function SummaryMenu.isOpen()
+  if SummaryMenu._nativeDelegate then return SummaryMenu._nativeDelegate.isOpen() end
   return SummaryMenu.open
 end
 
 function SummaryMenu.openMenu(party, startIndex, opts)
   opts = opts or {}
+  local delegate = Screens.redirect("summary", SummaryMenu, opts.playerState or opts.session)
+  SummaryMenu._nativeDelegate = delegate
+  if delegate then
+    local forwarded = {}; for key, value in pairs(opts) do forwarded[key] = value end
+    forwarded.bridge = SummaryMenu
+    if opts.onSelectMove then
+      forwarded.onSelectMove = function(slot)
+        return opts.onSelectMove(slot and slot - 1 or nil)
+      end
+    end
+    return delegate.openMenu(party, startIndex, forwarded)
+  end
   SummaryMenu.open = true
   SummaryMenu._party = party or {}
   SummaryMenu._cursor = startIndex or 1
@@ -217,6 +239,7 @@ function SummaryMenu.openMenu(party, startIndex, opts)
 end
 
 function SummaryMenu.close()
+  if SummaryMenu._nativeDelegate then return SummaryMenu._nativeDelegate.close() end
   SummaryMenu.open = false
   SummaryMenu._slide.active = false
   SummaryMenu._swapSlot = nil
@@ -314,10 +337,13 @@ local function step_pic_bounce()
 end
 
 -- pokefirered/src/pokemon_summary_screen.c:3956
+-- Emerald's summary has no sEggPicShake table
 local function step_egg_shake()
   local b = SummaryMenu._bounce
   if b.count >= 2 then return end
-  local deltas = SummaryChrome.manifest().eggPicShake[b.vigor + 1]
+  local m = SummaryChrome.manifest()
+  local deltas = m and m.eggPicShake and m.eggPicShake[b.vigor + 1]
+  if not deltas or #deltas == 0 then return end
   local ready = b.delay >= EGG_SHAKE_DELAY[b.vigor]
   b.delay = b.delay + 1
   if not ready then return end
@@ -355,6 +381,7 @@ local function step_frame()
 end
 
 function SummaryMenu.update(dt)
+  if SummaryMenu._nativeDelegate then return SummaryMenu._nativeDelegate.update(dt) end
   dt = tonumber(dt) or (1 / 60)
   SummaryMenu._tick = (SummaryMenu._tick or 0) + dt * 60
   while SummaryMenu._tick >= 0.999 do
@@ -435,6 +462,7 @@ local function page_flip_input(input, dir)
 end
 
 function SummaryMenu.handleInput(input)
+  if SummaryMenu._nativeDelegate then return SummaryMenu._nativeDelegate.handleInput(input) end
   if not input then return end
   local slide = SummaryMenu._slide
   if slide.active then
@@ -475,7 +503,7 @@ function SummaryMenu.handleInput(input)
         local moveId = chosenMove and chosenMove.id
         -- pokefirered/src/pokemon_summary_screen.c:3772
         if moveId and Pokemon.isHmMove(moveId) and not SummaryMenu._forgetMove then
-          pcall(function() require("src.core.game3.audio").playSe(26) end)
+          pcall(function() require("src.core.game3.audio").playSe("SE_FAILURE") end)
           -- pokefirered/src/pokemon_summary_screen.c:3864
           SummaryMenu._hmNotice = true
         else
@@ -538,7 +566,8 @@ function SummaryMenu.handleInput(input)
         -- pokefirered/src/pokemon_summary_screen.c:3604
         local Battle = package.loaded["src.core.game3.battle"]
         local inBattle = Battle and Battle.isActive and Battle.isActive()
-        if not (SummaryMenu._enemyParty or inBattle or SummaryMenu._mode == "trade") then
+        -- pokeemerald/src/pokemon_summary_screen.c:1929
+        if not (SummaryMenu._enemyParty or inBattle or SummaryMenu._mode == "trade" or SummaryMenu._context == "factory") then
           SummaryMenu._swapSlot = SummaryMenu._moveCursor
           SummaryMenu._blink.frame, SummaryMenu._blink.hidden = 0, false
         end
@@ -631,8 +660,10 @@ end
 function SummaryMenu.dexNumber(species, session)
   local sp = tonumber(species) or 0
   local nat = (sp ~= 0 and Pokemon.national and Pokemon.national(sp)) or 0
-  if nat > (Dex.KANTO_MAX or 151) and not PokedexData.isNationalUnlocked(session) then
-    return nil
+  if nat ~= 0 and not PokedexData.isNationalUnlocked(session) then
+    -- pokeemerald/src/pokemon.c:5685
+    if not Dex.nationalInRegional(nat) then return nil end
+    return Dex.regionalNumber(sp) or nat
   end
   return nat
 end
@@ -714,7 +745,7 @@ local function draw_left_sprites(mon, page)
   local flip = not mon_no_flip(mon)
 
   if s.pic then
-    local front = Pokemon.monFrontPic(mon)
+    local front = Pokemon.monFrontPic(mon, nil, "summary")
     if front and front.image then
       local iw, ih = front.w or 64, front.h or 64
       love.graphics.setColor(1, 1, 1, 1)
@@ -874,23 +905,27 @@ local function draw_page_skills(mon)
   -- Party stores ability as numeric id (e.g. 65 = OVERGROW); resolve to name.
   local abilityId = tonumber(mon.abilityId) or tonumber(mon.ability)
   local ability = mon.abilityName
+  local abilityNameTranslated = false
   if type(mon.ability) == "string" and mon.ability ~= "" and not tonumber(mon.ability) then
     ability = mon.ability
   end
   if (not ability or ability == "") and abilityId and abilityId > 0 then
     ability = Pokemon.abilityName(abilityId)
+    abilityNameTranslated = true
   end
   if not ability or ability == "" then
     local aid = Pokemon.abilityId and Pokemon.abilityId(Pokemon.speciesOf(mon), mon.personality or 0)
     if aid and aid > 0 then
       abilityId = aid
       ability = Pokemon.abilityName(aid)
+      abilityNameTranslated = true
     end
   end
   ability = ability or "—"
   local ax, ay = cxy("abilityName", 74, 129)
-  -- No registry renames abilities; a translation reaches the name through Strings().
-  draw_text(Strings(tostring(ability)), ax, ay, 80, "NORMAL")
+  local abilityText = tostring(ability)
+  if not abilityNameTranslated then abilityText = Strings(abilityText) end
+  draw_text(abilityText, ax, ay, 80, "NORMAL")
   local desc = SummaryData.abilityDescription(abilityId, tostring(ability))
   local ad = coords().abilityDesc or { x = 10, y = 143, w = 232 }
   draw_text(desc, ad.x or 10, ad.y or 143, ad.w or 232, "NORMAL")
@@ -1036,7 +1071,7 @@ local function draw_page_egg(mon)
 
   local pic = coords().monPic or { x = 60, y = 65 }
   local cx, cy = pic.x or 60, pic.y or 65
-  local front = Pokemon.frontPic(species)
+  local front = Pokemon.frontPic(species, nil, nil, nil, "summary")
   if front and front.image and love and love.graphics then
     local iw = front.w or 64
     local ih = front.h or 64
@@ -1235,6 +1270,7 @@ local function draw_detail_flip(mon, shiny)
 end
 
 function SummaryMenu.draw()
+  if SummaryMenu._nativeDelegate then return SummaryMenu._nativeDelegate.draw() end
   if not SummaryMenu.open then return end
   local mon = current_mon()
   if not mon then return end

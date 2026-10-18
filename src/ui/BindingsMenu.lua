@@ -9,6 +9,7 @@ local ListMenu = require("src.ui.ListMenu")
 local ChoiceBox = require("src.ui.ChoiceBox")
 local Input = require("src.core.Input")
 local Strings = require("src.core.Strings")
+local GamepadMap = require("src.core.GamepadMap")
 
 local BindingsMenu = setmetatable({}, { __index = ListMenu })
 BindingsMenu.__index = BindingsMenu
@@ -25,8 +26,18 @@ local BUTTONS = {
   { id = "b", label = "B", key = "x", pad = "b" },
   { id = "start", label = "START", key = "escape", pad = "start" },
   { id = "select", label = "SELECT", key = "tab", pad = "back" },
-  { id = "speedDown", label = "SPEED -", pad = "leftshoulder", action = true },
-  { id = "speedUp", label = "SPEED +", pad = "rightshoulder", action = true },
+  { id = "speedDown", label = "SPEED -", key = "0", pad = "leftshoulder", action = true },
+  { id = "speedUp", label = "SPEED +", key = "1", pad = "rightshoulder", action = true },
+}
+BindingsMenu.BUTTONS = BUTTONS
+
+BindingsMenu.GEN3_BUTTONS = {
+  BUTTONS[1], BUTTONS[2], BUTTONS[3], BUTTONS[4],
+  BUTTONS[5], BUTTONS[6], BUTTONS[7], BUTTONS[8],
+  { id = "l", label = "L", key = "q", pad = "leftshoulder" },
+  { id = "r", label = "R", key = "e", pad = "rightshoulder" },
+  { id = "speedDown", label = "SPEED -", key = "0", pad = "triggerleft", action = true },
+  { id = "speedUp", label = "SPEED +", key = "1", pad = "triggerright", action = true },
 }
 
 -- a binding is a plain key string or { key, pad }; absent = the fixed
@@ -58,7 +69,17 @@ local PAD_SHORT = {
   leftshoulder = "LB", rightshoulder = "RB",
   triggerleft = "L2", triggerright = "R2",
   lefttrigger = "L2", righttrigger = "R2",
-  leftstick = "LS", rightstick = "RS", guide = "GUIDE",
+  leftstick = "LS", rightstick = "RS",
+  leftstick_up = "LS-UP", leftstick_down = "LS-DN",
+  leftstick_left = "LS-LT", leftstick_right = "LS-RT",
+  lsup = "LS-UP", lsdown = "LS-DN", lsleft = "LS-LT", lsright = "LS-RT",
+  rightstick_up = "RS-UP", rightstick_down = "RS-DN",
+  rightstick_left = "RS-LT", rightstick_right = "RS-RT",
+  rsup = "RS-UP", rsdown = "RS-DN", rsleft = "RS-LT", rsright = "RS-RT",
+  guide = "GUIDE", back = "BACK", start = "START",
+  misc1 = "MISC1", touchpad = "PAD",
+  paddle1 = "P1", paddle2 = "P2", paddle3 = "P3", paddle4 = "P4",
+  x = "X", y = "Y", a = "A", b = "B",
 }
 local function shortName(name, shorts)
   local s = shorts[name]
@@ -74,18 +95,19 @@ end
 local function boundRight(overlay, def)
   local pad = boundPad(overlay, def)
   if def.action then
-    return pad and shortName(pad, PAD_SHORT) or Strings("OFF")
+    local p = pad and shortName(pad, PAD_SHORT) or Strings("OFF")
+    return def.key and (def.key .. "/" .. p) or p
   end
   local key = shortName(boundKey(overlay, def), KEY_SHORT)
   if pad then return key .. "/" .. shortName(pad, PAD_SHORT) end
   return key
 end
 
-function BindingsMenu.new(game)
+function BindingsMenu.new(game, opts)
   local overlay = game.save and game.save.options
                   and game.save.options.bindings
   local items = {}
-  for i, def in ipairs(BUTTONS) do
+  for i, def in ipairs(opts and opts.buttons or BUTTONS) do
     -- translated here, not in ROWS: that table is built at require
     -- time, before Strings.load has a catalog to look in
     items[i] = { label = Strings(def.label),
@@ -212,6 +234,9 @@ function BindingsMenu:storeBinding(slot, value)
   self:endCapture()
   local game = self.game
   if not (item and value and game.save and game.save.options) then return end
+  if slot == "pad" and GamepadMap.normalizePad then
+    value = GamepadMap.normalizePad(value)
+  end
   local opts = game.save.options
   opts.bindings = opts.bindings or {}
   -- Swap, never steal (#589): when the captured input is another row's
@@ -225,7 +250,8 @@ function BindingsMenu:storeBinding(slot, value)
   if handover == nil and item.button.action then handover = item.button.pad end
   if value ~= prev then
     for _, other in ipairs(self.items) do
-      if other ~= item and effective(opts.bindings, other.button) == value then
+      if other ~= item and not (slot == "key" and other.button.action)
+          and effective(opts.bindings, other.button) == value then
         if other.button.action then
           opts.bindings[other.button.id] = false
         else
@@ -313,6 +339,7 @@ function BindingsMenu:drainCapture()
       if ev.kind == "key" then self:captureKey(ev.value)
       elseif ev.kind == "pad" then self:capturePad(ev.value)
       elseif ev.kind == "joy" then self:captureJoy(ev.value)
+      elseif ev.kind == "touch" and ev.value == "b" then self:endCapture()
       end
     else
       if ev.kind == "key" then self:captureKeyRelease(ev.value)
@@ -338,11 +365,12 @@ end
 function BindingsMenu:draw()
   ListMenu.draw(self)
   if self.capture then
-    Font.drawBox(1, 6, 18, 6)
+    Font.drawBox(1, 6, 18, 8)
     love.graphics.setColor(0, 0, 0, 1)
     Font.draw(Strings("PRESS A BUTTON"), 24, 60)
     Font.draw(Strings("RELEASE TO SET"), 24, 72)
     Font.draw(Strings("ESC/2ND CANCELS"), 24, 84)
+    Font.draw(Strings("TOUCH B CANCELS"), 24, 96)
     love.graphics.setColor(1, 1, 1, 1)
   end
 end

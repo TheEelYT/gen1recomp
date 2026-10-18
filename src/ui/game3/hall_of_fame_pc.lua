@@ -7,7 +7,7 @@ local Pokemon = require("src.core.game3.pokemon")
 local RomText = require("src.core.game3.rom_text")
 local HofGfx = require("src.ui.game3.hall_of_fame_gfx")
 
-local HofPc = {}
+local HofPc = { isMenu = true }
 
 HofPc.open = false
 HofPc._teams = {}
@@ -21,6 +21,17 @@ local SPECIES_EGG = 412 -- pokefirered/include/constants/species.h:421
 local SPECIES_NIDORAN_F = 29 -- pokefirered/include/constants/species.h:33
 local SPECIES_NIDORAN_M = 32 -- pokefirered/include/constants/species.h:36
 local KANTO_SPECIES_END = 151 -- pokefirered/include/constants/species.h:157
+-- pokeemerald/src/hall_of_fame.c:945
+local RSE_TEXT = {
+  gText_ABUTTONExit = "gText_AButtonExit",
+  gText_UPDOWNPick_ABUTTONBBUTTONCancel = "gText_PickCancel",
+  gText_UPDOWNPick_ABUTTONNext_BBUTTONBack = "gText_PickNextCancel",
+}
+
+local function key(k)
+  local rse = require("src.core.game3.profile").family(HofPc._session) == "rse"
+  return rse and RSE_TEXT[k] or k
+end
 local GAME_STAT_ENTERED_HOF = 10 -- pokefirered/include/constants/game_stat.h:14
 local BG = { 22 / 31, 24 / 31, 29 / 31 } -- pokefirered/src/hall_of_fame.c:30
 local BLEND_COEFF = 12 / 16 -- pokefirered/src/hall_of_fame.c:873
@@ -171,6 +182,11 @@ local function drawMonInfo(mon)
   if not egg then
     local dex = (Pokemon.national and Pokemon.national(sp)) or sp
     local digits = (not HofPc._national and dex > KANTO_SPECIES_END) and "???" or string.format("%03d", dex)
+    if require("src.core.game3.profile").family(HofPc._session) == "rse" and not HofPc._national then
+      -- pokeemerald/src/pokemon.c:6396
+      local n = require("src.core.game3.dex").regionalNumber(sp, require("src.core.game3.profile").forSession(HofPc._session).id)
+      digits = n and string.format("%03d", n) or "???"
+    end
     FrlgFont.draw(RomText.plain("gText_Number") .. digits, x0 + 16, y0 + 1, { colors = WHITE_TEXT })
   end
   local w = FrlgFont.measure(nick)
@@ -195,7 +211,7 @@ function HofPc.draw()
   drawBackground()
   if HofPc._corrupted then
     -- pokefirered/src/hall_of_fame.c:969
-    drawTopBar(nil, RomText.plain("gText_ABUTTONExit"))
+    drawTopBar(nil, RomText.plain(key("gText_ABUTTONExit")))
     Window.dialogueFrame()
     Window.printPx(RomText.plain("gText_HOFCorrupted"), 16, 121)
     return
@@ -205,7 +221,7 @@ function HofPc.draw()
   local sh = shader()
   for i, mon in ipairs(list) do
     local p = pos[i]
-    local pic = p and Pokemon.monFrontPic(mon)
+    local pic = p and Pokemon.monFrontPic(mon, nil, "hof")
     if pic and pic.image then
       local dim = i ~= HofPc._mon
       if dim and sh then
@@ -220,8 +236,8 @@ function HofPc.draw()
   end
   -- pokefirered/src/hall_of_fame.c:843
   local title = RomText.plain("gText_HOFNumber", { stringVars = { tostring(HofPc._number) } })
-  local hint = HofPc._team <= 1 and RomText.plain("gText_UPDOWNPick_ABUTTONBBUTTONCancel")
-    or RomText.plain("gText_UPDOWNPick_ABUTTONNext_BBUTTONBack")
+  local hint = HofPc._team <= 1 and RomText.plain(key("gText_UPDOWNPick_ABUTTONBBUTTONCancel"))
+    or RomText.plain(key("gText_UPDOWNPick_ABUTTONNext_BBUTTONBack"))
   drawTopBar(title, hint)
   local mon = list[HofPc._mon]
   if mon then drawMonInfo(mon) end

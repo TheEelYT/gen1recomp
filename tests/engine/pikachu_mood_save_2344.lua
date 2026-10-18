@@ -36,9 +36,14 @@ local cells = {
   { 120, 128, 1 }, { 120, 108, 3 }, { 120, 130, 8 }, { 90, 128, 5 },
   { 255, 255, 20 }, { 40, 30, 14 }, { 180, 200, 2 },
 }
-for _, c in ipairs(cells) do
-  eq(PikachuFollower.moodEmotion(starterSave(c[1], c[2])), c[3],
-     string.format("happiness %d mood %d picks emotion %d", c[1], c[2], c[3]))
+local field = require("tests.yellow_field_cache")()
+if field then
+  for _, c in ipairs(cells) do
+    eq(PikachuFollower.moodEmotion(starterSave(c[1], c[2]), field.pikachu), c[3],
+       string.format("happiness %d mood %d picks emotion %d", c[1], c[2], c[3]))
+  end
+else
+  print("[skip] mood table checks: no Yellow cache with field.pikachu")
 end
 
 local s = starterSave(120, 0x81)
@@ -82,7 +87,7 @@ PikachuFollower.moodAfterBattle(s)
 eq(s.pikachuMood, 108, "Red/Blue never touch Pikachu's mood")
 GameVersion.set("yellow")
 
-if not loadfile("data/generated/pokemon.lua") then
+if not require("tests.save_compat._codec").gen1Available({ "red", "yellow" }) then
   print("pikachu_mood_save_2344 codec half skipped (needs data/generated/)")
   GameVersion.set("red")
   T.finish("pikachu_mood_save_2344")
@@ -92,8 +97,8 @@ end
 local SaveConvert = require("src.save_convert.SaveConvert")
 local SaveData = require("src.core.SaveData")
 local stampMapWindow = loadfile("tests/fixture_data/map_window.lua")()
-local yellowData = assert(SaveConvert.loadData("yellow"))
-local redData = assert(SaveConvert.loadData("red"))
+local yellowData = require("tests.save_compat._codec").gen1Data("yellow")
+local redData = require("tests.save_compat._codec").gen1Data("red")
 stampMapWindow(yellowData, "REDS_HOUSE_2F")
 stampMapWindow(redData, "REDS_HOUSE_2F")
 
@@ -112,8 +117,10 @@ local yBack = GenSave.decode(yBytes, yellowData)
 eq(yBack.pikachuMood, 0x62, "mood survives export -> import on Yellow")
 eq(yBack.pikachuEmotionModifier, 2, "the emotion modifier survives the round trip")
 eq(yBack.pikachuHappiness, 120, "happiness still round-trips next to it")
-eq(PikachuFollower.moodEmotion(yBack), 3,
-   "the imported save talks with the low-mood pic (emotion 3), not emotion 1")
+if field then
+  eq(PikachuFollower.moodEmotion(yBack, field.pikachu), 3,
+     "the imported save talks with the low-mood pic (emotion 3), not emotion 1")
+end
 
 local seed = newSave()
 seed.pikachuMood, seed.pikachuEmotionModifier = nil, nil

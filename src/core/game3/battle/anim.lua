@@ -9,12 +9,16 @@ local AnimPal = require("src.core.game3.battle.anim_pal")
 local AnimCoords = require("src.core.game3.battle.anim_coords")
 local SE = require("src.core.game3.se_ids")
 
+local function fallback_prefix()
+  return require("src.core.game3.battle.profile").get().animCacheFallback or nil
+end
+
 local Anim = {}
 
 Anim.Z = AnimVm.Z
 Anim.Coords = AnimCoords
 
--- pret sBattlerCoords (singles) — CreateSprite CENTER
+-- pret sBattlerCoords (singles): CreateSprite CENTER
 Anim.ENEMY_MON = { x = 176, y = 40 }
 Anim.PLAYER_MON = { x = 72, y = 80 }
 
@@ -134,6 +138,7 @@ local function default_present(id)
     displayMaxHp = nil,
     displayExp = nil,
     displayLevel = nil,
+    displayStatus = nil,
     flash = 0,
   }
 end
@@ -191,12 +196,39 @@ function Anim.setDouble(v)
   AnimCoords.setDouble(v)
 end
 
+-- pokeruby/src/contest.c:339
+function Anim.beginContestPresentation(opts)
+  opts = opts or {}
+  if not Anim._vm then
+    local headless = opts.headless
+    if headless == nil then headless = Anim._headless end
+    Anim.reset({ headless = headless })
+  end
+  assert(not Anim._contestPresentation, "contest presentation already active")
+  local token = { previous2 = rawget(Anim._present, 2), previous3 = rawget(Anim._present, 3) }
+  Anim._contestPresentation = token
+  for id = 2, 3 do
+    local p = default_present(id)
+    p.visible = false
+    rawset(Anim._present, id, p)
+  end
+  return token
+end
+
+function Anim.endContestPresentation(token)
+  if token == nil or Anim._contestPresentation ~= token then return false end
+  rawset(Anim._present, 2, token.previous2)
+  rawset(Anim._present, 3, token.previous3)
+  Anim._contestPresentation = nil
+  return true
+end
+
 function Anim.present(key)
   local id = Anim.idOf(key)
   if id == nil then return nil end
   local p = rawget(Anim._present, id)
   if not p then
-    if id >= 2 and not AnimCoords.isDouble() then return nil end
+    if id >= 2 and not AnimCoords.isDouble() and not Anim._contestPresentation then return nil end
     p = default_present(id)
     if id >= 2 and not Anim._headless then p.visible = false end
     rawset(Anim._present, id, p)
@@ -241,6 +273,7 @@ end
 
 function Anim.reset(opts)
   opts = opts or {}
+  Anim._contestPresentation = nil
   for id in pairs(Anim._stageTasks) do Task.cancel(id) end
   Anim._stageTasks = {}
   Anim._headless = opts.headless and true or false
@@ -294,10 +327,10 @@ function Anim.ballIdOf(key)
   return BallOpen.ballIdForItem(b and b.mon and b.mon.pokeball)
 end
 
-local function play_se(name, pan)
+local function play_se(name)
   pcall(function()
     local SE = require("src.core.game3.se_ids")
-    require("src.core.game3.audio").playSe(SE[name], { pan = pan })
+    require("src.core.game3.audio").playSe(SE[name])
   end)
 end
 
@@ -322,11 +355,11 @@ function Anim.sendOutMon(key, opts)
   local ball = { visible = true, frame = 0, rot = 0, side = side, battler = id, x = 0, y = 0,
     ballId = Anim.ballIdOf(id) }
   stage.balls[id] = ball
-  local pan = (side == "player") and -64 or 63
   local function reveal()
     ball.frame = 1
     ball.rot = 0
-    play_se("SE_BALL_OPEN", pan)
+    -- pokefirered/src/battle_anim_special.c:1427
+    play_se("SE_BALL_OPEN")
     Anim.ballOpen(id, ball.x, ball.y)
     p.visible = true
     p.ox = 0
@@ -351,7 +384,6 @@ function Anim.sendOutMon(key, opts)
     local sx, sy = require("src.core.game3.battle.pokedude").sendOutOrigin(Battle and Battle._st)
     local tx, ty = base.x, base.y + 24
     ball.x, ball.y = sx, sy
-    play_se("SE_BALL_THROW", pan)
     Anim.tweenStage(25, function(u, t)
       local f = t and t.frames or (u * 25)
       ball.x = sx + (tx - sx) * u
@@ -398,8 +430,8 @@ function Anim.introSlideDone()
 end
 
 --- Pret faint presentation: SE_FAINT + sink/slide off, then hide mon + healthbox.
--- Opponent: SpriteCB_AnimFaintOpponent — +8px every 2 frames, ~8 steps.
--- Player: SpriteCB_FaintSlideAnim — +5px/frame until below screen.
+-- Opponent: SpriteCB_AnimFaintOpponent: +8px every 2 frames, ~8 steps.
+-- Player: SpriteCB_FaintSlideAnim: +5px/frame until below screen.
 function Anim.faintMon(key, opts)
   opts = opts or {}
   local id = Anim.idOf(key or "enemy") or 1
@@ -500,6 +532,7 @@ function Anim.syncDisplayFromState(st)
       p.displayHp = tonumber(b.mon.hp) or 0
       p.displayMaxHp = tonumber(b.mon.maxHp) or 1
       p.displayLevel = tonumber(b.mon.level) or 1
+      p.displayStatus = b.status or (b.mon and (b.mon.status or b.mon.status1)) or false
       local prog = Experience.progress(b.mon)
       p.displayExp = prog.progressPercent or 0
     end
@@ -628,7 +661,7 @@ function Anim.displayHpRatio(side, battler)
 end
 
 --- GBA indexed sheets store transparent as palette index 0 (often magenta #6229FF).
--- Love2D expands that to opaque pixels — punch them to alpha 0.
+-- Love2D expands that to opaque pixels: punch them to alpha 0.
 local function punch_gba_transparent(imageData)
   if not imageData or not imageData.mapPixel then return imageData end
   -- Exact pret key color and near-matches (98/255, 41/255, 1)
@@ -660,7 +693,7 @@ local function hydrate_tag_images(pack)
       local rel = root .. info.file
       if cache and cache.read then
         bytes = cache:read(rel)
-        if not bytes then bytes = cache:read("firered/" .. rel) end
+        if not bytes and fallback_prefix() then bytes = cache:read(fallback_prefix() .. rel) end
       end
       if type(bytes) == "string" and #bytes > 0 then
         local okFd, fileData = pcall(love.filesystem.newFileData, bytes, info.file)
@@ -675,7 +708,8 @@ local function hydrate_tag_images(pack)
               info.w = image:getWidth()
               info.h = image:getHeight()
               AnimPal.hydrateIndex(info, tag, image, function(f)
-                return cache and cache.read and (cache:read(root .. f) or cache:read("firered/" .. root .. f))
+                return cache and cache.read and (cache:read(root .. f)
+                  or (fallback_prefix() and cache:read(fallback_prefix() .. root .. f)))
               end)
             end
           end
@@ -691,10 +725,10 @@ local function load_pack()
   local chunk
   local ok, Dataset = pcall(require, "src.core.game3.dataset")
   local cache = ok and Dataset.cache and Dataset.cache() or nil
-  local rels = {
-    "data/generated/gba/pokemon/battle_anims/pack.lua",
-    "firered/data/generated/gba/pokemon/battle_anims/pack.lua",
-  }
+  local rels = { "data/generated/gba/pokemon/battle_anims/pack.lua" }
+  if fallback_prefix() then
+    rels[2] = fallback_prefix() .. "data/generated/gba/pokemon/battle_anims/pack.lua"
+  end
   if cache and cache.read then
     for _, rel in ipairs(rels) do
       local src = cache:read(rel)
@@ -712,6 +746,9 @@ local function load_pack()
         end
       end
     end
+  end
+  if not chunk and not fallback_prefix() and cache and cache.read then
+    error("battle anims: data/generated/gba/pokemon/battle_anims/pack.lua is missing from the cache")
   end
   if not chunk then
     local okR, mod = pcall(require, "src.core.game3.battle.anim_pack_fallback")
@@ -852,6 +889,22 @@ function Anim.scriptForMove(moveId)
   return GENERIC_HIT
 end
 
+-- pokefirered/src/battle_anim.c:234
+function Anim.isQuietBgmMove(moveId)
+  local pack = load_pack()
+  local list = pack and pack.quietBgmMoves
+  if type(list) ~= "table" then return false end
+  local numId = tonumber(moveId)
+  if not numId then
+    local okM, Moves = pcall(require, "src.core.game3.battle.moves")
+    if okM and Moves and Moves.numForName then numId = Moves.numForName(moveId) end
+  end
+  for _, id in ipairs(list) do
+    if id == numId then return true end
+  end
+  return false
+end
+
 function Anim.scriptForStatus(statusId)
   local pack = load_pack()
   if pack and pack.status and pack.status[statusId] then
@@ -868,6 +921,12 @@ function Anim.launchMove(moveId, opts)
     return Anim._vm:launch(GENERIC_MISS, opts)
   end
   local script = Anim.scriptForMove(moveId)
+  if Anim.isQuietBgmMove(moveId) then
+    local o = {}
+    for k, v in pairs(opts) do o[k] = v end
+    o.quietBgm = true
+    opts = o
+  end
   return Anim._vm:launch(script, opts)
 end
 
@@ -1011,7 +1070,8 @@ function Anim.statMaskImage(tilemap, pal)
   local ok, Dataset = pcall(require, "src.core.game3.dataset")
   local cache = ok and Dataset.cache and Dataset.cache() or nil
   local path = "data/generated/gba/pokemon/battle_anims/" .. rel
-  local bytes = cache and cache.read and (cache:read(path) or cache:read("firered/" .. path))
+  local bytes = cache and cache.read and (cache:read(path)
+    or (fallback_prefix() and cache:read(fallback_prefix() .. path)))
   if type(bytes) ~= "string" or #bytes == 0 then return nil end
   local okD, data = pcall(function()
     return love.image.newImageData(love.filesystem.newFileData(bytes, rel))
@@ -1055,6 +1115,18 @@ end
 function Anim.drawParticles(minZ, maxZ)
   if Anim._headless then return end
   if Anim._vm then Anim._vm:draw(minZ, maxZ) end
+end
+
+--- Bracket one frame's z-band drawParticles calls so the VM sorts its
+--- sprites once per frame instead of once per band.
+function Anim.beginParticleFrame()
+  local vm = Anim._vm
+  if vm and vm.beginDrawFrame then vm:beginDrawFrame() end
+end
+
+function Anim.endParticleFrame()
+  local vm = Anim._vm
+  if vm and vm.endDrawFrame then vm:endDrawFrame() end
 end
 
 return Anim

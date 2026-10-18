@@ -44,11 +44,11 @@ local TYPES = {
 
 local MOVES = {
   TACKLE = { id = "TACKLE", name = "TACKLE", power = 35, type = "NORMAL",
-    accuracy = 100, pp = 35, effect = "EFFECT_NORMAL_HIT" },
+    accuracy = 100, accuracyRaw = 255, pp = 35, effect = "EFFECT_NORMAL_HIT" },
   SCRATCH = { id = "SCRATCH", name = "SCRATCH", power = 40, type = "NORMAL",
-    accuracy = 100, pp = 35, effect = "EFFECT_NORMAL_HIT" },
+    accuracy = 100, accuracyRaw = 255, pp = 35, effect = "EFFECT_NORMAL_HIT" },
   STRUGGLE = { id = "STRUGGLE", name = "STRUGGLE", power = 50, type = "NORMAL",
-    accuracy = 100, pp = 1, effect = "EFFECT_NORMAL_HIT" },
+    accuracy = 100, accuracyRaw = 255, pp = 1, effect = "EFFECT_NORMAL_HIT" },
 }
 
 local GROWTH = {
@@ -88,7 +88,7 @@ local ITEMS = {
 local DATA = {
   pokemon = POKEMON,
   moves = MOVES,
-  type_chart = { types = TYPES, matchups = {} },
+  text = require("tests.gen2_battle_text_fixture")(), type_chart = { battleRules = require("tests.gen2_battle_rules_fixture")(), types = TYPES, matchups = {} },
   items = ITEMS,
 }
 
@@ -101,6 +101,21 @@ local function fighter(id, level, item)
                 { id = "SCRATCH", pp = 35, maxPp = 35 } }
   mon.item = item
   return mon
+end
+
+do
+  local mon = fighter("QUICKMON", 12)
+  mon.status = "poison"
+  mon.hp = 1
+  local packed = Protocol.packMon2(mon)
+  local forced = assert(Protocol.unpackMon2(DATA, packed, { forceLevel = 50, strict = true }))
+  eq(forced.level, 50, "Gen 2 forced-level party rebuilds at the agreed level")
+  eq(forced.status, nil, "Gen 2 forced-level party clears the saved status")
+  eq(forced.hp, forced.stats.hp, "Gen 2 forced-level party starts at full HP")
+  local real = assert(Protocol.unpackMon2(DATA, packed, { forceLevel = "ANY", strict = true }))
+  eq(real.level, 12, "Gen 2 ANY keeps the saved level")
+  eq(real.status, "poison", "Gen 2 ANY keeps the saved status")
+  eq(real.hp, 1, "Gen 2 ANY keeps the saved HP")
 end
 
 -- ---------------------------------------------------------------- harness

@@ -4,11 +4,18 @@ local Extract = require("src.import.gba.extract_island1")
 local OwExtract = require("src.import.gba.ow_extract")
 local Versions = require("src.import.gba.versions")
 
+local Stream = require("src.core.game3.asset_stream")
 local OwSprites = {}
+local makeStream
+local function resetStream()
+  if OwSprites._stream then OwSprites._stream:cancel() end
+  OwSprites._stream = OwSprites._cache and makeStream() or nil
+end
 
 OwSprites._cache = nil
 OwSprites._manifest = nil
 OwSprites._loaded = {} -- [graphicsId] = { image, quads, w, h, frameCount, inanimate }
+OwSprites._reflectionLoaded = {}
 OwSprites._logged = false
 
 -- pret ANIM_STD: stand S/N/W; walk uses frames 3-8; east = west + hflip
@@ -20,26 +27,49 @@ local RUN_BASE = { down = 9, up = 12, left = 15, right = 15 }
 local RUN_A = { down = 10, up = 13, left = 16, right = 16 }
 local RUN_B = { down = 11, up = 14, left = 17, right = 17 }
 
+local EMPTY = {}
+
+local function fieldBlock()
+  local Profile = package.loaded["src.core.game3.profile"] or require("src.core.game3.profile")
+  local ok, row = pcall(Profile.forSession)
+  return ok and row and row.field or EMPTY
+end
+
 local function owRoot()
-  -- Must follow Dataset.mountExtractRoots() — do not bake CACHE_ROOT at require.
+  -- Must follow Dataset.mountExtractRoots(): do not bake CACHE_ROOT at require.
   return (Extract.CACHE_ROOT or "data/generated/gba") .. "/ow"
 end
 
+local function loadManifest()
+  OwSprites._manifestAttempted = true
+  local src = OwSprites._cache and OwSprites._cache:read(owRoot() .. "/manifest.lua")
+  local chunk = src and load(src, "@ow/manifest.lua", "t", {})
+  OwSprites._manifest = chunk and chunk() or nil
+end
+
+local function resetPalettes(changed)
+  if changed then OwSprites._overrides = {} end
+  for _, o in pairs(OwSprites._overrides or {}) do o.spr = nil end
+end
+
 function OwSprites.install(cache)
+  resetPalettes(OwSprites._cache ~= cache or OwSprites._root ~= owRoot())
+  OwSprites._root = owRoot()
   OwSprites._cache = cache
   OwSprites._loaded = {}
+  resetStream()
+  OwSprites._reflectionLoaded = {}
   OwSprites._manifest = nil
   OwSprites._logged = false
-  if not cache then return end
-  local src = cache:read(owRoot() .. "/manifest.lua")
-  if src then
-    local chunk = load(src, "@ow/manifest.lua", "t", {})
-    if chunk then OwSprites._manifest = chunk() end
-  end
+  loadManifest()
 end
 
 function OwSprites.invalidate()
+  resetPalettes(false)
+  OwSprites._manifestAttempted = false
   OwSprites._loaded = {}
+  resetStream()
+  OwSprites._reflectionLoaded = {}
   OwSprites._manifest = nil
   OwSprites._logged = false
 end
@@ -51,63 +81,33 @@ function OwSprites.ready()
   return OwExtract.ready(cache, Extract.CACHE_ROOT or "data/generated/gba")
 end
 
-local function load_one(gid)
-  local cache = OwSprites._cache
-  if not cache then return nil end
-  local root = owRoot()
-  local metaBlob = cache:read(root .. "/" .. gid .. ".meta")
-  local rgba = cache:read(root .. "/" .. gid .. ".rgba")
-  if not metaBlob or not rgba then return nil end
-  local meta = OwExtract.decodeMeta(metaBlob)
-  if not meta then return nil end
+local function uploadSprite(meta)
+  local image = love.graphics.newImage(meta.imageData)
+  image:setFilter("nearest", "nearest")
+  coroutine.yield("texture")
   local w, h, n = meta.width, meta.height, meta.frameCount
-  -- decodeMeta reads these as u16 without validating, so a corrupt .meta can
-  -- carry 65535 for any of them and `aw * ah` then reaches ~4.3e9 pixels on a
-  -- cache file in the user-writable save directory.  Bound them before sizing.
-  local MAX_FRAME_DIM, MAX_FRAMES = 256, 512
-  if type(w) ~= "number" or type(h) ~= "number" or type(n) ~= "number"
-      or w < 1 or h < 1 or n < 1
-      or w > MAX_FRAME_DIM or h > MAX_FRAME_DIM or n > MAX_FRAMES then
-    return nil
-  end
-  local aw, ah = w, h * n
-  if #rgba ~= aw * ah * 4 then
-    if #rgba < aw * h * 4 then return nil end
-  end
-  if not (love and love.image and love.graphics) then return nil end
-
-  local ok, imageData = pcall(love.image.newImageData, aw, ah, "rgba8", rgba)
-  if not ok or not imageData then
-    imageData = love.image.newImageData(aw, ah)
-    local i = 1
-    for y = 0, ah - 1 do
-      for x = 0, aw - 1 do
-        local r = (rgba:byte(i) or 0) / 255
-        local g = (rgba:byte(i + 1) or 0) / 255
-        local b = (rgba:byte(i + 2) or 0) / 255
-        local a = (rgba:byte(i + 3) or 0) / 255
-        imageData:setPixel(x, y, r, g, b, a)
-        i = i + 4
-      end
-    end
-  end
-  local image = love.graphics.newImage(imageData)
-  if image.setFilter then image:setFilter("nearest", "nearest") end
   local quads = {}
   for fi = 0, n - 1 do
-    quads[fi] = love.graphics.newQuad(0, fi * h, w, h, aw, ah)
+    quads[fi] = love.graphics.newQuad(0, fi * h, w, h, w, h * n)
+    if fi % 32 == 31 then coroutine.yield("quads") end
   end
-  return {
-    image = image,
-    -- Kept so setObjectPalette can recolour the sheet: LOVE 11 has no
-    -- Image:newImageData, so the decoded pixels are the only CPU-side source.
-    imageData = imageData,
-    quads = quads,
-    width = w,
-    height = h,
-    frameCount = n,
-    inanimate = meta.inanimate,
-  }
+  meta.image, meta.quads = image, quads
+  meta.bytes = nil
+  return meta
+end
+makeStream = function()
+  return Stream.new("sprite", OwSprites._cache, owRoot(), uploadSprite, function(gid, spr)
+    OwSprites._loaded[gid] = spr
+    if not OwSprites._logged then
+      print(string.format("[game3/ow] sprites ready (%s sheets)", tostring(OwSprites._manifest and OwSprites._manifest.count or "?")))
+      OwSprites._logged = true
+    end
+  end)
+end
+
+function OwSprites.prefetch(gid, priority)
+  gid = tonumber(gid)
+  if gid and not OwSprites._loaded[gid] and OwSprites._stream then OwSprites._stream:prefetch(gid, priority) end
 end
 
 function OwSprites.get(graphicsId)
@@ -115,20 +115,8 @@ function OwSprites.get(graphicsId)
   if graphicsId == nil then return nil end
   local cached = OwSprites._loaded[graphicsId]
   if cached then return cached end
-  if not OwSprites._manifest then
-    OwSprites.install(OwSprites._cache)
-  end
-  local spr = load_one(graphicsId)
-  if spr then
-    OwSprites._loaded[graphicsId] = spr
-    if not OwSprites._logged then
-      local n = OwSprites._manifest and OwSprites._manifest.count
-      print(string.format("[game3/ow] FRLG sprites ready (%s sheets)",
-        tostring(n or "?")))
-      OwSprites._logged = true
-    end
-  end
-  return spr
+  if not OwSprites._manifestAttempted then loadManifest() end
+  return OwSprites._stream and OwSprites._stream:get(graphicsId) or nil
 end
 
 -- src/data/object_events/object_event_anims.h:633
@@ -308,7 +296,7 @@ function OwSprites.setObjectPalette(graphicsId, key, colours, sourceColours)
   graphicsId = tonumber(graphicsId)
   if graphicsId == nil or type(key) ~= "string" then return false end
   local current = OwSprites._overrides[graphicsId]
-  if current and current.key == key then return true end
+  if current and current.key == key and current.spr then return true end
   if type(colours) ~= "table" or #colours == 0 then return false end
 
   local base = OwSprites.get(graphicsId)
@@ -320,7 +308,7 @@ function OwSprites.setObjectPalette(graphicsId, key, colours, sourceColours)
   end
   local spr = recolour_sprite(base, from, colours)
   if not spr then return false end
-  OwSprites._overrides[graphicsId] = { key = key, spr = spr }
+  OwSprites._overrides[graphicsId] = { key = key, spr = spr, colours = colours, sourceColours = from }
   return true
 end
 
@@ -345,6 +333,11 @@ function OwSprites.pose(spr, facing, walkPhase, stepFlip, opts)
   if not spr then return 0, false end
 
   local flip = (facing == "right")
+  if opts and opts.fishing and spr.frameCount >= 12 then
+    local g = math.max(0, math.min(3, tonumber(opts.fishFrame) or 3))
+    return OwSprites.fishingAbsFrame(facing, g), flip
+  end
+
   if opts and opts.frame ~= nil then
     local f = tonumber(opts.frame) or 0
     if f < 0 then f = 0 end
@@ -360,18 +353,20 @@ function OwSprites.pose(spr, facing, walkPhase, stepFlip, opts)
     return 9, false
   end
 
-  if opts and opts.fishing and spr.frameCount >= 12 then
-    local g = math.max(0, math.min(3, tonumber(opts.fishFrame) or 3))
-    return OwSprites.fishingAbsFrame(facing, g), flip
-  end
-
-  if opts and opts.fieldMove and spr.frameCount >= 6 then
+  if opts and opts.fieldMove and spr.frameCount >= 5 then
     local f = tonumber(opts.fieldMoveFrame) or 4
     if f >= spr.frameCount then f = 0 end
     return f, false
   end
 
   if opts and opts.running ~= nil and spr.frameCount >= 18 then
+    local runFrames = fieldBlock().runFrames
+    if runFrames then
+      local phase = runFrames[opts.running == 1 and 2 or 1]
+      local set = phase and (stepFlip and phase.a or phase.b)
+      local f = set and set[facing]
+      if f then return f, flip end
+    end
     if opts.running == 1 then
       return (stepFlip and RUN_A[facing] or RUN_B[facing]) or RUN_BASE[facing] or 9, flip
     end
@@ -402,8 +397,61 @@ function OwSprites.getDraw(graphicsId)
   graphicsId = tonumber(graphicsId)
   if graphicsId == nil then return nil end
   local ov = OwSprites._overrides and OwSprites._overrides[graphicsId]
+  if ov and not ov.spr then
+    OwSprites.setObjectPalette(graphicsId, ov.key, ov.colours, ov.sourceColours)
+    ov = OwSprites._overrides[graphicsId]
+  end
   if ov and ov.spr then return ov.spr end
   return OwSprites.get(graphicsId)
+end
+
+function OwSprites.peekDraw(graphicsId)
+  graphicsId = tonumber(graphicsId)
+  if graphicsId == nil then return nil end
+  local ov = OwSprites._overrides and OwSprites._overrides[graphicsId]
+  if ov or OwSprites._loaded[graphicsId] or not OwSprites._stream then return OwSprites.getDraw(graphicsId) end
+  OwSprites.prefetch(graphicsId, 0)
+  return nil
+end
+
+local function paletteRgb(colors)
+  if type(colors) ~= "table" then return nil end
+  local out = {}
+  for i = 1, 15 do
+    local c = colors[i]
+    if c == nil then return nil end
+    c = tonumber(c) or 0
+    local r = c % 32
+    local g = math.floor(c / 32) % 32
+    local b = math.floor(c / 1024) % 32
+    out[#out + 1] = {
+      math.floor(r * 255 / 31 + 0.5),
+      math.floor(g * 255 / 31 + 0.5),
+      math.floor(b * 255 / 31 + 0.5),
+    }
+  end
+  return out
+end
+
+function OwSprites.getReflectionDraw(graphicsId)
+  graphicsId = tonumber(graphicsId)
+  if graphicsId == nil then return nil end
+  local cached = OwSprites._reflectionLoaded[graphicsId]
+  if cached ~= nil then return cached or nil end
+  local base = OwSprites.get(graphicsId)
+  if not base or not base.reflectionPaletteMappedTag then
+    OwSprites._reflectionLoaded[graphicsId] = false
+    return nil
+  end
+  local from = paletteRgb(base.palette)
+  local to = paletteRgb(base.mappedReflectionPalette)
+  if not (from and to) then
+    OwSprites._reflectionLoaded[graphicsId] = false
+    return nil
+  end
+  local reflected = recolour_sprite(base, from, to)
+  OwSprites._reflectionLoaded[graphicsId] = reflected or false
+  return reflected
 end
 
 --- Draw at world pixel position (cell top-left). Feet at bottom of sprite.
@@ -416,24 +464,66 @@ function OwSprites.draw(graphicsId, px, py, camX, camY, facing, walkPhase, stepF
   local frame, flip = OwSprites.pose(spr, facing, walkPhase, stepFlip, opts)
   local q = spr.quads[frame]
   if not q then return false end
-  local sx = px - camX + (16 - spr.width) / 2
-  local sy = py - camY + 16 - spr.height
-  love.graphics.setColor(1, 1, 1, 1)
+  local offX = spr.drawOffX or 0
+  -- src/sprite.c:1669
+  if flip then offX = -offX end
+  local sx = px - camX + (16 - spr.width) / 2 + offX
+  local sy = py - camY + 16 - spr.height + (spr.drawOffY or 0)
+  love.graphics.setColor(1, 1, 1, opts and opts.alpha or 1)
   if flip then
     love.graphics.draw(spr.image, q, sx + spr.width, sy, 0, -1, 1)
   else
     love.graphics.draw(spr.image, q, sx, sy)
   end
+  if opts and opts.alpha then love.graphics.setColor(1, 1, 1, 1) end
   return true
 end
 
-function OwSprites.playerGraphicsId(game)
-  local P = package.loaded["src.core.game3.player"]
+function OwSprites.avatars()
+  if not OwSprites._manifestAttempted and OwSprites._cache then loadManifest() end
+  local m = OwSprites._manifest
+  return m and m.avatars or nil
+end
+
+-- pokeemerald/src/field_player_avatar.c:1256
+function OwSprites.avatarState(P)
+  if not P then return "NORMAL" end
+  if P.fieldMoveAnim and P.fieldMoveAnim > 0 then return "FIELD_MOVE" end
+  if P.underwater then return "UNDERWATER" end
+  -- pokeemerald/src/field_player_avatar.c:1428
+  if P.fishing then return "FISHING" end
+  if (P.surfing and not P.dismounting) or P.flyRide or (P.surfJumpFrame and P.surfJumpFrame()) then return "SURFING" end
+  if P.biking then return P.bikeType == "acro" and "ACRO_BIKE" or "MACH_BIKE" end
+  if P.watering then return "WATERING" end
+  return "NORMAL"
+end
+
+-- pokeemerald/src/field_player_avatar.c:1241
+function OwSprites.avatarGraphicsId(state, isFemale, avatars, who)
+  avatars = avatars or OwSprites.avatars()
+  local rows = avatars and avatars[who or "player"]
+  if type(rows) ~= "table" then return nil end
+  local key = isFemale and "female" or "male"
+  local normal
+  for _, row in ipairs(rows) do
+    if row.state == state then return row[key] end
+    if row.state == "NORMAL" then normal = row[key] end
+  end
+  return normal
+end
+
+function OwSprites.playerGraphicsId(game, player)
+  local P = player or package.loaded["src.core.game3.player"]
   local save = game and game.save
   local session = game and game.session
   local gender = (session and session.gender)
     or (save and (save.gender or (save.player and save.player.gender)))
   local isFemale = (gender == "female" or gender == "F" or gender == 1)
+
+  local avatars = OwSprites.avatars()
+  if avatars then
+    return OwSprites.avatarGraphicsId(OwSprites.avatarState(P), isFemale, avatars)
+  end
 
   if P then
     if P.fieldMoveAnim and P.fieldMoveAnim > 0 then
@@ -445,19 +535,19 @@ function OwSprites.playerGraphicsId(game)
       return isFemale and (Versions.OW_PLAYER_FEMALE_FIELD_MOVE or 10)
                        or (Versions.OW_PLAYER_MALE_FIELD_MOVE or 3)
     end
-    -- If jumping / hop onto/off water, maintain normal or surfing sprite during arc
+    -- pokefirered/src/field_player_avatar.c:1716
+    if P.fishing then
+      return isFemale and (Versions.OW_PLAYER_FEMALE_FISH or 11)
+                       or (Versions.OW_PLAYER_MALE_FISH or 4)
+    end
     -- pokefirered/src/field_effect.c:3294
-    if (P.surfing and not P.dismounting) or P.flyRide then
+    if (P.surfing and not P.dismounting) or P.flyRide or (P.surfJumpFrame and P.surfJumpFrame()) then
       return isFemale and (Versions.OW_PLAYER_FEMALE_SURF or 9)
                        or (Versions.OW_PLAYER_MALE_SURF or 2)
     end
     if P.biking then
       return isFemale and (Versions.OW_PLAYER_FEMALE_BIKE or 8)
                        or (Versions.OW_PLAYER_MALE_BIKE or 1)
-    end
-    if P.fishing then
-      return isFemale and (Versions.OW_PLAYER_FEMALE_FISH or 11)
-                       or (Versions.OW_PLAYER_MALE_FISH or 4)
     end
   end
 

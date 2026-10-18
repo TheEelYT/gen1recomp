@@ -20,8 +20,9 @@ local FieldDefaults = require("src.world.FieldDefaults")
 local Map = require("src.world.Map")
 local Strings = require("src.core.Strings")
 local Status = require("src.battle.Status")
+local Timing = require("src.core.Timing")
 
-local PartyMenu = {}
+local PartyMenu = { isMenu = true }
 PartyMenu.__index = PartyMenu
 PartyMenu.isOpaque = true
 
@@ -35,14 +36,11 @@ PartyMenu.isOpaque = true
 -- MEWMON instead painted every bar with MEWMON's shades, which is why a
 -- full bar came out black and a low one purple (#274, absorbing #272).
 --
--- Two rects differ from the packet's, both because this port draws pixels
+-- One rect differs from the packet's, because this port draws pixels
 -- where the hardware drew OAM over BG:
 --   * the icon block is rows 0-11, not the packet's 0-12 -- row 12 is the
 --     message box's top edge, which on hardware was BG under an OBJ-free
 --     part of the block; here it would take MEWMON instead of the base.
---   * the bar blocks sit one tile right of the packet's 05-11 because this
---     port's bar starts at tile 5 where party_menu.asm:71-76 starts it at
---     4; the span is the same "left cap + six fill tiles".
 function PartyMenu:sgbPalettes(game)
   local P = require("src.render.PaletteFX")
   local base = P.pal(game.data, "GREENBAR")
@@ -65,7 +63,7 @@ function PartyMenu:sgbPalettes(game)
       if self.heal and self.heal.mon == mon then hp = self.heal.from end
       local bar = P.pal(game.data, P.barPalName(hp, mon.stats.hp))
       if bar then
-        zones[#zones + 1] = P.zone(bar, 6, i * 2 - 1, 12, i * 2 - 1)
+        zones[#zones + 1] = P.zone(bar, 5, i * 2 - 1, 11, i * 2 - 1)
       end
     end
   end
@@ -175,6 +173,29 @@ function PartyMenu.mirrorsIcon(name)
 end
 
 local iconImages = {}
+-- the OBP0-baked copies: path -> ogGroup (or "") -> image, the "#obp" half
+-- of the cache, nested so a drawn frame builds no key string per icon
+local obpIconImages = {}
+-- image -> { half = { [frame] = quad }, full = { [frame] = quad } }: icon
+-- quads never change once built, so every drawn frame reuses them (they may
+-- also sit in PaletteFX's UI redraw list, which only reads them)
+local iconQuads = setmetatable({}, { __mode = "k" })
+local function iconQuad(img, kind, frame, w, iw, ih)
+  local byImg = iconQuads[img]
+  if not byImg then
+    byImg = { half = {}, full = {} }
+    iconQuads[img] = byImg
+  end
+  local byFrame = byImg[kind]
+  local q = byFrame[frame]
+  if not q then
+    q = love.graphics.newQuad(0, frame * 16, w, 16, iw, ih)
+    byFrame[frame] = q
+  end
+  return q
+end
+-- Sprites.iconPath's opts, reused (it only reads name / trueColor)
+local iconPathOpts = {}
 -- engine/items/town_map.asm:514
 local OAM_XFLIP = { sx = -1 }
 
@@ -236,8 +257,10 @@ function PartyMenu.drawIcon(game, mon, x, y, selected, counter, forceAlt, obp)
     name = def and def.dex and icons.byDex and icons.byDex[def.dex]
     path = name and icons.icons and icons.icons[name]
   end
+  iconPathOpts.name, iconPathOpts.trueColor = name, trueColor
   path, trueColor = require("src.pokemon.Sprites")
-    .iconPath(game.data, mon, path, { name = name, trueColor = trueColor })
+    .iconPath(game.data, mon, path, iconPathOpts)
+  iconPathOpts.name, iconPathOpts.trueColor = nil, nil
   if not path then return end
   -- Built-in icon classes are DMG 2bpp OBJ art and get the OBP0 bake; a
   -- mod's own image (an entry table rather than an icon name) is authored
@@ -261,8 +284,18 @@ function PartyMenu.drawIcon(game, mon, x, y, selected, counter, forceAlt, obp)
       ogColors, ogGroup = PaletteFX.ogObjNormal()
     end
   end
-  local key = baked and (path .. "#obp" .. (ogGroup or "")) or path
-  if iconImages[key] == nil then
+  -- one cache, two halves: the plain image under its path, the baked one
+  -- under (path, ogGroup) -- the old path .. "#obp" .. group key, nested
+  local cache, key = iconImages, path
+  if baked then
+    cache = obpIconImages[path]
+    if not cache then
+      cache = {}
+      obpIconImages[path] = cache
+    end
+    key = ogGroup or ""
+  end
+  if cache[key] == nil then
     -- resolve through Assets so an overrides/ or transform-derived icon
     -- (e.g. a per-species image at assets/generated/icons/<name>.png) is
     -- picked up the same way battle sprites are
@@ -275,14 +308,16 @@ function PartyMenu.drawIcon(game, mon, x, y, selected, counter, forceAlt, obp)
     else
       ok, img = pcall(love.graphics.newImage, Assets.resolve(path))
     end
-    iconImages[key] = ok and img or false
+    cache[key] = ok and img or false
   end
-  local img = iconImages[key]
+  local img = cache[key]
   if not img then return end
   local alt = forceAlt or false
   if selected then
     local px = math.floor(mon.hp * 48 / math.max(1, mon.stats.hp))
     local speed = px >= 27 and 5 or px >= 10 and 16 or 32
+    -- engine/gfx/mon_icons.asm:24
+    if PaletteFX.runsNotSGB() then speed = speed + 1 end
     alt = math.floor(counter / speed) % 2 == 1
   end
   if alt and (name == "BALL" or name == "HELIX") then
@@ -302,7 +337,7 @@ function PartyMenu.drawIcon(game, mon, x, y, selected, counter, forceAlt, obp)
     -- reuse overworld sheets whose walk-down frame is NOT symmetric, so
     -- drawing the raw 16x16 showed a tucked-back foot the hardware never
     -- displays (#276, absorbing #238).
-    local half = love.graphics.newQuad(0, frame * 16, 8, 16, iw, ih)
+    local half = iconQuad(img, "half", frame, 8, iw, ih)
     love.graphics.draw(img, half, x, y)
     -- sx = -1 about the block's right edge, so the flipped copy lands on
     -- x+8..x+16: the OAM_XFLIP half
@@ -312,7 +347,7 @@ function PartyMenu.drawIcon(game, mon, x, y, selected, counter, forceAlt, obp)
       PaletteFX.markUiSpriteRedraw(img, half, x + 16, y, OAM_XFLIP)
     end
   elseif ih > 16 then
-    local quad = love.graphics.newQuad(0, frame * 16, 16, 16, iw, ih)
+    local quad = iconQuad(img, "full", frame, 16, iw, ih)
     love.graphics.draw(img, quad, x, y)
     if ogColors then PaletteFX.markUiSpriteRedraw(img, quad, x, y) end
   else
@@ -379,12 +414,7 @@ function PartyMenu.new(game, opts)
   return self
 end
 
--- UpdateHPBar2 (engine/gfx/hp_bar.asm, predef'd from item_effects.asm's
--- .doneHealing): UpdateHPBar_AnimateHPBar is documented "for (a) ticks (two
--- waiting frames each)" over a 48-pixel bar, so the shown HP walks
--- maxHP/96 per frame -- the same rate the battle HUD drains at
--- (BattleState:stepHPDrain).  onDone fires on the frame it lands, which is
--- when the caller prints its message. #252
+-- engine/items/item_effects.asm:1208, engine/gfx/hp_bar.asm:81-135
 function PartyMenu:animateTo(mon, fromHP, onDone)
   if not (mon and mon.stats) then
     if onDone then onDone() end
@@ -393,7 +423,44 @@ function PartyMenu:animateTo(mon, fromHP, onDone)
   local from = math.max(0, fromHP or mon.hp)
   -- `from` outlives `shown`: sgbPalettes above needs the pre-heal HP for the
   -- whole fill, because the SGB bar color does not move until the redraw.
-  self.heal = { mon = mon, from = from, shown = from, onDone = onDone }
+  self.heal = { mon = mon, from = from, shown = from, hold = 0,
+                px = Timing.hpBarPixels(from, math.max(1, mon.stats.hp)),
+                onDone = onDone }
+end
+
+function PartyMenu:finishHeal()
+  local heal = self.heal
+  self.heal = nil
+  if heal.onDone then heal.onDone() end
+end
+
+function PartyMenu:stepHeal()
+  local heal = self.heal
+  local maxHP = math.max(1, heal.mon.stats.hp)
+  local goal = heal.mon.hp
+  if heal.hold > 0 then
+    heal.hold = heal.hold - 1
+    if heal.hold == 0 and heal.closing then self:finishHeal() end
+    return
+  end
+  local targetPx = Timing.hpBarPixels(heal.shown, maxHP)
+  if heal.px ~= targetPx then
+    -- engine/gfx/hp_bar.asm:140-148
+    heal.px = heal.px + ((heal.px > targetPx) and -1 or 1)
+    heal.hold = Timing.HP_BAR_PIXEL_STEP - 1
+  elseif heal.shown ~= goal then
+    -- engine/gfx/hp_bar.asm:100-110
+    heal.shown = heal.shown + ((heal.shown > goal) and -1 or 1)
+    heal.started = true
+    heal.hold = Timing.HP_BAR_HP_STEP - 1
+  elseif heal.started then
+    -- engine/gfx/hp_bar.asm:121-135
+    heal.closing = true
+    heal.hold = Timing.hpDrainClosingFrames(true) - 1
+  else
+    -- engine/gfx/hp_bar.asm:69-70
+    self:finishHeal()
+  end
 end
 
 -- Close a picker the caller kept open (see self.keepOpen).  A TextBox pops
@@ -414,8 +481,24 @@ function PartyMenu:eraseCursors()
   self.cursorsErased = true
 end
 
+-- engine/menus/text_box.asm:397-440
+local function submenuBox(self)
+  local n = #self.subItems
+  local lx = 12
+  for _, entry in ipairs(self.subItems) do
+    local mx = FIELD_MOVE_X[entry.move or entry.action]
+    if mx and mx < lx then lx = mx end
+  end
+  return lx, n > 3 and math.max(0, 16 - n * 2) or 11
+end
+
 -- engine/battle/core.asm:2329
 function PartyMenu:refuse(text)
+  -- engine/battle/core.asm:2404-2408
+  if self.submenu then
+    local lx, top = submenuBox(self)
+    self.subEdge = { lx = lx, top = top }
+  end
   self.submenu = nil
   self.subIndex = 1
   local TextBox = require("src.render.TextBox")
@@ -431,17 +514,14 @@ end
 
 function PartyMenu:update(dt)
   -- icon animation counter; 320 = a whole cycle at every HP speed
-  self.blink = ((self.blink or 0) + 1) % 320
+  -- home/pokemon.asm:243
+  if not (self.submenu or self.chosenHollow or self.heal or self.swapAnim) then
+    self.blink = ((self.blink or 0) + 1) % 320
+  end
   -- The bar fill owns the menu while it runs: UpdateHPBar2 is a blocking
   -- predef in item_effects.asm, so no button is read until it lands (#252).
-  local heal = self.heal
-  if heal then
-    heal.shown = math.min(heal.mon.hp,
-                          heal.shown + math.max(1, heal.mon.stats.hp) / 96)
-    if heal.shown >= heal.mon.hp then
-      self.heal = nil
-      if heal.onDone then heal.onDone() end
-    end
+  if self.heal then
+    self:stepHeal()
     return
   end
   -- SwitchPartyMon_ClearGfx (engine/menus/start_sub_menus.asm:690), then
@@ -462,6 +542,7 @@ function PartyMenu:update(dt)
     end
     if anim.frames < 10 or (playing and anim.frames < 30) then return end
     self.swapAnim = nil
+    self.blink = 0 -- home/window.asm:16
     if self.game.data then
       require("src.core.Sound").play(self.game.data, "Swap")
     end
@@ -470,6 +551,7 @@ function PartyMenu:update(dt)
   -- home/window.asm:119
   self.cursorsErased = nil
   self.chosenHollow = nil
+  self.subEdge = nil
   local input = self.game.input
   local party = self.party or self.game.save.party
 
@@ -483,12 +565,14 @@ function PartyMenu:update(dt)
 
   if self.submenu then
     local n = #self.subItems
+    -- home/window.asm:46
     if input:wasPressed("up") then
-      self.subIndex = self.subIndex > 1 and self.subIndex - 1 or n
+      self.subIndex = math.max(1, self.subIndex - 1)
     elseif input:wasPressed("down") then
-      self.subIndex = self.subIndex < n and self.subIndex + 1 or 1
+      self.subIndex = math.min(n, self.subIndex + 1)
     elseif input:wasPressed("b") then
       self.submenu = nil
+      self.blink = 0 -- home/window.asm:16
     elseif input:wasPressed("a") then
       local mon = party[self.index]
       if followerUnavailable(self.game, mon) then
@@ -543,8 +627,10 @@ function PartyMenu:update(dt)
           self.game.stack:push(TextBox.new(self.game, txt))
           return -- .loop: submenu stays open behind the message
         end
-        self.game.stack:pop() -- close the party menu
+        -- engine/menus/start_sub_menus.asm:144-151
+        self.submenu = nil
         Screens.push(self.game, "TownMap", { fly = true, onFly = function(mapId)
+          if self.game.stack:top() == self then self.game.stack:pop() end
           if ow then ow:flyTo(mapId) end
         end })
         return
@@ -560,6 +646,7 @@ function PartyMenu:update(dt)
           return
         end
         self.submenu = nil -- engine/menus/start_sub_menus.asm:66
+        self.chosenHollow = true
         ow:useFlashFieldMove(function() self:close() end)
         return
       elseif action == "surf" then
@@ -579,6 +666,7 @@ function PartyMenu:update(dt)
           -- trySurf closes this menu when its text does (#385)
           local fx, fy = ow.player:facingCell()
           self.submenu = nil -- engine/menus/start_sub_menus.asm:66
+          self.chosenHollow = true
           ow:trySurf(fx, fy, function() self:close() end)
           return
         end
@@ -652,6 +740,7 @@ function PartyMenu:update(dt)
             return
           end
           self.submenu = nil -- engine/menus/start_sub_menus.asm:66
+          self.chosenHollow = true
           ow:useStrengthFieldMove(mon, function() self:close() end)
           return
         elseif ow and ow.useFieldMove then
@@ -663,6 +752,13 @@ function PartyMenu:update(dt)
       elseif action == "softboiled" then
         -- field SOFTBOILED (StartMenu_Pokemon .softboiled): transfer
         -- 1/5 of the user's max HP to a chosen teammate
+        -- engine/menus/start_sub_menus.asm:236-258
+        if mon.stats and mon.hp <= math.floor(mon.stats.hp / 5) then
+          local TextBox = require("src.render.TextBox")
+          self.game.stack:push(TextBox.new(self.game,
+            self.game.data.text._NotHealthyEnoughText))
+          return
+        end
         self.softboiledFrom = self.index
       elseif action == "escape" then
         -- DIG / TELEPORT warp to the last Pokémon Center TOWN (wLastBlackoutMap,
@@ -699,11 +795,22 @@ function PartyMenu:update(dt)
                        self.game.save.player.name)))
           return -- .loop: submenu stays open behind the message
         end
+        if entry.move == "TELEPORT" then
+          -- engine/menus/start_sub_menus.asm:215-226
+          local TextBox = require("src.render.TextBox")
+          self.game.stack:push(TextBox.new(self.game,
+            self.game.data.text._WarpToLastPokemonCenterText, function()
+              self.game.stack:pop()
+              if ow then ow:beginTeleportOut() end
+            end, { auto = { wait = false, delay = 60 } }))
+          return
+        end
         self.game.stack:pop()
         if ow then ow:beginTeleportOut() end
         return
       end
       self.submenu = nil
+      self.blink = 0 -- home/window.asm:16
     end
     return
   end
@@ -719,12 +826,15 @@ function PartyMenu:update(dt)
   if grid then
     self.index = grid
     self.game.partyMenuSavedIndex = self.index
+    self.blink = 0 -- home/window.asm:16
   elseif input:wasPressed("up") then
     self.index = self.index > 1 and self.index - 1 or math.max(1, #party)
     self.game.partyMenuSavedIndex = self.index -- HandlePartyMenuInput #768
+    self.blink = 0 -- home/window.asm:16
   elseif input:wasPressed("down") then
     self.index = self.index < #party and self.index + 1 or 1
     self.game.partyMenuSavedIndex = self.index -- HandlePartyMenuInput #768
+    self.blink = 0 -- home/window.asm:16
   elseif input:wasPressed("b") then
     self.game.stack:pop()
     if self.onCancel then self.onCancel() end
@@ -735,6 +845,8 @@ function PartyMenu:update(dt)
       return
     end
     if self.softboiledFrom then
+      -- engine/items/item_effects.asm:854-857
+      if self.softboiledFrom == self.index then return end
       local user = party[self.softboiledFrom]
       self.softboiledFrom = nil
       self.game.overworld:useSoftboiledFieldMove(user, mon)
@@ -929,11 +1041,11 @@ function PartyMenu:draw()
       for _, m in ipairs(def.tmhm or {}) do
         if m == self.tmhm.move then can = true break end
       end
-      -- right-aligned so the shorter "ABLE" shares "NOT ABLE"'s right edge
+      -- engine/menus/party_menu.asm:93
       if can then
-        Font.draw(Strings("ABLE"), 120, y + 8)
+        Font.draw(Strings("ABLE"), 96, y + 8)
       else
-        Font.draw(Strings("NOT ABLE"), 88, y + 8)
+        Font.draw(Strings("NOT ABLE"), 96, y + 8)
       end
     elseif self.evoStone then
       -- party_menu.asm:114 .evolutionStoneMenu: an EVOLVE_ITEM row matching
@@ -944,10 +1056,11 @@ function PartyMenu:draw()
           can = true break
         end
       end
+      -- engine/menus/party_menu.asm:160
       if can then
-        Font.draw(Strings("ABLE"), 120, y + 8)
+        Font.draw(Strings("ABLE"), 96, y + 8)
       else
-        Font.draw(Strings("NOT ABLE"), 88, y + 8)
+        Font.draw(Strings("NOT ABLE"), 96, y + 8)
       end
     else
       if mon.hp <= 0 then
@@ -966,12 +1079,15 @@ function PartyMenu:draw()
       -- animation has reached rather than the final value; drawHPBar reads
       -- only .hp and .stats, so a shim table is enough and the real mon is
       -- never mutated for display (#252).
-      local shown = mon
+      local shown, shownPx = mon, nil
       if self.heal and self.heal.mon == mon then
         shown = { hp = math.floor(self.heal.shown), stats = mon.stats }
+        shownPx = self.heal.px
       end
       love.graphics.setColor(1, 1, 1, 1)
-      HudTiles.drawHPBar(self.game.data, 5, (y + 8) / 8, shown, nil, barZoned)
+      -- engine/menus/party_menu.asm:71
+      HudTiles.drawHPBar(self.game.data, 4, (y + 8) / 8, shown, nil, barZoned,
+                         nil, shownPx)
       love.graphics.setColor(0, 0, 0, 1)
       Font.draw(("%3d/%3d"):format(shown.hp, mon.stats.hp), 104, y + 8)
     end
@@ -993,6 +1109,10 @@ function PartyMenu:draw()
     end
     end
   end
+  local edge = self.subEdge
+  if edge then
+    Font.drawBox(edge.lx - 1, edge.top, 21 - edge.lx, 18 - edge.top)
+  end
   -- every message id prints through PrintText, so it lands in the standard
   -- bottom text box, rows 12-17 (party_menu.asm:174). #147 #210 #1610
   Font.drawBox(0, 12, 20, 6)
@@ -1004,13 +1124,7 @@ function PartyMenu:draw()
   end
   if self.submenu then
     local n = #self.subItems
-    -- engine/menus/text_box.asm:397-440, data/text_boxes.asm:33 #1819
-    local lx = 12
-    for _, entry in ipairs(self.subItems) do
-      local mx = FIELD_MOVE_X[entry.move or entry.action]
-      if mx and mx < lx then lx = mx end
-    end
-    local top = n > 3 and math.max(0, 16 - n * 2) or 11
+    local lx, top = submenuBox(self)
     Font.drawBox(lx - 1, top, 21 - lx, 18 - top)
     local y0 = (18 - n * 2) * 8
     for si, entry in ipairs(self.subItems) do

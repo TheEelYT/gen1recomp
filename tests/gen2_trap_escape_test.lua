@@ -28,15 +28,15 @@ local TYPES = {
 
 local MOVES = {
   TACKLE = { id = "TACKLE", name = "TACKLE", power = 35, type = "NORMAL",
-    accuracy = 95, pp = 35, effect = "EFFECT_NORMAL_HIT" },
+    accuracy = 95, accuracyRaw = 242, pp = 35, effect = "EFFECT_NORMAL_HIT" },
   MEAN_LOOK = { id = "MEAN_LOOK", name = "MEAN LOOK", power = 0,
-    type = "NORMAL", accuracy = 100, pp = 5, effect = "EFFECT_MEAN_LOOK" },
+    type = "NORMAL", accuracy = 100, accuracyRaw = 255, pp = 5, effect = "EFFECT_MEAN_LOOK" },
   WRAP = { id = "WRAP", name = "WRAP", power = 15, type = "NORMAL",
-    accuracy = 85, pp = 20, effect = "EFFECT_TRAP_TARGET" },
+    accuracy = 85, accuracyRaw = 216, pp = 20, effect = "EFFECT_TRAP_TARGET" },
   ROAR = { id = "ROAR", name = "ROAR", power = 0, type = "NORMAL",
-    accuracy = 100, pp = 20, effect = "EFFECT_FORCE_SWITCH" },
+    accuracy = 100, accuracyRaw = 255, pp = 20, effect = "EFFECT_FORCE_SWITCH" },
   WHIRLWIND = { id = "WHIRLWIND", name = "WHIRLWIND", power = 0,
-    type = "NORMAL", accuracy = 100, pp = 20,
+    type = "NORMAL", accuracy = 100, accuracyRaw = 255, pp = 20,
     effect = "EFFECT_FORCE_SWITCH" },
 }
 
@@ -67,7 +67,7 @@ local POKEMON = {
 local DATA = {
   pokemon = POKEMON,
   moves = MOVES,
-  type_chart = { types = TYPES, matchups = {} },
+  text = require("tests.gen2_battle_text_fixture")(), type_chart = { battleRules = require("tests.gen2_battle_rules_fixture")(), types = TYPES, matchups = {} },
   items = {},
 }
 
@@ -118,7 +118,7 @@ do
   battle:useMove(player, raikou, "MEAN_LOOK")
   eq(player.volatile.trapsTarget, true,
     "ArenaTrap: CANT_RUN lives on the USER's side")
-  check(findText(battle:takeEvents(), "RAIKOU can't escape now!"),
+  check(findText(battle:takeEvents(), "Enemy RAIKOU can't escape now!"),
     "CantEscapeNowText")
   eq(battle:tryEnemyFlee(), false,
     "TryEnemyFlee reads the player's substatus and stays")
@@ -224,7 +224,7 @@ do
   battle:useMove(player, wild, "ROAR")
   eq(battle.over, true, "a higher-level Roar sends the wild mon off")
   eq(battle.outcome, "fled", "as a draw, not a win")
-  check(findText(battle:takeEvents(), "PIDGEY fled in fear!"),
+  check(findText(battle:takeEvents(), "Enemy PIDGEY fled in fear!"),
     "FledInFearText")
 end
 

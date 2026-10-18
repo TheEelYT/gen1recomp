@@ -84,7 +84,7 @@ local SE_FRAMES = {
   SE_DARKEN_MON_PALETTE = 0,
   SE_RESET_SCREEN_PALETTE = 0,
   SE_SHAKE_SCREEN = 72,            -- PredefShakeScreenHorizontally b=8: sum 9f
-  SE_SHAKE_ENEMY_HUD = 44,         -- 8 x (2f + 2f) SCX shake + setup Delay3s
+  SE_SHAKE_ENEMY_HUD = 69,         -- engine/battle/animations.asm:2472
   SE_DELAY_ANIMATION_10 = 10,
   SE_SLIDE_MON_OFF = 24,           -- 8 tile steps x 3f (wSlideMonDelay)
   SE_SLIDE_ENEMY_MON_OFF = 24,     -- same routine, turn flipped
@@ -96,11 +96,11 @@ local SE_FRAMES = {
   SE_RESET_MON_POSITION = 3,
   SE_SHAKE_BACK_AND_FORTH = 96,    -- 16 loops x 2 redraws x Delay3
   SE_BOUNCE_UP_AND_DOWN = 108,     -- 5 x AnimationSlideMonDown + Delay3
-  SE_SQUISH_MON_PIC = 26,          -- 4 loops x 2 x Delay3 + 2f
+  SE_SQUISH_MON_PIC = 25,          -- engine/battle/animations.asm:1564-1590
   SE_MINIMIZE_MON = 6,
   SE_SHOW_MON_PIC = 3, SE_SHOW_ENEMY_MON_PIC = 3,
   SE_HIDE_MON_PIC = 3, SE_HIDE_ENEMY_MON_PIC = 3,
-  SE_BLINK_MON = 60, SE_BLINK_ENEMY_MON = 60, -- 6 x (5f off + 5f on)
+  SE_BLINK_MON = 78, SE_BLINK_ENEMY_MON = 78, -- engine/battle/animations.asm:1360
   SE_FLASH_MON_PIC = 4, SE_FLASH_ENEMY_MON_PIC = 4,
   SE_TRANSFORM_MON = 4,
   SE_SUBSTITUTE_MON = 3,
@@ -109,18 +109,14 @@ local SE_FRAMES = {
   SE_WAVY_SCREEN = 128,
 }
 
--- data/battle_anims/special_effects.asm AnimationIdSpecialEffects:
--- per-frame-block effects keyed on the animation id.  "flash" =
--- AnimationFlashScreen after every frame block.
-local ANIM_ID_FX = {
-  MEGA_PUNCH = "flash", GUILLOTINE = "flash", MEGA_KICK = "flash",
-  HEADBUTT = "flash", DISABLE = "flash", BUBBLEBEAM = "flash",
-  REFLECT = "flash", SPORE = "flash",
-  BLIZZARD = "blizzard",           -- flash at counters 13/9/5/1
-  HYPER_BEAM = "every4",           -- flash when counter % 4 == 0
-  THUNDERBOLT = "every8",          -- flash when counter % 8 == 0
-  SELFDESTRUCT = "explode", EXPLOSION = "explode",
-  ROCK_SLIDE = "rockslide",        -- 1px shakes at 8-11, flash at 1
+-- engine/battle/animations.asm:666
+local ID_FX_KIND = {
+  AnimationFlashScreen = "flash",
+  DoBlizzardSpecialEffects = "blizzard",
+  FlashScreenEveryFourFrameBlocks = "every4",
+  FlashScreenEveryEightFrameBlocks = "every8",
+  DoExplodeSpecialEffects = "explode",
+  DoRockSlideSpecialEffects = "rockslide",
 }
 
 -- Anim tiles load at vSprites tile $31 (LoadMoveAnimationTiles), so the
@@ -271,9 +267,7 @@ local function shootManyBallsSteps(attackerIsPlayer)
   return steps
 end
 
--- AnimationWaterDropletsEverywhere (:1114): 64 one-frame passes of
--- droplet rows; the 8-bit x cursor persists across passes, which is
--- what makes the field scroll.
+-- pokered/engine/battle/animations.asm:1118
 local function waterDropletSteps()
   local steps = {}
   local baseX = 0xF0 -- ld a, -16
@@ -292,6 +286,8 @@ local function waterDropletSteps()
         end
       end
       steps[#steps + 1] = { dur = 1, sprites = sprites }
+      -- pokered/engine/battle/animations.asm:1164
+      steps[#steps + 1] = { dur = 1, sprites = {} }
     end
   end
   return steps
@@ -336,17 +332,21 @@ end
 
 -- effect id -> compiled sprite steps
 local EMITTERS = {
-  SE_SPIRAL_BALLS_INWARD = function(isPlayer) return spiralBallSteps(isPlayer), "flash" end,
-  SE_SHOOT_BALLS_UPWARD = function(isPlayer) return shootBallsSteps(isPlayer) end,
+  -- engine/battle/animations.asm:1499
+  SE_SPIRAL_BALLS_INWARD = function(isPlayer) return spiralBallSteps(isPlayer), "flash", 0 end,
+  -- engine/battle/animations.asm:1640
+  SE_SHOOT_BALLS_UPWARD = function(isPlayer) return shootBallsSteps(isPlayer), nil, 0 end,
   SE_SHOOT_MANY_BALLS_UPWARD = function(isPlayer) return shootManyBallsSteps(isPlayer) end,
-  SE_WATER_DROPLETS_EVERYWHERE = function() return waterDropletSteps() end,
+  SE_WATER_DROPLETS_EVERYWHERE = function()
+    return waterDropletSteps(), nil, 0, true
+  end,
   -- AnimationLeavesFalling runs under wAnimPalette ($f0 on SGB);
   -- petals keep the ambient $e4
   SE_LEAVES_FALLING = function(_, data)
-    return fallingObjectSteps(3, LEAF_TILE, "f0", data.fallingDeltaXs)
+    return fallingObjectSteps(3, LEAF_TILE, "f0", data.fallingDeltaXs), nil, 1
   end,
   SE_PETALS_FALLING = function(_, data)
-    return fallingObjectSteps(20, PETAL_TILE, "e4", data.fallingDeltaXs)
+    return fallingObjectSteps(20, PETAL_TILE, "e4", data.fallingDeltaXs), nil, 1
   end,
 }
 
@@ -446,7 +446,7 @@ function AnimPlayer:start(moveId, attackerIsPlayer, opts)
     emit(4)
   end
 
-  local idFx = ANIM_ID_FX[moveId]
+  local idFx = ID_FX_KIND[self.data.idEffects[moveId]]
 
   -- DoBallTossSpecialEffects (:685): while a Master or Ultra ball is
   -- tossed (wCurItem <= ULTRA_BALL), the per-block special effect XORs
@@ -464,9 +464,9 @@ function AnimPlayer:start(moveId, attackerIsPlayer, opts)
     wantsFlicker = opts
       and (opts.ball == "MASTER_BALL" or opts.ball == "ULTRA_BALL")
   end
-  local ballFlicker = wantsFlicker
-    and (moveId == "TOSS_ANIM" or moveId == "GREATTOSS_ANIM"
-         or moveId == "ULTRATOSS_ANIM")
+  local ballToss = moveId == "TOSS_ANIM" or moveId == "GREATTOSS_ANIM"
+    or moveId == "ULTRATOSS_ANIM"
+  local ballFlicker = wantsFlicker and ballToss
   local obp0Flip = false
 
   for _, row in ipairs(anim.seq) do
@@ -486,12 +486,16 @@ function AnimPlayer:start(moveId, attackerIsPlayer, opts)
       if emitter then
         -- the emitter routines write OAM from slot 0 and clean up after
         oam, oamMax = {}, 0
-        local emSteps, tailFx = emitter(attackerIsPlayer, self.data)
+        local emSteps, tailFx, loadTileset, cleaned = emitter(attackerIsPlayer, self.data)
         events[#events + 1] = { effect = row.effect, frame = frame }
+        if loadTileset then
+          -- pokered/engine/battle/animations.asm:1118
+          emit(tilesetLoadFrames(self.data, loadTileset), {})
+        end
         for _, st in ipairs(emSteps) do
           emit(st.dur, st.sprites)
         end
-        emit(1, {}) -- AnimationCleanOAM / ClearSprites
+        if not cleaned then emit(1, {}) end
         if tailFx == "flash" then flashScreen() end
       else
         local dur = SE_FRAMES[row.effect]
@@ -571,6 +575,11 @@ function AnimPlayer:start(moveId, attackerIsPlayer, opts)
               -- DoSpecialEffectByAnimationId runs after every frame
               -- block with wSubAnimCounter = blocks remaining
               played = played + 1
+              local counter = nblocks - played + 1
+              -- pokered/engine/battle/animations.asm:694
+              if ballToss and counter == 11 then
+                events[#events + 1] = { effect = "SFX_BALL_TOSS", frame = frame }
+              end
               if pendingTink then
                 pendingTink = false
                 events[#events + 1] = { effect = "SFX_TINK", frame = frame }
@@ -578,7 +587,6 @@ function AnimPlayer:start(moveId, attackerIsPlayer, opts)
               end
               if ballFlicker then obp0Flip = not obp0Flip end
               if idFx then
-                local counter = nblocks - played + 1
                 if idFx == "flash"
                    or (idFx == "every4" and counter % 4 == 0)
                    or (idFx == "every8" and counter % 8 == 0)
@@ -722,6 +730,25 @@ local function sameColors(a, b)
   return true
 end
 
+-- one OAM tile at its screen rect (rx, ry), honoring the X/Y flips
+local function blitTile(g, img, quad, s, rx, ry)
+  g.draw(img, quad,
+         rx + (s.xf and 8 or 0),
+         ry + (s.yf and 8 or 0),
+         0,
+         s.xf and -1 or 1,
+         s.yf and -1 or 1)
+end
+
+-- the shade-remap uniforms; c0 is the transparent color-0 slot, so it just
+-- takes color 1
+local function sendTriple(shader, colors)
+  shader:send("c0", colors[1])
+  shader:send("c1", colors[1])
+  shader:send("c2", colors[2])
+  shader:send("c3", colors[3])
+end
+
 -- Draw one compiled step's OAM sprites.  With colorFn, each sprite is
 -- drawn through the PaletteFX shade-remap shader.  The SGB colorized
 -- the finished DMG picture per 8x8 screen cell (the ATTR_BLK regions
@@ -730,14 +757,22 @@ end
 -- once per attribute cell the 8x8 tile touches (up to 4), and cells
 -- that resolve to a different palette than the first are repainted
 -- through a scissor clipped to the cell.
+--
+-- Per-frame cost: no closures per tile, and the uniforms are only re-sent
+-- when the colors differ from the last ones this call sent (colorFn
+-- memoizes, so equal colors are usually the same table).  The first send
+-- of every call is unconditional -- other passes share the shader.
 function AnimPlayer:drawSprites(sprites, colorFn)
   local g = love and love.graphics
-  local shader
+  local PaletteFX, shader
   if colorFn and g and g.setShader then
-    shader = require("src.render.PaletteFX").shader()
+    PaletteFX = require("src.render.PaletteFX")
+    shader = PaletteFX.shader()
   end
   local slices = shader and g.getScissor and g.intersectScissor
                  and g.setScissor
+  local sent -- the triple the shader currently holds (this call)
+  local floor = math.floor
   for i = 1, #sprites do
     local s = sprites[i]
     -- hardware hides sprites at the OAM extremes (y=0/y>=160, x=0/x>=168);
@@ -747,51 +782,48 @@ function AnimPlayer:drawSprites(sprites, colorFn)
       local quad = img and self:tileQuad(s.ts, s.tile)
       if quad then
         local rx, ry = s.x - 8, s.y - 16 -- screen-space rect of the tile
-        local function blit()
-          g.draw(img, quad,
-                 rx + (s.xf and 8 or 0),
-                 ry + (s.yf and 8 or 0),
-                 0,
-                 s.xf and -1 or 1,
-                 s.yf and -1 or 1)
-        end
         -- the attribute cell holding the tile's top-left pixel
-        local cx = math.floor(rx / 8) * 8
-        local cy = math.floor(ry / 8) * 8
+        local cx = floor(rx / 8) * 8
+        local cy = floor(ry / 8) * 8
         local colors = shader and colorFn(s, cx, cy)
         if colors then
           g.setShader(shader)
-          -- c0 is the transparent color-0 slot; send anything
-          shader:send("c0", colors[1])
-          shader:send("c1", colors[1])
-          shader:send("c2", colors[2])
-          shader:send("c3", colors[3])
+          if not (sent and sameColors(sent, colors)) then
+            sendTriple(shader, colors)
+            sent = colors
+          end
         end
-        blit()
+        blitTile(g, img, quad, s, rx, ry)
         if colors and slices and (cx ~= rx or cy ~= ry) then
           -- unaligned: the tile spills into up to 3 more cells; repaint
           -- the ones whose zone palette differs (opaque overdraw -- GB
           -- tiles have binary alpha)
-          local function slice(px, py)
-            if px < 0 or py < 0 or px >= 160 or py >= 144 then
-              return -- fully off-canvas
+          local cx2 = floor((rx + 7) / 8) * 8
+          local cy2 = floor((ry + 7) / 8) * 8
+          for n = 1, 3 do
+            local px, py
+            if n == 1 then
+              if cx2 ~= cx then px, py = cx2, cy end
+            elseif n == 2 then
+              if cy2 ~= cy then px, py = cx, cy2 end
+            elseif cx2 ~= cx and cy2 ~= cy then
+              px, py = cx2, cy2
             end
-            local cc = colorFn(s, px, py)
-            if not cc or sameColors(cc, colors) then return end
-            local s1, s2, s3, s4 = g.getScissor()
-            g.intersectScissor(px, py, 8, 8)
-            shader:send("c0", cc[1])
-            shader:send("c1", cc[1])
-            shader:send("c2", cc[2])
-            shader:send("c3", cc[3])
-            blit()
-            if s1 then g.setScissor(s1, s2, s3, s4) else g.setScissor() end
+            -- skip cells fully off-canvas
+            if px and px >= 0 and py >= 0 and px < 160 and py < 144 then
+              local cc = colorFn(s, px, py)
+              if cc and not sameColors(cc, colors) then
+                local s1, s2, s3, s4 = g.getScissor()
+                g.intersectScissor(px, py, 8, 8)
+                if not sameColors(sent, cc) then
+                  sendTriple(shader, cc)
+                  sent = cc
+                end
+                blitTile(g, img, quad, s, rx, ry)
+                if s1 then g.setScissor(s1, s2, s3, s4) else g.setScissor() end
+              end
+            end
           end
-          local cx2 = math.floor((rx + 7) / 8) * 8
-          local cy2 = math.floor((ry + 7) / 8) * 8
-          if cx2 ~= cx then slice(cx2, cy) end
-          if cy2 ~= cy then slice(cx, cy2) end
-          if cx2 ~= cx and cy2 ~= cy then slice(cx2, cy2) end
         end
         if colors then
           g.setShader()
@@ -799,6 +831,8 @@ function AnimPlayer:drawSprites(sprites, colorFn)
       end
     end
   end
+  -- the direct sends above bypass sendColors' last-sent record
+  if sent then PaletteFX.forgetSent(shader) end
 end
 
 return AnimPlayer

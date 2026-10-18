@@ -598,6 +598,8 @@ def pokemon_assets(pokegold, species_order, symbols, defines=None,
 
 
 REQUIRED_SYMBOLS = {
+    "CriticalHitChances", "CriticalHitMoves", "AccuracyLevelMultipliers",
+    "FlailReversalPower", "PresentPower", "MoveEffectsPointers", "MoveEffects",
     "BaseData", "PokemonNames", "PokemonPicPointers", "UnownPicPointers",
     "EggPic",
     # gfx/evo/egg_hatch.2bpp, the two OBJ tiles EggHatch_AnimationSequence
@@ -643,9 +645,9 @@ REQUIRED_SYMBOLS = {
     "LavaBubbleTileFrames",
     # data/sprites/emotes.asm:22 `emote GrassRustleGFX, 1, $fe`, the one tile
     # ShakeGrass' SPRITEMOVEDATA_GRASS object draws.
-    "GrassRustleGFX",
+    "GrassRustleGFX", "CutGrassGFX", "JumpShadowGFX",
     "PokemonCries", "SFX",
-    "OverworldSprites", "ChrisSpriteGFX", "Moves", "EvosAttacksPointers",
+    "OverworldSprites", "OutdoorSprites", "ChrisSpriteGFX", "Moves", "EvosAttacksPointers",
     # data/sprites/sprite_mons.asm: one species byte per SPRITE_POKEMON id,
     # which GetMonSprite's .Icon arm feeds to LoadOverworldMonIcon
     "SpriteMons",
@@ -705,6 +707,7 @@ REQUIRED_SYMBOLS = {
     # Battle + pokemon runtime data
     "MoveNames", "TypeNames", "TypeMatchups", "TMHMMoves", "GrowthRates",
     "ItemAttributes", "MoveDescriptions", "ItemDescriptions",
+    "TimeCapsule_CatchRateItems",
     # Wild encounters (data/wild/*)
     "JohtoGrassWildMons", "JohtoWaterWildMons",
     "KantoGrassWildMons", "KantoWaterWildMons",
@@ -1285,6 +1288,13 @@ def generate(pokegold, symbols_path, defines=None, required=None,
             "itemNameCount": item_name_count,
             # Battle / pokemon runtime orders
             "moveEffectOrder": move_effect_order,
+            "battleCommandOrder": [
+                match.group(1)
+                for _, line in read_asm(os.path.join(
+                    pokegold, "macros/scripts/battle_commands.asm"), defines)
+                if (match := re.match(r"\s*command\s+(\w+)", line))
+                and match.group(1) not in ("endmove", "endturn")
+            ],
             "growthRateOrder": growth_order,
             "eggGroupOrder": egg_group_order,
             "evolveMethodOrder": evolve_order,

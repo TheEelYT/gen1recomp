@@ -201,9 +201,12 @@ local function unique_mids_by_pair(grids, scriptMids)
 end
 
 function Extract.findImport(imports)
-  for _, id in ipairs({ "firered", "leafgreen" }) do
-    local info = imports:info(id)
-    if info then return id, info end
+  local GameVersion = require("src.core.GameVersion")
+  for _, id in ipairs(GameVersion.ORDER) do
+    if GameVersion.generation(id) == 3 then
+      local info = imports:info(id)
+      if info then return id, info end
+    end
   end
   return nil, nil
 end
@@ -768,10 +771,6 @@ function Extract.run(imports, cache, progressCb, opts)
     script_count = scriptBundle and scriptBundle.scriptCount,
     script_seeds = scriptBundle and scriptBundle.seedCount,
   }
-end
-
-function Extract.runNativeOnly(imports, cache, progressCb)
-  return Extract.run(imports, cache, progressCb)
 end
 
 --- Legacy 2bpp quantize extract preserved as dormant code below:
@@ -2125,6 +2124,7 @@ end
 --- Rebuild native blobs only (demake cache already valid). Seconds, not minutes.
 -- Uses full gMapGroups census → CacheFS (same pair set as Extract.run).
 function Extract.runNativeOnly(imports, cache, progressCb)
+  if _G.POKEPORT_VITA then return Extract.run(imports, cache, progressCb) end
   local importId, info = Extract.findImport(imports)
   if not importId then
     return false, "no FireRed/LeafGreen optional import installed"

@@ -39,12 +39,24 @@ function Daycare.nickname(mon)
   return (Pokemon.name and Pokemon.name(speciesOf(mon))) or ""
 end
 
+local function isRse(session)
+  local ok, row = pcall(function() return require("src.core.game3.profile").forSession(session) end)
+  return ok and type(row) == "table" and row.family == "rse", row
+end
+
+function Daycare.saveKey(session)
+  local rse, row = isRse(session)
+  if rse then return tostring(row.id) .. "_daycare" end
+  return Daycare.SAVE_KEY
+end
+
 local function persistentStore(session, field)
   if type(session.modData) ~= "table" then session.modData = {} end
-  local root = session.modData[Daycare.SAVE_KEY]
+  local key = Daycare.saveKey(session)
+  local root = session.modData[key]
   if type(root) ~= "table" then
     root = {}
-    session.modData[Daycare.SAVE_KEY] = root
+    session.modData[key] = root
   end
   local store = root[field]
   if type(store) ~= "table" then
@@ -154,25 +166,63 @@ function Daycare.teachMove(mon, moveId)
   mon.moves = mon.moves or {}
   mon.pp = mon.pp or {}
   mon.maxPp = mon.maxPp or {}
-  for i = 1, #mon.moves do
-    if mon.moves[i] == moveId then return false end
-  end
+
   local Pokemon = pokemonMod()
+  local moves = {}
+  local entries = {}
+  local pps = {}
+  local maxPps = {}
+  local tableShaped = false
+  for i = 1, MAX_MON_MOVES do
+    local entry = mon.moves[i]
+    if type(entry) == "table" then tableShaped = true end
+    local m = tonumber(Pokemon.moveIdAt(mon, i)) or 0
+    if m > 0 then
+      if m == moveId then return false end
+      moves[#moves + 1] = m
+      entries[#entries + 1] = entry
+      local pp = mon.pp[i]
+      local maxPp = mon.maxPp[i]
+      if type(entry) == "table" then
+        pp = entry.pp or pp
+        maxPp = entry.maxPp or maxPp
+      end
+      pps[#pps + 1] = tonumber(pp) or 0
+      maxPps[#maxPps + 1] = tonumber(maxPp) or 0
+    end
+  end
+
   local maxPp = 0
   if Pokemon.movePp then maxPp = tonumber(Pokemon.movePp(moveId)) or 0 end
-  if #mon.moves < MAX_MON_MOVES then
-    mon.moves[#mon.moves + 1] = moveId
-    mon.pp[#mon.moves] = maxPp
-    mon.maxPp[#mon.moves] = maxPp
-    return true
+  local newEntry = moveId
+  if tableShaped then newEntry = { id = moveId, moveId = moveId, pp = maxPp, maxPp = maxPp } end
+
+  if #moves < MAX_MON_MOVES then
+    moves[#moves + 1] = moveId
+    entries[#entries + 1] = newEntry
+    pps[#pps + 1] = maxPp
+    maxPps[#maxPps + 1] = maxPp
+  else
+    -- pokefirered/src/daycare.c:495 DeleteFirstMoveAndGiveMoveToMon
+    table.remove(moves, 1)
+    table.remove(entries, 1)
+    table.remove(pps, 1)
+    table.remove(maxPps, 1)
+    moves[MAX_MON_MOVES] = moveId
+    entries[MAX_MON_MOVES] = newEntry
+    pps[MAX_MON_MOVES] = maxPp
+    maxPps[MAX_MON_MOVES] = maxPp
   end
-  -- pokefirered/src/daycare.c:495 DeleteFirstMoveAndGiveMoveToMon
-  table.remove(mon.moves, 1)
-  table.remove(mon.pp, 1)
-  table.remove(mon.maxPp, 1)
-  mon.moves[MAX_MON_MOVES] = moveId
-  mon.pp[MAX_MON_MOVES] = maxPp
-  mon.maxPp[MAX_MON_MOVES] = maxPp
+
+  for i = 1, MAX_MON_MOVES do
+    if tableShaped then
+      mon.moves[i] = entries[i]
+    else
+      mon.moves[i] = moves[i] or 0
+    end
+    mon.pp[i] = pps[i] or 0
+    mon.maxPp[i] = maxPps[i] or 0
+  end
   return true
 end
 
@@ -335,9 +385,28 @@ local function isEgg(mon)
 end
 
 -- pokefirered/src/daycare.c:1157
+-- pokeemerald/src/egg_hatch.c:926 GetEggCyclesToSubtract
+function Daycare.eggCyclesToSubtract(session)
+  local Constants = require("src.core.game3.constants")
+  local C = Constants.of(Constants.versionOf(session))
+  local magma = C:require("abilities", "ABILITY_MAGMA_ARMOR")
+  local flame = C:require("abilities", "ABILITY_FLAME_BODY")
+  local Pokemon = pokemonMod()
+  for i = 1, PARTY_SIZE do
+    local mon = session and session.party and session.party[i]
+    if mon and speciesOf(mon) ~= SPECIES_NONE and not isEgg(mon) then
+      local ability = tonumber(mon.abilityId or mon.ability)
+      if ability == nil and Pokemon.abilityId then ability = Pokemon.abilityId(speciesOf(mon), mon.personality) end
+      if ability == magma or ability == flame then return 2 end
+    end
+  end
+  return 1
+end
+
 function Daycare.tickEggCycles(session)
   local party = session and session.party
   if type(party) ~= "table" then return nil end
+  local toSub = isRse(session) and Daycare.eggCyclesToSubtract(session) or nil
   for slotIdx = 1, PARTY_SIZE do
     local mon = party[slotIdx]
     -- pokefirered/src/daycare.c:1161
@@ -345,7 +414,12 @@ function Daycare.tickEggCycles(session)
       local cycles = eggCyclesOf(mon)
       if cycles ~= 0 then
         -- pokefirered/src/daycare.c:1171 steps -= 1
-        cycles = cycles - 1
+        if toSub and cycles >= toSub then
+          -- pokeemerald/src/daycare.c:913
+          cycles = cycles - toSub
+        else
+          cycles = cycles - 1
+        end
         mon.friendship = cycles
         mon.eggCycles = cycles
       else
@@ -361,6 +435,8 @@ end
 function Daycare.step(session)
   session = sessionOf(session)
   if not session then return 0 end
+  local policy = require("src.core.game3.profile").forSession(session).daycare
+  if policy and policy.step then return policy.step(session) end
   local r5 = Daycare.route5Of(session)
   if r5 and speciesOf(r5.mon) ~= SPECIES_NONE then
     r5.steps = r5.steps + 1

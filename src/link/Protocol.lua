@@ -79,6 +79,7 @@ function Protocol.packMon(mon)
     exp = mon.exp,
     hp = mon.hp,
     status = mon.status,
+    sleepTurns = mon.status == "SLP" and mon.sleepTurns or nil,
     nickname = mon.nickname,
     dvs = mon.dvs,
     statExp = mon.statExp,
@@ -158,7 +159,9 @@ function Protocol.unpackMon(data, packed, opts)
   local forced = forceLevel
   local hp = forced and stats.hp
     or math.max(0, math.min(stats.hp, math.floor(num(packed.hp, stats.hp))))
-  local status = forced and nil or text(packed.status)
+  local status = not forced and text(packed.status) or nil
+  local sleepTurns = status == "SLP"
+    and math.max(1, math.min(7, math.floor(num(packed.sleepTurns, 1)))) or nil
   -- preserve the sender's original-trainer identity (party_struct MON_OTID +
   -- wPartyMonOT on a real cable), clamped/typed like every other field so a
   -- tampered packet can't inject a bad ID or a huge name.  Left nil when the
@@ -179,6 +182,7 @@ function Protocol.unpackMon(data, packed, opts)
     stats = stats,
     hp = hp,
     status = status,
+    sleepTurns = sleepTurns,
     nickname = text(packed.nickname),
     ot = ot,
     otId = otId,
@@ -341,7 +345,7 @@ function Protocol.unpackMon2(data, packed, opts)
   local forced = forceLevel
   local hp = forced and stats.hp
     or math.max(0, math.min(stats.hp, math.floor(num(packed.hp, stats.hp))))
-  local status = forced and nil or text(packed.status)
+  local status = not forced and text(packed.status) or nil
   local packedOtId = num(packed.otId)
   local otId = packedOtId
     and math.max(0, math.min(65535, math.floor(packedOtId))) or nil
@@ -587,6 +591,22 @@ function Protocol.packMon3(mon)
     evs[key] = clampInt(srcEvs[key], 0, 255, 0)
   end
   local egg = Pokemon.isEgg(mon) == true
+  -- pokeruby/include/pokemon.h:69
+  local contest = {}
+  for _, key in ipairs({ "cool", "beauty", "cute", "smart", "tough", "sheen" }) do
+    contest[key] = clampInt(type(mon.contest) == "table" and mon.contest[key], 0, 255, 0)
+  end
+  local ribbonWord = require("src.core.game3.rse.ribbons").word(mon)
+  if mon.modernFatefulEncounter ~= nil then
+    local has = math.floor(ribbonWord / 2147483648) % 2 == 1
+    if mon.modernFatefulEncounter and not has then ribbonWord = ribbonWord + 2147483648 end
+    if not mon.modernFatefulEncounter and has then ribbonWord = ribbonWord - 2147483648 end
+  end
+  local abilityNum = mon.abilityNum
+  if abilityNum == nil then abilityNum = pair[2] ~= 0 and ability == pair[2] and 1 or 0 end
+  local otFull = clampInt(mon.otId, 0, U32 - 1, 0)
+  local otSecret = mon.otSecretId
+  if otSecret == nil then otSecret = math.floor(otFull / 65536) end
   local friendship = mon.friendship
   if friendship == nil then friendship = mon.happiness end
   if friendship == nil then friendship = Pokemon.baseFriendship(species) end
@@ -598,12 +618,15 @@ function Protocol.packMon3(mon)
     hp = clampInt(mon.hp, 0, 65535, 0),
     status = statusOf3(mon),
     personality = personality,
-    otId = clampInt(mon.otId, 0, U32 - 1, 0) % 65536,
-    otSecretId = clampInt(mon.otSecretId, 0, 65535, 0),
+    otId = otFull % 65536,
+    otSecretId = clampInt(otSecret, 0, 65535, 0),
     otName = clipName(mon.otName or mon.ot, OT_NAME_LENGTH),
     otGender = clampInt(mon.otGender, 0, 1, 0),
     nature = personality % 25,
     ability = clampInt(ability, 0, 255, 0),
+    abilityNum = clampInt(abilityNum, 0, 1, 0),
+    language = clampInt(mon.language, 0, 255, egg and 1 or 2),
+    contest = contest,
     gender = Pokemon.gender(species, personality),
     ivs = ivs,
     evs = evs,
@@ -615,10 +638,11 @@ function Protocol.packMon3(mon)
     metLevel = clampInt(mon.metLevel, 0, 100, 0),
     metGame = clampInt(mon.metGame, 0, 15, 0),
     pokeball = clampInt(mon.pokeball, 1, BALL_LAST, 4),
-    ribbons = clampInt(mon.ribbons, 0, U32 - 1, 0),
+    ribbons = ribbonWord,
     markings = clampInt(mon.markings, 0, 15, 0),
     isEgg = egg,
     fatefulEncounter = mon.fatefulEncounter == true,
+    modernFatefulEncounter = math.floor(ribbonWord / 2147483648) % 2 == 1,
     eggCycles = egg and clampInt(mon.eggCycles, 0, 255, 0) or 0,
   }
 end
@@ -837,6 +861,9 @@ function Protocol.unpackMon3(data, packed, opts)
     evs = evs,
     ability = ability,
     abilityId = ability,
+    abilityNum = field(packed.abilityNum, 0, 1, pair[2] ~= 0 and ability == pair[2] and 1 or 0),
+    language = field(packed.language, 0, 255, isEgg and 1 or 2),
+    contest = {},
     gender = gender,
     happiness = friendship,
     friendship = friendship,
@@ -856,7 +883,12 @@ function Protocol.unpackMon3(data, packed, opts)
     isEgg = isEgg,
     eggCycles = isEgg and field(packed.eggCycles, 0, 255, 0) or 0,
     fatefulEncounter = packed.fatefulEncounter == true,
+    modernFatefulEncounter = packed.modernFatefulEncounter == true
+      or math.floor((tonumber(packed.ribbons) or 0) / 2147483648) % 2 == 1,
   }
+  for _, key in ipairs({ "cool", "beauty", "cute", "smart", "tough", "sheen" }) do
+    mon.contest[key] = field(type(packed.contest) == "table" and packed.contest[key], 0, 255, 0)
+  end
   Pokemon.applyStats(mon)
   require("src.core.game3.save_mon").normalize(mon)
   return mon
@@ -1114,8 +1146,17 @@ function TradeSession:handle(msg)
       end
     end
     if self.stage == "waitParty" then self.stage = "picking" end
+  elseif (msg.type == "pick" or msg.type == "confirm")
+      and (self.stage == "restart" or self.stage == "declined") then
+    self.pending = self.pending or {}
+    self.pending[#self.pending + 1] = msg
   elseif msg.type == "pick" then
-    self.theirPick = num(msg.index)
+    -- engine/link/cable_club.asm:571
+    if msg.cancel then
+      self.theirCancel = true
+    else
+      self.theirPick = num(msg.index)
+    end
     self:advance()
   elseif msg.type == "confirm" then
     self.theirConfirm = msg.ok
@@ -1141,6 +1182,24 @@ function TradeSession:pick(index)
   return { type = "pick", index = self:wireIndex(index) }
 end
 
+-- engine/link/cable_club.asm:571
+function TradeSession:cancelPick()
+  self.myCancel = true
+  self:advance()
+  return { type = "pick", cancel = true }
+end
+
+-- engine/link/cable_club.asm:532
+function TradeSession:reset()
+  self.myPick, self.theirPick = nil, nil
+  self.myCancel, self.theirCancel = nil, nil
+  self.myConfirm, self.theirConfirm = nil, nil
+  self.stage = "picking"
+  local pending = self.pending
+  self.pending = nil
+  for _, msg in ipairs(pending or {}) do self:handle(msg) end
+end
+
 function TradeSession:confirm(ok)
   self.myConfirm = ok
   self:advance()
@@ -1159,16 +1218,28 @@ function TradeSession:advance()
     self.error = "the other game picked a POKéMON that isn't there"
     return
   end
-  if self.stage == "picking" and self.myPick then
-    self.stage = self.theirPick and "confirming" or "waitPick"
-  elseif self.stage == "waitPick" and self.theirPick then
-    self.stage = "confirming"
+  if self.stage == "picking" and (self.myPick or self.myCancel) then
+    self.stage = "waitPick"
+  end
+  if self.stage == "waitPick" then
+    local theirs = self.theirPick or self.theirCancel
+    if self.myCancel and self.theirCancel then
+      -- engine/link/cable_club.asm:578
+      self.stage = "cancelled"
+      self.mutual = true
+    elseif (self.myCancel or self.theirCancel) and theirs then
+      -- engine/link/cable_club.asm:532
+      self.stage = "restart"
+    elseif self.theirPick then
+      self.stage = "confirming"
+    end
   end
   if self.stage == "confirming" and self.myConfirm ~= nil and self.theirConfirm ~= nil then
     if self.myConfirm and self.theirConfirm then
       self.stage = "done"
     else
-      self.stage = "cancelled"
+      -- engine/link/cable_club.asm:746
+      self.stage = "declined"
     end
   end
 end
@@ -1184,7 +1255,9 @@ function TradeSession:apply(game)
   -- a mod validates its own extra namespace here, before the mon is filed
   Runtime.emit("pokemon.received",
                { mon = received, from = "link", peerName = self.peerName })
-  self.party[self.myPick] = received
+  -- engine/link/cable_club.asm:800
+  table.remove(self.party, self.myPick)
+  self.party[#self.party + 1] = received
   -- PIKAHAPPY_TRADE (engine/link/cable_club.asm:801): trading the
   -- companion away is the biggest happiness hit and zeroes the mood
   if game and sent then

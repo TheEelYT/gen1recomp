@@ -27,9 +27,9 @@ local TYPES = {
 
 local MOVES = {
   TACKLE = { id = "TACKLE", name = "TACKLE", power = 35, type = "NORMAL",
-    accuracy = 100, pp = 35, effect = "EFFECT_NORMAL_HIT" },
+    accuracy = 100, accuracyRaw = 255, pp = 35, effect = "EFFECT_NORMAL_HIT" },
   ROCK_THROW = { id = "ROCK_THROW", name = "ROCK THROW", power = 50,
-    type = "ROCK", accuracy = 100, pp = 15, effect = "EFFECT_NORMAL_HIT" },
+    type = "ROCK", accuracy = 100, accuracyRaw = 255, pp = 15, effect = "EFFECT_NORMAL_HIT" },
 }
 
 local GROWTH = {
@@ -60,7 +60,7 @@ local POKEMON = {
 local DATA = {
   pokemon = POKEMON,
   moves = MOVES,
-  type_chart = { types = TYPES, matchups = {} },
+  text = require("tests.gen2_battle_text_fixture")(), type_chart = { battleRules = require("tests.gen2_battle_rules_fixture")(), types = TYPES, matchups = {} },
   items = {},
 }
 
@@ -189,7 +189,7 @@ do
   local before = mon.hp
   eq(battle:checkObedience("ROCK_THROW"), true, "won't obey")
   check(findText(battle.events, "ROCKY won't obey!"), "says so")
-  check(findText(battle.events, "It hurt itself in its confusion!"),
+  check(findText(battle.events, "It hurt itself in\nits confusion!"),
     "and hits itself (HitConfusion)")
   check(mon.hp < before, "for real damage")
 
@@ -213,8 +213,7 @@ do
   check(findText(events, "ROCKY turned away!"), "the turn opens on the loaf")
   eq(mon.moves[1].pp, 15, "no PP left the disobeyed move")
   eq(wild.hp, hpBefore, "and the enemy was never touched")
-  check(findText(events, "Wild PIDGEY\nused TACKLE!")
-    or findText(events, "PIDGEY\nused TACKLE!"),
+  check(findText(events, "Enemy PIDGEY\nused TACKLE!"),
     "while the enemy's half of the turn still ran")
 
   -- The second half of a charge move is exempt (CheckUserIsCharging): a

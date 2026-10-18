@@ -90,7 +90,10 @@ end
 -- package.loaded.io and undo the whole mod environment -- so it is installed
 -- in player builds too, for any boot that has mods on it.
 
-local devShim = { installed = false, permissions = {}, warned = {}, depth = 0 }
+local devShim = { installed = false, permissions = {}, warned = {}, depth = 0,
+  -- fast path for already-loaded, undeniable modules (see fastEligible);
+  -- `fast` is the test seam that forces every require down the slow path
+  fast = true, memo = {}, onFastHit = nil }
 
 -- The Gen 1 engine modules a Gold boot never instantiates.  Each one still
 -- LOADS under Gen 2 -- require finds the file and hands back a module table --
@@ -151,6 +154,15 @@ local COMPAT = {
   [3] = { module = Gen3Compat, file = "src/mods/Gen3Compat.lua", tag = "gen3" },
 }
 
+local function compatFor(generation, version)
+  local compat = COMPAT[generation]
+  if compat and type(compat.module.appliesTo) == "function"
+      and not compat.module.appliesTo(version) then
+    return nil
+  end
+  return compat
+end
+
 -- the src.* modules the mod surface points authors at: another mod's
 -- exports carry a version string that wants range-checking before use, and
 -- ChipAsm is the authoring path for chip music and sfx
@@ -195,7 +207,7 @@ local function scanRequire(name)
   -- A Gen 1-only module on a Gold boot is not a permissions question, it is a
   -- dead patch: reported once, attributed, and onto the boot error feed the
   -- manager shows the player rather than a dev-only log line.
-  local compat = COMPAT[devShim.generation]
+  local compat = compatFor(devShim.generation, devShim.version)
   if devShim.generation ~= 1 and GEN1_ONLY_MODULES[name]
       and not (compat and compat.module.serves(name)) then
     local key = modId .. "|" .. (compat and compat.tag or "gen?") .. "|" .. name
@@ -235,10 +247,60 @@ local function engineRequire(name)
   return module
 end
 
+-- Whether a no-owner require of `name` is decided by nothing but
+-- package.loaded.  For a caller with no Runtime.currentMod/modRequire the slow
+-- path can only (a) deny via Sandbox.moduleDenial(name, nil) -- permissions
+-- only ever lift the network denial, so nil permissions is the most
+-- restrictive set; the cross-generation denial needs an owner id and does
+-- not apply -- (b) warn in scanRequire, which returns at once with no owner,
+-- or (c) answer from this generation's compat arm.  None of the three fires
+-- when the name is undeniable and unserved.  The answer depends only on
+-- (name, generation) -- both deny tables and the adapter tables are
+-- load-time constants -- and the memo is keyed by generation and dropped
+-- whenever the shim is (re)installed or a session ends.
+local function fastEligible(name)
+  if type(name) ~= "string" then return false end
+  local key = devShim.generation or 0
+  local memo = devShim.memo[key]
+  if not memo then
+    memo = {}
+    devShim.memo[key] = memo
+  end
+  local ok = memo[name]
+  if ok == nil then
+    local compat = COMPAT[devShim.generation]
+    ok = Sandbox.moduleDenial(name, nil) == nil
+      and not (compat and compat.module.serves(name))
+    memo[name] = ok
+  end
+  return ok
+end
+
+local function resetFastMemo()
+  devShim.memo = {}
+end
+
+-- test seams: force the slow path (optionally observing each fast return via
+-- onHit, nil in production), and read back the live memo
+function Loader._setFastRequire(enabled, onHit)
+  devShim.fast = enabled and true or false
+  devShim.onFastHit = onHit
+  resetFastMemo()
+end
+
+function Loader._resetShimWarned()
+  devShim.warned = {}
+end
+
+function Loader._fastRequireMemo()
+  return devShim.memo[devShim.generation or 0]
+end
+
 function Loader.endSession()
   devShim.generation = nil
   devShim.version = nil
   devShim.errors = nil
+  resetFastMemo()
 end
 
 function Loader:_installDevShim()
@@ -246,13 +308,37 @@ function Loader:_installDevShim()
     devShim.permissions[id] = mod.manifest.permissionSet
   end
   devShim.dev = self.dev
+  resetFastMemo()
   if devShim.installed then return end
   devShim.installed = true
   local delegate = require
+  -- The stock require answers an already-loaded module straight out of
+  -- package.loaded, so once every check below has passed the shim can do the
+  -- same without the pcall.  Only when delegating to the stock C function:
+  -- a Lua wrapper in between may want to see every call.
+  local delegateIsStock = delegate == rawRequire
+    and type(delegate) == "function"
+    and (debug.getinfo(delegate, "S") or {}).what == "C"
   _G.require = function(name, ...)
     -- only the mod's own call is the mod's doing; whatever that module
     -- requires in turn is the engine wiring itself up
     if devShim.depth == 0 then
+      -- Fast path: no owner, module already loaded, undeniable and unserved.
+      -- Returns exactly what the delegate would for a real module value.
+      -- LuaJIT leaves a non-module placeholder (a number, or a userdata
+      -- sentinel) in package.loaded while a load is running or after it threw,
+      -- and the delegate turns that into a "loop or previous error" error, so
+      -- only a table, function or true is taken here.
+      if devShim.fast and not (Runtime.currentMod or Runtime.modRequire) then
+        local loaded = package.loaded[name]
+        local kind = type(loaded)
+        if (kind == "table" or kind == "function" or loaded == true)
+            and fastEligible(name) then
+          local onHit = devShim.onFastHit
+          if onHit then onHit(name) end
+          return loaded
+        end
+      end
       -- Backstop for the deny list Sandbox.envFor's require already applies:
       -- an engine module requiring io is the engine wiring itself up, a mod
       -- doing it is the hole this closes, and any future path that runs mod
@@ -271,7 +357,7 @@ function Loader:_installDevShim()
       -- The Gen 1 name a mod asked for, answered by this generation's compat arm.
       -- Engine code keeps the real module: src/render/PaletteFX.lua:776
       -- requires src.core.Game on both generations and means it.
-      local compat = COMPAT[devShim.generation]
+      local compat = compatFor(devShim.generation, devShim.version)
       if compat and compat.module.serves(name)
           and (owner or callerIsMod(3)) then
         local adapter = compat.module.resolve(name, Runtime.currentMod)
@@ -284,6 +370,16 @@ function Loader:_installDevShim()
           end
           return adapter
         end
+      end
+    end
+    if delegateIsStock then
+      -- a userdata or number here is require's own "loading" / failed-load
+      -- placeholder (LuaJIT leaves a number after a loader threw), whose
+      -- error the stock path has to raise
+      local loaded = package.loaded[name]
+      local kind = type(loaded)
+      if kind == "table" or kind == "function" or loaded == true then
+        return loaded
       end
     end
     devShim.depth = devShim.depth + 1
@@ -1299,11 +1395,14 @@ local GEN3_API = {
   firered = { battle = "src.battle.game3.BattleAPI", world = "src.world.game3.WorldAPI" },
   leafgreen = { battle = "src.battle.game3.BattleAPI", world = "src.world.game3.WorldAPI" },
 }
+local GEN3_API_BY_ENGINE = { game3 = GEN3_API.firered }
 local GEN3_API_DEFAULT = GEN3_API.firered
 
 function Loader.apiModule(kind, generation, version)
   if generation == 3 then
-    local row = type(version) == "string" and GEN3_API[version] or nil
+    local row = type(version) == "string"
+      and (GEN3_API[version] or (GameVersion.VERSIONS[version]
+        and GEN3_API_BY_ENGINE[GameVersion.engine(version)])) or nil
     return (row and row[kind]) or GEN3_API_DEFAULT[kind]
   end
   if generation == 2 then

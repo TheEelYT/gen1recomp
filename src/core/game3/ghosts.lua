@@ -1,18 +1,29 @@
+local function lazyReq(name)
+  local m = package.loaded[name]
+  if type(m) == "table" then return m end
+  return require(name)
+end
+
 local Ghosts = {}
 
 Ghosts._pools = {}
 
 local function Map()
-  return package.loaded["src.core.game3.map"] or require("src.core.game3.map")
+  return package.loaded["src.core.game3.map"] or lazyReq("src.core.game3.map")
 end
 
 local function Objects()
-  return package.loaded["src.core.game3.objects"] or require("src.core.game3.objects")
+  return package.loaded["src.core.game3.objects"] or lazyReq("src.core.game3.objects")
 end
 
+local permsLoaded, permsMod
 local function permissions()
-  local ok, P = pcall(require, "src.world.gen2.Permissions")
-  return ok and P or nil
+  if not permsLoaded then
+    local ok, P = pcall(lazyReq, "src.world.gen2.Permissions")
+    permsMod = ok and P or nil
+    permsLoaded = true
+  end
+  return permsMod
 end
 
 local function defsFor(mapId, def)
@@ -37,7 +48,7 @@ local function contextFor(entry, pool)
       end
       -- pokefirered/src/event_object_movement.c:4889
       if dir and entry.def then
-        local C = require("src.core.game3.collision")
+        local C = lazyReq("src.core.game3.collision")
         if C.directionallyImpassableOn
             and C.directionallyImpassableOn(entry.def, fromX, fromY, tx, ty, dir) then
           return false
@@ -62,23 +73,94 @@ end
 
 Ghosts._contextFor = contextFor
 
-function Ghosts.sync()
-  local M = Map()
-  local placed = {}
-  for _, entry in ipairs(M.world or {}) do
-    placed[entry.id] = true
-    if not Ghosts._pools[entry.id] then
-      local defs = defsFor(entry.id, entry.def)
-      if defs then
-        Ghosts._pools[entry.id] = Objects().spawnFromDefs(defs, entry.def, entry.id)
-      end
-    end
+local ctxCache = setmetatable({}, { __mode = "k" })
+
+local EMPTY = {}
+local syncPlaced = {}
+
+-- True when the last rebuild still describes Map.world and the pool table:
+-- same world list, a pool for every placed map and no extra pools.
+local function syncCurrent(world)
+  if Ghosts._syncWorld ~= world or Ghosts._syncPools ~= Ghosts._pools then return false end
+  local n = 0
+  for _, entry in ipairs(world) do
+    if not Ghosts._pools[entry.id] then return false end
+    n = n + 1
   end
   for id in pairs(Ghosts._pools) do
-    if not placed[id] and id ~= Ghosts._held then
-      Ghosts._pools[id] = nil
+    if not syncPlaced[id] and id ~= Ghosts._held then return false end
+    n = n - 1
+  end
+  return n == 0 or (Ghosts._held ~= nil and n == -1)
+end
+
+Ghosts.FADE_WINDOW = 3
+
+function Ghosts.openFadeWindow()
+  Ghosts._fadeWindow = Ghosts.FADE_WINDOW
+end
+
+function Ghosts.visibleIds(mapId)
+  local pool = Ghosts._pools[mapId]
+  if not pool then return nil end
+  local seen = {}
+  for _, eo in ipairs(Objects().poolForDraw(pool)) do seen[eo.localId] = true end
+  return seen
+end
+
+local function markFade(pool, entry)
+  local P = package.loaded["src.core.game3.player"]
+  local px, py = P and tonumber(P.cellX), P and tonumber(P.cellY)
+  if not (px and py) then return end
+  for _, eo in pairs(pool.byId) do
+    local x, y = (eo.cellX or 0) + (entry.ox or 0), (eo.cellY or 0) + (entry.oy or 0)
+    if eo.visible and not eo.hidden and not eo.invisible
+        and x >= px - 9 and x <= px + 10 and y >= py - 7 and y <= py + 9 then
+      eo.fadeIn = 0
     end
   end
+end
+
+local function prepareOffscreen(M, entry)
+  local Obj = Objects()
+  local Stream = package.loaded["src.core.game3.asset_stream"]
+  if not (love and love.thread and love.thread.newThread) or (Stream and Stream.workerFailed) then return false end
+  if not (M.warmRect and M.warmNear and Obj.prefetchMap and Obj.preparationReady) then return false end
+  local x0, y0, x1, y1 = M.warmRect(0)
+  -- Visible actors and collision queries retain immediate authoritative
+  -- adoption. Offscreen pools can wait for immutable worker preparation.
+  if not x0 or M.warmNear(entry, x0, y0, x1, y1) then return false end
+  x0, y0, x1, y1 = M.warmRect()
+  if not M.warmNear(entry, x0, y0, x1, y1) then return true end
+  if not Obj.prefetchMap(entry.id, entry.def, 1) then return false end
+  return not Obj.preparationReady(entry.id, entry.def)
+end
+
+function Ghosts.sync()
+  local M = Map()
+  local world = M.world or EMPTY
+  if not syncCurrent(world) then
+    local placed = syncPlaced
+    for id in pairs(placed) do placed[id] = nil end
+    for _, entry in ipairs(world) do
+      placed[entry.id] = true
+      if not Ghosts._pools[entry.id] and not prepareOffscreen(M, entry) then
+        local defs = defsFor(entry.id, entry.def)
+        if defs then
+          local pool = Objects().spawnFromDefs(defs, entry.def, entry.id)
+          Ghosts._pools[entry.id] = pool
+          if (Ghosts._fadeWindow or 0) > 0 then markFade(pool, entry) end
+        end
+      end
+    end
+    for id in pairs(Ghosts._pools) do
+      if not placed[id] and id ~= Ghosts._held then
+        Ghosts._pools[id] = nil
+      end
+    end
+    Ghosts._syncWorld, Ghosts._syncPools = world, Ghosts._pools
+  end
+  local placed = syncPlaced
   if Ghosts._held and not placed[Ghosts._held] then
     Ghosts._heldGrace = (Ghosts._heldGrace or 0) + 1
     if Ghosts._heldGrace > 2 then
@@ -91,13 +173,51 @@ function Ghosts.sync()
   end
 end
 
+-- Neighbour NPCs only step while their map is near the camera (one screen of
+-- margin past the view); farther pools hold still (pret only runs object
+-- events spawned around the camera, TrySpawnObjectEvents).  Raise
+-- TICK_MARGIN_SCREENS (math.huge = tick every pool) to widen it.
+Ghosts.TICK_MARGIN_SCREENS = 1
+
+local function tickRect()
+  local P = package.loaded["src.core.game3.player"]
+  local px, py = P and tonumber(P.cellX), P and tonumber(P.cellY)
+  if not (px and py) then return nil end
+  local FieldView = package.loaded["src.core.game3.field_view"]
+  local Display = package.loaded["src.core.game3.display"]
+  local vw = (FieldView and FieldView._viewW) or (Display and Display.W) or 240
+  local vh = (FieldView and FieldView._viewH) or (Display and Display.H) or 160
+  local cols, rows = math.ceil(vw / 16), math.ceil(vh / 16)
+  local mx = math.ceil(cols / 2) + 1 + cols * Ghosts.TICK_MARGIN_SCREENS
+  local my = math.ceil(rows / 2) + 1 + rows * Ghosts.TICK_MARGIN_SCREENS
+  -- cull rect in current-map cells
+  return px - mx, py - my, px + mx, py + my
+end
+
+local function nearView(entry, x0, y0, x1, y1)
+  if not x0 then return true end
+  local layout = entry.def and entry.def.midLayout
+  local w = layout and layout.width
+  local h = layout and layout.height
+  if not (w and h) then return true end
+  local ox, oy = entry.ox or 0, entry.oy or 0
+  return ox + w > x0 and ox <= x1 and oy + h > y0 and oy <= y1
+end
+
 function Ghosts.update(game)
+  if (Ghosts._fadeWindow or 0) > 0 then Ghosts._fadeWindow = Ghosts._fadeWindow - 1 end
   local M = Map()
   local Obj = Objects()
-  for _, entry in ipairs(M.world or {}) do
+  local x0, y0, x1, y1 = tickRect()
+  for _, entry in ipairs(M.world or EMPTY) do
     local pool = Ghosts._pools[entry.id]
-    if pool then
-      Obj.tickPool(pool, game, contextFor(entry, pool))
+    if pool and nearView(entry, x0, y0, x1, y1) then
+      local c = ctxCache[entry]
+      if not c or c.pool ~= pool or c.def ~= entry.def or c.layout ~= (entry.def and entry.def.midLayout) or c.ox ~= entry.ox or c.oy ~= entry.oy then
+        c = { pool = pool, def = entry.def, layout = entry.def and entry.def.midLayout, ox = entry.ox, oy = entry.oy, ctx = contextFor(entry, pool) }
+        ctxCache[entry] = c
+      end
+      Obj.tickPool(pool, game, c.ctx)
     end
   end
 end
@@ -134,7 +254,7 @@ function Ghosts.capture(mapId)
   local pool = { byId = {}, order = {}, bounds = snap.bounds }
   for _, lid in ipairs(snap.order or {}) do
     local eo = snap.byId[lid]
-    if eo then
+    if eo and eo.foreignMap == nil then
       pool.byId[lid] = eo
       pool.order[#pool.order + 1] = lid
       eo.scriptBusy = false

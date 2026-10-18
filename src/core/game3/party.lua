@@ -47,9 +47,10 @@ function Party.applyBattleFields(opaqueMon, fields)
   for _, key in ipairs({
     "hp", "maxHp", "status", "sleep", "level", "exp",
     "happiness", "friendship", "evs", "pokerus", "item", "heldItem",
-    "species", "speciesId", "name", "growthRate",
+    "species", "speciesId", "speciesNumbering", "name", "nickname", "growthRate",
     "attack", "defense", "speed", "spAtk", "spDef",
-    "atk", "def", "spe", "spa", "spd",
+    "atk", "def", "spe", "spa", "spd", "ppBonusesPacked",
+    "ability", "abilityId",
   }) do
     if fields[key] ~= nil then opaqueMon[key] = fields[key] end
   end
@@ -163,10 +164,8 @@ Party.VERSION_LEAF_GREEN = 5
 -- pokefirered/include/config.h:45 GAME_VERSION
 function Party.metGame()
   local ok, GameVersion = pcall(require, "src.core.GameVersion")
-  if ok and GameVersion and GameVersion.current == "leafgreen" then
-    return Party.VERSION_LEAF_GREEN
-  end
-  return Party.VERSION_FIRE_RED
+  local code = ok and GameVersion and GameVersion.gameCode and GameVersion.gameCode(GameVersion.current)
+  return tonumber(code) or Party.VERSION_FIRE_RED
 end
 
 -- pokefirered/src/pokemon.c:1822 gSaveBlock2Ptr->playerGender
@@ -194,7 +193,9 @@ function Party.giveMon(session, species, level, nickname, opts)
   end
 
   local Rng = require("src.core.game3.rng")
-  local personality = Rng.Random32()
+  local personality = opts and tonumber(opts.fixedPersonality)
+  if personality == nil then personality = Rng.Random32() end
+  personality = personality % 0x100000000
   local iv1 = Rng.Random()
   local iv2 = Rng.Random()
   local ivs = {
@@ -255,7 +256,7 @@ function Party.giveMon(session, species, level, nickname, opts)
     otName = session.name or session.playerName or "RED",
     otId = session.trainerId or session.id or session.playerId or 12345,
     -- pokefirered/src/pokemon.c:1796 CreateBoxMon OT_ID_PLAYER_ID
-    otSecretId = tonumber(session.secretId) or nil,
+    otSecretId = Pokemon.playerSecretId(session),
     -- pokefirered/src/pokemon.c:1822
     otGender = Party.otGender(session),
     pokeball = 4, -- Poké Ball
@@ -295,9 +296,9 @@ function Party.giveEgg(session, species, opts)
   species = tonumber(species) or 1
   local ok, code, egg = Party.giveMon(session, species, 5, "EGG", opts)
   if ok and egg then
-    egg.isEgg = true
     egg.name = "EGG"
     egg.nickname = "EGG"
+    require("src.core.game3.breeding").applyEggData(egg, true)
   end
   return ok, code, egg
 end

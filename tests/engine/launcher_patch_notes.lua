@@ -62,7 +62,7 @@ end
 
 do
   local body, ver = PatchNotes.body(nil)
-  check(type(body) == "string" and (body:find("Download", 1, true) or body:find("Issues", 1, true)),
+  check(type(body) == "string" and body ~= "" and body ~= "Unable to fetch patch notes.",
     "without a check result PatchNotes uses the stashed iOS app-repo notes")
   check(type(ver) == "string" and ver:find("^%d+%.%d+%.%d+$") ~= nil,
     "stashed notes name a release version")
@@ -90,6 +90,27 @@ do
   local body, ver = PatchNotes.body(nil)
   eq(body, "Unable to fetch patch notes.", "returns Unable to fetch patch notes when version is uncached and unlisted")
   eq(ver, "999.999.999", "returns the requested engine version")
+  package.loaded["src.core.Version"] = oldVersion
+end
+
+do
+  local oldVersion = package.loaded["src.core.Version"]
+  package.loaded["src.core.Version"] = { engine = "0.3.32" }
+  local body, ver = PatchNotes.body({
+    state = function()
+      return { notes = "pending update notes", latest = "0.3.46" }
+    end,
+  })
+  eq(body, "pending update notes",
+    "updater notes are shown when they belong to a newer release than the running engine")
+  eq(ver, "0.3.46", "the modal version is the release the notes describe")
+  love.filesystem.write("updates/notes_cache.json",
+    '{"0.3.31":"older","0.3.46":"cached latest notes"}')
+  body, ver = PatchNotes.body(nil)
+  eq(body, "cached latest notes",
+    "with no check result, a release build falls back to the newest cached notes")
+  eq(ver, "0.3.46", "the cache fallback names that release")
+  love.filesystem.remove("updates/notes_cache.json")
   package.loaded["src.core.Version"] = oldVersion
 end
 

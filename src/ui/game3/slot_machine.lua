@@ -6,6 +6,7 @@ local FrlgFont = require("src.ui.game3.frlg_font")
 local Strings = require("src.core.Strings")
 local RomText = require("src.core.game3.rom_text")
 local Model = require("src.core.game3.slot_machine")
+local CacheBlob = require("src.import.CacheBlob")
 
 local SlotMachineUi = {}
 
@@ -64,9 +65,7 @@ SlotMachineUi.LINE_FLASH_PERIOD = 8
 SlotMachineUi.ROW_Y = { [0] = 68, [1] = 92, [2] = 116 }
 
 -- pokefirered/include/constants/songs.h:275
-SlotMachineUi.MUS_SLOTS_JACKPOT = 268
--- pokefirered/include/constants/songs.h:276
-SlotMachineUi.MUS_SLOTS_WIN = 269
+require("src.core.game3.song_fields")(SlotMachineUi)
 
 -- pokefirered/src/slot_machine.c:2287
 SlotMachineUi.HELP_SLIDE_STEP = 16
@@ -121,12 +120,12 @@ local function read_bytes(rel)
     if okR and type(d) == "string" and #d > 0 then return d end
   end
   if love and love.filesystem and love.filesystem.read then
-    local okR, d = pcall(love.filesystem.read, rel)
+    local okR, d = pcall(CacheBlob.readFs, rel)
     if okR and type(d) == "string" and #d > 0 then return d end
   end
   local f = io.open(rel, "rb")
   if f then
-    local d = f:read("*a")
+    local d = CacheBlob.decode(rel, f:read("*a"))
     f:close()
     if d and #d > 0 then return d end
   end

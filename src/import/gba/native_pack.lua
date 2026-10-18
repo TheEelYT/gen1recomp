@@ -77,7 +77,9 @@ function NativePack.buildLayeredIdx(bundle, midList)
     Metatile.compositeIndexedUnder, bundle, midList, NativePack.FLAG_LAYERED)
   local over = build_idx_with(
     Metatile.compositeIndexedOver, bundle, midList, NativePack.FLAG_LAYERED)
-  return under, over
+  local middle = build_idx_with(
+    Metatile.compositeIndexedMiddle, bundle, midList, NativePack.FLAG_LAYERED)
+  return under, over, middle
 end
 
 function NativePack.encodeIdx(tbl)
@@ -132,20 +134,26 @@ function NativePack.decodeIdx(blob)
     midIds[i] = read_u16(blob, off)
     off = off + 2
   end
-  local pixels = {}
+  local dataOff = off
   local n = midCount * 256
-  for i = 1, n do
-    pixels[i] = blob:byte(off + i - 1) or 0
-  end
-  return {
+  return setmetatable({
     formatVersion = formatVersion,
     flags = flags,
     midCount = midCount,
     atlasCols = atlasCols,
     atlasRows = atlasRows,
     midIds = midIds,
-    pixels = pixels,
-  }
+  }, {
+    __index = function(self, k)
+      if k ~= "pixels" then return nil end
+      local pixels = {}
+      for i = 1, n do
+        pixels[i] = blob:byte(dataOff + i - 1) or 0
+      end
+      rawset(self, "pixels", pixels)
+      return pixels
+    end,
+  })
 end
 
 function NativePack.encodePalettes(mapPals)
@@ -227,6 +235,7 @@ function NativePack.bakeRgba(idxTbl, rgbPals, opts)
   local pixels = idxTbl.pixels or {}
   local rowChunks = {}
   for ay = 0, h - 1 do
+    if ay % 16 == 0 and opts.cancelled and opts.cancelled() then return nil, w, h end
     local midRow = math.floor(ay / 16)
     local py = ay % 16
     local line = {}
@@ -343,7 +352,7 @@ NativePack.PC_ON_BY_OFF = {
 function NativePack.addDynamicMids(seen, pairName)
   local spec = Versions.TILESET_PAIRS and Versions.TILESET_PAIRS[pairName]
   if not spec then return seen end
-  for _, rule in ipairs(Versions.DYNAMIC_METATILES) do
+  for _, rule in ipairs(Versions.DYNAMIC_METATILES or {}) do
     for _, name in ipairs({ spec.primary, spec.secondary }) do
       local ts = Versions.TILESETS[name]
       if ts and ts.metatiles == rule.metatiles then
@@ -363,6 +372,29 @@ end
 
 -- pokefirered/include/fieldmap.h:9
 NativePack.NUM_METATILES_TOTAL = 1024
+
+NativePack.ATLAS_POLICY = { frlg = "used", rse = "full" }
+
+function NativePack.atlasPolicy(game)
+  local Family = require("src.import.gba.family")
+  local F = game and Family.of(game) or Family.active()
+  local okP, row = pcall(function() return require("src.core.game3.profile").of(F.game) end)
+  local fromProfile = okP and type(row) == "table" and type(row.map) == "table" and row.map.atlas or nil
+  return fromProfile or NativePack.ATLAS_POLICY[F.name] or "used"
+end
+
+-- pokeemerald/include/fieldmap.h:4
+function NativePack.fullMidsForPair(bundle)
+  local F = require("src.import.gba.family").active()
+  local list = {}
+  local nPri = math.min(bundle.primaryMt and bundle.primaryMt.count or 0, F.numPrimaryMetatiles)
+  for mid = 0, nPri - 1 do list[#list + 1] = mid end
+  local nSec = math.min(bundle.secondaryMt and bundle.secondaryMt.count or 0,
+    F.numMetatilesTotal - F.numPrimaryMetatiles)
+  for i = 0, nSec - 1 do list[#list + 1] = F.numPrimaryMetatiles + i end
+  if #list == 0 then list[1] = 0 end
+  return list
+end
 
 local function scriptTargets(v, out)
   if type(v) == "string" then
@@ -606,159 +638,118 @@ end
 -- grids: padded map grids; borders: mapId → { width, height, mids }
 -- midIndex: optional [pair][mid] = { coll, ... } for resolved COLL_* lookup
 -- CollisionFn: function(mid, rawColl, behavior, kind) → collByte
-function NativePack.writeExtract(
-    cache, root, bundles, grids, borders, pairNames, midIndex,
-    behaviorOf, fromCell, scriptMids, warpCells, progressCb)
-
+function NativePack.writeExtract(cache, root, bundles, grids, borders, pairNames, midIndex, behaviorOf, fromCell, scriptMids, warpCells, opts)
   root = root or require("src.core.game3.cache_paths").CACHE_ROOT
+  local progressCb = type(opts) == "function" and opts
+    or (type(opts) == "table" and opts.progress)
+  local midLists = type(opts) == "table" and opts.midLists
+  local pairCount, layoutCount = #(pairNames or {}), 0
+  for _ in pairs(grids or {}) do layoutCount = layoutCount + 1 end
+  local function report(label, done)
+    if progressCb then progressCb(label, done, math.max(1, pairCount + layoutCount + 1)) end
+  end
   local NativeRoot = root .. "/native"
-
   local manifest = {
     native_version = Versions.NATIVE_VERSION or 1,
     pairs = {},
     layouts = {},
   }
 
-  local pairCount = #(pairNames or {})
-  local layoutCount = 0
-
-  for _ in pairs(grids or {}) do
-    layoutCount = layoutCount + 1
-  end
-
-  -- +1 for manifest/finalization.
-  local totalWork = math.max(pairCount + layoutCount + 1, 1)
-
-  local function report(label, done)
-    if progressCb then
-      progressCb(label, done or 0, totalWork)
-    end
-  end
-
-  -- -----------------------------------------------------------------------
-  -- Tileset pair atlases.
-  --
-  -- On Vita, encode under/over independently and immediately write each
-  -- blob. Do not retain two giant Lua-number pixel arrays simultaneously.
-  -- -----------------------------------------------------------------------
-
   for pairIndex, pairName in ipairs(pairNames or {}) do
-    report(
-      string.format("pairs %d/%d: %s", pairIndex, pairCount, pairName),
-      pairIndex - 1
-    )
-
+    report("pair: " .. pairName, pairIndex - 1)
     local bundle = bundles[pairName]
-
     if bundle then
-      local midList =
-        NativePack.collectMidsForPair(
-          grids, borders, pairName, scriptMids
-        )
-
+      local midList = midLists and midLists[pairName]
+        or NativePack.collectMidsForPair(grids, borders, pairName, scriptMids)
       local pairDir = NativeRoot .. "/" .. pairName
-
-      local underBlob, midCount, atlasCols, atlasRows =
-        encode_idx_direct(
-          Metatile.compositeIndexedUnder,
-          bundle,
-          midList,
-          NativePack.FLAG_LAYERED
-        )
-
-      cache:write(pairDir .. "/mids.idx", underBlob)
-
-      underBlob = nil
-
+      local midCount, atlasCols, atlasRows
       if _G.POKEPORT_VITA then
-        collectgarbage("collect")
+        for _, layer in ipairs({
+          { "mids.idx", Metatile.compositeIndexedUnder },
+          { "mids_over.idx", Metatile.compositeIndexedOver },
+          { "mids_mid.idx", Metatile.compositeIndexedMiddle },
+        }) do
+          local blob
+          blob, midCount, atlasCols, atlasRows = encode_idx_direct(
+            layer[2], bundle, midList, NativePack.FLAG_LAYERED)
+          cache:write(pairDir .. "/" .. layer[1], blob)
+          blob = nil
+          collectgarbage("collect")
+        end
+      else
+        local underTbl, overTbl, middleTbl = NativePack.buildLayeredIdx(bundle, midList)
+        midCount, atlasCols, atlasRows = underTbl.midCount, underTbl.atlasCols, underTbl.atlasRows
+        cache:write(pairDir .. "/mids.idx", NativePack.encodeIdx(underTbl))
+        cache:write(pairDir .. "/mids_over.idx", NativePack.encodeIdx(overTbl))
+        cache:write(pairDir .. "/mids_mid.idx", NativePack.encodeIdx(middleTbl))
       end
-
-      local overBlob =
-        encode_idx_direct(
-          Metatile.compositeIndexedOver,
-          bundle,
-          midList,
-          NativePack.FLAG_LAYERED
-        )
-
-      cache:write(pairDir .. "/mids_over.idx", overBlob)
-
-      overBlob = nil
-
-      if _G.POKEPORT_VITA then
-        collectgarbage("collect")
-      end
-
       local palBlob = NativePack.encodePalettes(bundle.mapPals)
       cache:write(pairDir .. "/palettes.bin", palBlob)
-
       manifest.pairs[pairName] = {
         midCount = midCount,
         atlasCols = atlasCols,
         atlasRows = atlasRows,
         layered = true,
       }
-
-      palBlob = nil
-      midList = nil
-      bundle = nil
-
-      if _G.POKEPORT_VITA then
-        collectgarbage("collect")
-      end
     end
   end
 
-  -- -----------------------------------------------------------------------
-  -- Map layouts.
-  --
-  -- Encode directly from packed cells instead of allocating a second Lua
-  -- table containing one {mid,coll,elev} table per map cell.
-  -- -----------------------------------------------------------------------
-
   local layoutIndex = 0
-
   for mapId, grid in pairs(grids or {}) do
     layoutIndex = layoutIndex + 1
-
-    report(
-      string.format(
-        "layouts %d/%d: %s",
-        layoutIndex,
-        layoutCount,
-        tostring(mapId)
-      ),
-      pairCount + layoutIndex - 1
-    )
-
+    report("layout: " .. tostring(mapId), pairCount + layoutIndex - 1)
     local pairName = grid.pair or "sevii_outdoor"
     local bundle = bundles[pairName]
     local indexForPair = midIndex and midIndex[pairName] or {}
-    local mapWarps =
-      warpCells and warpCells[grid.altOwner or mapId] or nil
-
-    local border =
-      borders and borders[mapId]
-      or { width = 1, height = 1, mids = { 0 } }
-
-    local blob = encode_grid_layout_direct(
-      grid,
-      border,
-      bundle,
-      indexForPair,
-      mapWarps,
-      behaviorOf,
-      fromCell
-    )
-
-    cache:write(
-      NativeRoot .. "/layouts/" .. mapId .. ".mid",
-      blob
-    )
-
-    blob = nil
-
+    local mapWarps = warpCells and warpCells[grid.altOwner or mapId] or nil
+    local trueW = grid.padded_from and grid.padded_from.width or grid.width
+    local trueH = grid.padded_from and grid.padded_from.height or grid.height
+    local border = borders and borders[mapId] or { width = 1, height = 1, mids = { 0 } }
+    local blob
+    if _G.POKEPORT_VITA then
+      blob = encode_grid_layout_direct(grid, border, bundle, indexForPair,
+        mapWarps, behaviorOf, fromCell)
+    else
+    local cells = {}
+    for i, cell in ipairs(grid.cells or {}) do
+      -- Prefer per-cell classify (mapColl + kind). midIndex is first-sight and
+      -- wrongly solidifies indoor carpets that share outdoor TREE mid numbers.
+      local coll = 0xff
+      if fromCell and behaviorOf and bundle then
+        local beh = behaviorOf(bundle, cell.mid)
+        coll = select(1, fromCell(cell.mid, cell.coll, beh, grid.kind))
+      else
+        local mi = indexForPair[cell.mid]
+        if mi and mi.coll ~= nil then
+          coll = mi.coll
+        else
+          coll = cell.coll or 0
+        end
+      end
+      local cx = (i - 1) % grid.width
+      local cy = math.floor((i - 1) / grid.width)
+      coll = NativePack.resolveLayoutColl(coll, cell.coll,
+        mapWarps and mapWarps[cy * NativePack.WARP_KEY_STRIDE + cx])
+      cells[i] = { mid = cell.mid, coll = coll, elev = cell.elev or 0 }
+    end
+    local layout = {
+      formatVersion = NativePack.FORMAT_VERSION,
+      flags = (grid.padded_from and 1) or 0,
+      width = grid.width,
+      height = grid.height,
+      trueWidth = trueW,
+      trueHeight = trueH,
+      borderWidth = border.width or 1,
+      borderHeight = border.height or 1,
+      borderMids = border.mids or { 0 },
+      cells = cells,
+      pair = pairName,
+    }
+    blob = NativePack.encodeMidLayout(layout)
+    end
+    cache:write(NativeRoot .. "/layouts/" .. mapId .. ".mid", blob)
+    if _G.POKEPORT_VITA and layoutIndex % 8 == 0 then collectgarbage("collect") end
+    -- pokefirered/src/scrcmd.c:711
     if not grid.altLayoutId then
       manifest.layouts[mapId] = {
         pair = pairName,
@@ -767,68 +758,33 @@ function NativePack.writeExtract(
         file = "layouts/" .. mapId .. ".mid",
       }
     end
-
-    if _G.POKEPORT_VITA and layoutIndex % 8 == 0 then
-      collectgarbage("collect")
-    end
   end
 
   report("manifest", pairCount + layoutCount)
-
   local lines = {
     "return {\n",
     ("  native_version = %d,\n"):format(manifest.native_version),
     "  pairs = {\n",
   }
-
   for _, pairName in ipairs(pairNames or {}) do
     local p = manifest.pairs[pairName]
-
     if p then
-      lines[#lines + 1] =
-        ("    [%q] = { midCount = %d, atlasCols = %d, atlasRows = %d, layered = true },\n")
-        :format(
-          pairName,
-          p.midCount,
-          p.atlasCols,
-          p.atlasRows
-        )
+      lines[#lines + 1] = ("    [%q] = { midCount = %d, atlasCols = %d, atlasRows = %d, layered = true },\n"):format(
+        pairName, p.midCount, p.atlasCols, p.atlasRows)
     end
   end
-
   lines[#lines + 1] = "  },\n  layouts = {\n"
-
   local mapIds = {}
-
-  for mapId in pairs(manifest.layouts) do
-    mapIds[#mapIds + 1] = mapId
-  end
-
+  for mapId in pairs(manifest.layouts) do mapIds[#mapIds + 1] = mapId end
   table.sort(mapIds)
-
   for _, mapId in ipairs(mapIds) do
     local L = manifest.layouts[mapId]
-
-    lines[#lines + 1] =
-      ("    [%q] = { pair = %q, width = %d, height = %d, file = %q },\n")
-      :format(
-        mapId,
-        L.pair,
-        L.width,
-        L.height,
-        L.file
-      )
+    lines[#lines + 1] = ("    [%q] = { pair = %q, width = %d, height = %d, file = %q },\n"):format(
+      mapId, L.pair, L.width, L.height, L.file)
   end
-
   lines[#lines + 1] = "  },\n}\n"
-
-  cache:write(
-    NativeRoot .. "/manifest.lua",
-    table.concat(lines)
-  )
-
-  report("done", totalWork)
-
+  cache:write(NativeRoot .. "/manifest.lua", table.concat(lines))
+  report("done", pairCount + layoutCount + 1)
   return manifest
 end
 

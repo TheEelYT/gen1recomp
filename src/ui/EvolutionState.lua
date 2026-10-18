@@ -126,26 +126,28 @@ end
 function EvolutionState:pushDoneText()
   local game = self.game
   local TextBox = require("src.render.TextBox")
+  local Evolution = require("src.pokemon.Evolution")
   if self.canceled then
     game.stack:push(TextBox.new(game,
       romText(game.data, "_StoppedEvolvingText",
         "Huh? %s\nstopped evolving!", self.oldName),
       function()
-        Music.restoreMap(game.data)
         game.stack:pop()
+        -- engine/pokemon/evos_moves.asm:296
+        Evolution.clearScreen(game, self.mon.species)
         if self.onDone then self.onDone() end
       end))
     return
   end
-  local Evolution = require("src.pokemon.Evolution")
   local newName = game.data.pokemon[self.newSpecies].name
   -- engine/pokemon/evos_moves.asm:136-153
   local msg = romText(game.data, "_EvolvedText", "%s evolved", self.oldName)
     .. romText(game.data, "_IntoText", "\ninto %s!", newName)
   game.stack:push(TextBox.new(game, msg,
     function()
-      Music.restoreMap(game.data)
       game.stack:pop()
+      -- engine/pokemon/evos_moves.asm:156
+      Evolution.clearScreen(game, self.newSpecies)
       -- engine/pokemon/evos_moves.asm:212 (#12)
       Evolution.learnEvolutionMoves(game, self.mon, self.onDone)
     end,
@@ -204,6 +206,8 @@ function EvolutionState:update(dt)
 end
 
 function EvolutionState:draw()
+  -- pokered/engine/pokemon/evos_moves.asm:133
+  require("src.render.PaletteFX").clearSpriteRedraws()
   love.graphics.setColor(1, 1, 1, 1)
   -- rows 0-11 only (hlcoord 0,0 / lb bc, 12, 20, evos_moves.asm:126-128)
   love.graphics.rectangle("fill", 0, 0, 160, 96)

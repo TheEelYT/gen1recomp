@@ -416,21 +416,24 @@ local function isGen3(game)
   return ok and GameVersion.generation() == 3 and game.stack == nil
 end
 
+local function titleCase(s)
+  return (tostring(s):lower():gsub("(%a)([%w']*)", function(a, b) return a:upper() .. b end))
+end
+
 local function gen3LocationName(mapId, def)
-  local ok, Sections = pcall(require, "src.import.gba.map_sections_extract")
-  if ok and type(def) == "table" then
-    local sec = def.regionMapSectionId or def.region_map_section_id or def.mapsec
-    local got, info = pcall(Sections.getInfo, sec, mapId, 0)
-    if got and type(info) == "table" and info.resolved ~= false
-        and type(info.name) == "string" and info.name ~= "" then
-      local name = info.name:lower():gsub("(%a)([%w']*)", function(a, b)
-        return a:upper() .. b
-      end)
-      return name
-    end
+  local ok, SaveMenu = pcall(require, "src.ui.game3.save_menu")
+  if ok then
+    local sec = type(def) == "table" and (def.regionMapSectionId or def.region_map_section_id or def.mapsec) or nil
+    local got, name = pcall(SaveMenu.locationName, { map = mapId, regionMapSectionId = sec })
+    if got and type(name) == "string" and name ~= "" then return titleCase(name) end
   end
-  local s = tostring(mapId):gsub("^MAP_", ""):gsub("_", " "):lower()
-  return (s:gsub("(%a)([%w']*)", function(a, b) return a:upper() .. b end))
+  local s = tostring(mapId):gsub("^MAP_", "")
+  local okP, Profile = pcall(require, "src.core.game3.profile")
+  local row = okP and Profile.forSession(nil) or nil
+  for _, prefix in ipairs(row and row.map and row.map.prefixes or {}) do
+    if s:sub(1, #prefix) == prefix then s = s:sub(#prefix + 1) break end
+  end
+  return titleCase(s:gsub("_", " "))
 end
 
 local function locationName(game, mapId, def)
@@ -447,7 +450,9 @@ local function locationName(game, mapId, def)
   local entry = type(locations) == "table" and locations[mapId]
   if type(entry) == "table" then
     local name = entry.name or entry.label
-    if type(name) == "string" and name ~= "" then return name end
+    if type(name) == "string" and name ~= "" then
+      return (name:gsub("<PK><MN>", "POKéMON"))
+    end
   end
   local def = game and game.data and game.data.maps and game.data.maps[mapId]
   if def and type(def.label) == "string" and def.label ~= "" then

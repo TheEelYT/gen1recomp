@@ -31,6 +31,30 @@ do
 end
 
 do
+  -- engine/overworld/movement.asm:489-509
+  local me = { cellX = 10, cellY = 9 }
+  local ow = { player = me, scriptMoves = {} }
+  local function at(x, y, extra)
+    local e = { cellX = x, cellY = y }
+    for k, v in pairs(extra or {}) do e[k] = v end
+    return e
+  end
+  check(OW.oamCulled(ow, at(10, 13)) == false, "an NPC 4 rows below draws")
+  check(OW.oamCulled(ow, at(10, 14)) == true, "an NPC 5 rows below is hidden")
+  check(OW.oamCulled(ow, at(10, 5)) == false, "an NPC 4 rows above draws")
+  check(OW.oamCulled(ow, at(10, 4)) == true, "an NPC 5 rows above is hidden")
+  check(OW.oamCulled(ow, at(15, 9)) == false, "an NPC 5 columns right draws")
+  check(OW.oamCulled(ow, at(16, 9)) == true, "an NPC 6 columns right is hidden")
+  check(OW.oamCulled(ow, at(6, 9)) == false, "an NPC 4 columns left draws")
+  check(OW.oamCulled(ow, at(5, 9)) == true, "an NPC 5 columns left is hidden")
+  check(OW.oamCulled(ow, at(10, 14, { moving = true, targetX = 10, targetY = 13 }))
+        == false, "a walking NPC is placed by its destination cell")
+  local walker = at(10, 14)
+  ow.scriptMoves = { { entity = walker } }
+  check(OW.oamCulled(ow, walker) == false, "a scripted walker skips the view test")
+end
+
+do
   local got
   local ctx = { npc = trainer, overworld = {
     pushBattle = function(_, _, keep) got = keep end } }
@@ -127,6 +151,7 @@ do
   end
   local keep, hero = ent(), ent()
   local ow = { camera = { x = 0, y = 0 }, player = hero, battleOamKeep = keep,
+               entities = { hero, keep },
                sgbWorldZones = function() return nil end }
   PaletteFX.setPass("ui")
   local ok, err = pcall(OW.drawWipeSprites, ow)
@@ -135,6 +160,61 @@ do
   check(seen[1] == true and seen[2] == true,
         "OG RED replays inside the world pass so SpriteRenderer takes the ogObj bake")
   eq(PaletteFX.pass(), "ui", "the caller's pass is restored")
+  PaletteFX.setPass(nil)
+  PaletteFX.setMode(savedMode)
+end
+
+do
+  local PaletteFX = require("src.render.PaletteFX")
+  local savedMode = PaletteFX.mode
+  PaletteFX.setMode("ogred")
+  local function world(mapId, name)
+    local draws = { npc = 0, player = 0 }
+    local hero = { px = 0, py = 0,
+                   draw = function() draws.player = draws.player + 1 end }
+    local npc = { id = name, def = { name = name }, px = 0, py = 0,
+                  draw = function() draws.npc = draws.npc + 1 end }
+    local ow = {
+      map = { id = mapId }, camera = { x = 0, y = 0 }, player = hero,
+      npcs = { npc }, entities = { hero, npc }, npcPool = { [name] = npc },
+      sgbWorldZones = function() return nil end,
+      pushBattle = function(self, _, keep) self.battleOamKeep = keep end,
+    }
+    local ctx = { overworld = ow, save = {}, npc = npc }
+    return ow, ctx, draws
+  end
+  for _, route in ipairs({ "12", "16" }) do
+    local mapId, name = "ROUTE_" .. route, "ROUTE" .. route .. "_SNORLAX"
+    local ow, ctx, draws = world(mapId, name)
+    Commands.hide_object(ctx, mapId, name)
+    Commands.pushBattle(ctx, { kind = "wild" })
+    eq(#ow.npcs, 0, mapId .. " hide removes the addressed Snorlax")
+    eq(#ow.entities, 1, mapId .. " hide retains only the player")
+    eq(ow.npcPool[name], nil, mapId .. " hide removes the pool reference")
+    eq(ow.battleOamKeep, ctx.npc, mapId .. " context retains the removed object")
+    PaletteFX.setPass("ui")
+    OW.drawWipeSprites(ow)
+    eq(draws.npc, 0, mapId .. " hidden Snorlax never replays during the wipe")
+    eq(draws.player, 1, mapId .. " player still replays after Snorlax hides")
+    eq(PaletteFX.pass(), "ui", mapId .. " hidden replay restores the palette pass")
+    local replacementDraws = 0
+    ow.entities[2] = { id = name, def = { name = name }, px = 0, py = 0,
+      draw = function() replacementDraws = replacementDraws + 1 end }
+    OW.drawWipeSprites(ow)
+    eq(draws.npc, 0, mapId .. " a same-name replacement never revives the old object")
+    eq(replacementDraws, 0, mapId .. " the replacement is not the addressed survivor")
+  end
+  for _, kind in ipairs({ "trainer", "wild" }) do
+    local ow, ctx, draws = world("PALLET_TOWN", "VISIBLE_NPC")
+    Commands.pushBattle(ctx, { kind = kind })
+    OW.drawWipeSprites(ow)
+    eq(draws.npc, 1, kind .. " battle preserves a visible addressed NPC")
+    eq(draws.player, 1, kind .. " battle preserves the player with the NPC")
+    ctx.npc, ctx.scriptSprite = nil, ow.npcs[1]
+    Commands.pushBattle(ctx, { kind = kind })
+    OW.drawWipeSprites(ow)
+    eq(draws.npc, 2, kind .. " battle preserves a visible script-addressed NPC")
+  end
   PaletteFX.setPass(nil)
   PaletteFX.setMode(savedMode)
 end

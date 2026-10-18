@@ -13,9 +13,7 @@ local T = 8
 local CACHE_DIR = "data/generated/gba/mystery_gift/"
 
 -- pokefirered/include/constants/songs.h:265
-local MUS_OBTAIN_ITEM = 258
-local SE_BOO = 22
-local SE_POKENAV_ON = 103
+local Song = require("src.core.game3.song_ids")
 
 -- pokefirered/src/mystery_gift_menu.c:968
 Ui.SUCCESS_FRAMES = 240
@@ -31,6 +29,9 @@ Ui.STATE = {
   SAVE_DONE = "save_done",
   GIFT_INPUT = "gift_input",
   NEWS_VIEW = "news_view",
+  SAVED_VIEW = "saved_view",
+  GIFT_MENU = "gift_menu",
+  ASK_TOSS = "ask_toss",
   EXIT = "exit",
 }
 
@@ -42,6 +43,13 @@ local THREE_WIN = Window.template(8, 5, 14, 5)
 local OFFER_WIN = Window.template(1, 3, 17, 10)
 -- pokefirered/src/mystery_gift_menu.c:157 sWindowTemplate_YesNoBox
 local YESNO_WIN = Window.template(23, 15, 6, 4)
+-- pokefirered/src/mystery_gift_menu.c:137 sWindowTemplate_GiftSelect
+local GIFT_SELECT_WIN = Window.template(1, 15, 19, 4)
+-- pokefirered/src/mystery_gift_menu.c:177 sWindowTemplate_GiftSelect_2Options
+local GIFT_SELECT_OPTIONS = {
+  [3] = Window.template(22, 14, 7, 5),
+  [2] = Window.template(22, 15, 7, 4),
+}
 -- pokefirered/src/mystery_gift_show_card.c:67 sWindowTemplates
 local CARD_HEADER = Window.template(1, 1, 25, 4)
 local CARD_BODY = Window.template(1, 6, 28, 8)
@@ -266,7 +274,8 @@ function Ui.news(st)
 end
 
 -- pokefirered/src/mystery_gift_menu.c:855 SaveOnMysteryGiftMenu
-local function beginSave(st)
+local function beginSave(st, afterSave)
+  st.afterSave = afterSave
   st.state = Ui.STATE.SAVE
   -- pokefirered/src/strings.c:1321 gText_DataWillBeSaved
   say(st, RomText.plain("gText_DataWillBeSaved"), nil, true)
@@ -304,11 +313,12 @@ local function toMainMenuOffline(st)
 end
 
 -- pokefirered/src/mystery_gift_menu.c:1352
-local function clientResult(st, textKey, success)
+local function clientResult(st, textKey, success, onShown)
   st.state = Ui.STATE.RESULT_MSG
   if success then
-    fanfare(MUS_OBTAIN_ITEM)
+    fanfare(Song.MUS_OBTAIN_ITEM)
     say(st, RomText.plain(textKey), function(s)
+      if onShown then onShown(s) end
       beginSave(s)
     end, true, Ui.SUCCESS_FRAMES)
   else
@@ -317,10 +327,29 @@ local function clientResult(st, textKey, success)
 end
 
 -- pokefirered/src/mystery_gift_menu.c:1344
-local function commCompleted(st, textKey, success)
+local function commCompleted(st, textKey, success, onShown)
   iconOff()
   closeOffers(st)
-  clientResult(st, textKey, success)
+  clientResult(st, textKey, success, onShown)
+end
+
+-- pokefirered/src/mystery_gift_client.c:210 CLI_SAVE_NEWS
+local function receiveNewsFrom(st, entry)
+  local sess = session(st)
+  st.viewNews = nil
+  local ok, why = MysteryGift.saveNewsIfNew(sess, entry.news)
+  if not ok then
+    -- pokefirered/src/mystery_gift_menu.c:921
+    commCompleted(st, why == "had" and "gText_AlreadyHadNews" or "gText_CommunicationError", false)
+    return false
+  end
+  MysteryGift.claimNews(sess, entry.news)
+  -- pokefirered/src/mystery_gift_menu.c:905
+  commCompleted(st, "gText_WonderNewsReceived", true, function(s)
+    -- pokefirered/src/mystery_gift_menu.c:1369
+    MysteryGift.setNewsReward(session(s), MysteryGift.WONDER_NEWS_RECV_WIRELESS)
+  end)
+  return true
 end
 
 -- pokefirered/src/mystery_gift_client.c:208 CLI_SAVE_CARD
@@ -370,7 +399,9 @@ function Ui.offerRows(st)
   local ListMenu = require("src.ui.game3.list_menu")
   local items = {}
   for i, entry in ipairs(st.offers or {}) do
-    local claimed = not st.isNews and MysteryGift.hasClaimedCard(sess, entry.card)
+    local claimed
+    if st.isNews then claimed = MysteryGift.hasClaimedNews(sess, entry.news)
+    else claimed = MysteryGift.hasClaimedCard(sess, entry.card) end
     items[i] = {
       label = entry.label,
       id = i,
@@ -405,15 +436,15 @@ function openOffers(st, list)
   st.feed = list
   st.offers = st.isNews and list.news or list.cards
   if #(st.offers or {}) == 0 then
-    se(SE_BOO)
+    se(Song.SE_BOO)
     closeOffers(st)
     st.state = Ui.STATE.RESULT_MSG
     -- pokefirered/src/union_room.c:2560
-    say(st, RomText.at("gTexts_UR_NoWonderShared", st.isNews and 1 or 0),
+    say(st, RomText.at(MysteryGift.uiTextKey("gTexts_UR_NoWonderShared", session(st)), st.isNews and 1 or 0),
       toMainMenuOffline)
     return
   end
-  se(SE_POKENAV_ON)
+  se(Song.SE_POKENAV_ON)
   WirelessIcon.force("3bars")
   st.state = Ui.STATE.OFFER_LIST
   -- pokefirered/src/union_room.c:2521
@@ -435,7 +466,7 @@ end
 
 -- pokefirered/src/union_room.c:2423
 local function startSearch(st)
-  st.prompt = RomText.plain("gText_UR_SearchingForWirelessSystemWait")
+  st.prompt = RomText.plain(MysteryGift.uiTextKey("gText_UR_SearchingForWirelessSystemWait", session(st)))
   st.state = Ui.STATE.SEARCHING
   st.timer = 0
   st.lastError = nil
@@ -450,6 +481,76 @@ local function pickOffer(st, entry)
   st.viewOffer = nil
   st.prompt = nil
   deliverOffer(st, entry)
+end
+
+-- pokefirered/src/mystery_gift_menu.c:765 ValidateCardOrNews
+local function hasSaved(st)
+  if st.isNews then return MysteryGift.validateSavedNews(session(st)) end
+  return MysteryGift.validateSavedCard(session(st))
+end
+
+-- pokefirered/src/mystery_gift_menu.c:1390 MG_STATE_LOAD_GIFT
+local function openSaved(st)
+  st.viewCard, st.viewNews, st.viewOffer = nil, nil, nil
+  st.newsScroll = 0
+  st.prompt = nil
+  st.state = Ui.STATE.SAVED_VIEW
+end
+
+-- pokefirered/src/mystery_gift_menu.c:1147 MG_STATE_DONT_HAVE_ANY
+local function openBranch(st)
+  if hasSaved(st) then return openSaved(st) end
+  st.state = Ui.STATE.RESULT_MSG
+  say(st, RomText.plain(st.isNews and "gText_DontHaveNewsNewOneInput" or "gText_DontHaveCardNewOneInput"),
+    startSearch)
+end
+Ui.openBranch = openBranch
+
+-- pokefirered/src/mystery_gift_menu.c:1417 MG_STATE_HANDLE_GIFT_SELECT
+function Ui.giftMenuRows(st)
+  local list, actions
+  if st.isNews then
+    list, actions = "sListMenuItems_Receive", { "receive", "cancel" }
+  else
+    list, actions = "sListMenuItems_ReceiveToss", { "receive", "toss", "cancel" }
+  end
+  st.giftActions = actions
+  return RomText.list(list)
+end
+
+local function openGiftMenu(st)
+  st.state = Ui.STATE.GIFT_MENU
+  -- pokefirered/src/mystery_gift_menu.c:716
+  st.prompt = RomText.plain(st.isNews and "gText_WhatToDoWithNews" or "gText_WhatToDoWithCards")
+  setRows(st, Ui.giftMenuRows(st), 1)
+end
+
+-- pokefirered/src/mystery_gift_menu.c:1484 MG_STATE_TOSS
+local function tossSaved(st)
+  st.prompt = nil
+  if st.isNews then MysteryGift.clearNewsAndRelated(session(st))
+  else MysteryGift.clearCardAndRelated(session(st)) end
+  beginSave(st, function(s)
+    s.state = Ui.STATE.RESULT_MSG
+    -- pokefirered/src/mystery_gift_menu.c:847 PrintThrownAway
+    say(s, RomText.plain(s.isNews and "gText_WonderNewsThrownAway" or "gText_WonderCardThrownAway"), toMainMenu)
+  end)
+end
+
+-- pokefirered/src/mystery_gift_menu.c:1454 MG_STATE_ASK_TOSS
+local function askToss(st)
+  st.state = Ui.STATE.ASK_TOSS
+  st.prompt = nil
+  -- pokefirered/src/mystery_gift_menu.c:839 AskDiscardGift
+  ask(st, RomText.plain(st.isNews and "gText_OkayToDiscardNews" or "gText_IfThrowAwayCardEventWontHappen"),
+    function(s)
+      if not s.isNews and MysteryGift.isGiftNotReceived(session(s)) then
+        -- pokefirered/src/mystery_gift_menu.c:1470 MG_STATE_ASK_TOSS_UNRECEIVED
+        ask(s, RomText.plain("gText_HaventReceivedGiftOkayToDiscard"), tossSaved, openGiftMenu)
+        return
+      end
+      tossSaved(s)
+    end, openGiftMenu)
 end
 
 function Ui.close(st)
@@ -478,7 +579,7 @@ local function tickMsg(st, pressed)
     return
   end
   if not pressed("a") and not pressed("b") then return end
-  se(5)
+  se(Song.SE_SELECT)
   st.msg = nil
   if m.after then m.after(st) end
 end
@@ -488,7 +589,7 @@ local function tickYesNo(st, pressed)
   if pressed("up") and y.cursor > 1 then y.cursor = 1 end
   if pressed("down") and y.cursor < 2 then y.cursor = 2 end
   if pressed("a") then
-    se(5)
+    se(Song.SE_SELECT)
     st.yesno = nil
     if y.cursor == 1 then
       if y.onYes then y.onYes(st) end
@@ -496,7 +597,7 @@ local function tickYesNo(st, pressed)
       y.onNo(st)
     end
   elseif pressed("b") then
-    se(5)
+    se(Song.SE_SELECT)
     st.yesno = nil
     if y.onNo then y.onNo(st) end
   end
@@ -514,18 +615,18 @@ local function tickList(st, pressed)
   local n = #(st.rows or {})
   if n < 1 then return nil end
   if pressed("up") and st.cursor > 1 then
-    se(5)
+    se(Song.SE_SELECT)
     st.cursor = st.cursor - 1
     clampScroll(st)
   elseif pressed("down") and st.cursor < n then
-    se(5)
+    se(Song.SE_SELECT)
     st.cursor = st.cursor + 1
     clampScroll(st)
   elseif pressed("a") then
-    se(5)
+    se(Song.SE_SELECT)
     return st.cursor
   elseif pressed("b") then
-    se(5)
+    se(Song.SE_SELECT)
     return -1
   end
   return nil
@@ -564,10 +665,10 @@ function Ui.update(st, pressed, dt)
     local action = pick == -1 and "exit" or (st.mainActions or {})[pick]
     if action == "news" then
       st.isNews = true
-      startSearch(st)
+      openBranch(st)
     elseif action == "cards" then
       st.isNews = false
-      startSearch(st)
+      openBranch(st)
     elseif action == "exit" then
       st.state = S.EXIT
       Ui.close(st)
@@ -585,7 +686,7 @@ function Ui.update(st, pressed, dt)
       closeOffers(st)
       st.state = S.RESULT_MSG
       -- pokefirered/src/union_room.c:2551
-      say(st, RomText.plain("gText_UR_WirelessSearchCanceled"), toMainMenuOffline)
+      say(st, RomText.plain(MysteryGift.uiTextKey("gText_UR_WirelessSearchCanceled", session(st))), toMainMenuOffline)
       return nil
     end
     local status, result = MysteryGift.pollOnline(st.job)
@@ -617,6 +718,7 @@ function Ui.update(st, pressed, dt)
       local item = list:selected()
       if item and item.entry and st.isNews then
         st.viewNews = item.entry.news
+        st.viewNewsEntry = item.entry
         st.newsScroll = 0
         st.prompt = nil
         st.state = S.NEWS_VIEW
@@ -636,11 +738,46 @@ function Ui.update(st, pressed, dt)
 
   if st.state == S.NEWS_VIEW then
     tickNewsScroll(st, pressed)
-    if pressed("a") or pressed("b") then
-      se(5)
+    if pressed("a") and st.viewNewsEntry then
+      se(Song.SE_SELECT)
+      local entry = st.viewNewsEntry
+      st.viewNewsEntry = nil
+      receiveNewsFrom(st, entry)
+    elseif pressed("a") or pressed("b") then
+      se(Song.SE_SELECT)
       st.viewNews = nil
+      st.viewNewsEntry = nil
       st.state = S.OFFER_LIST
       st.prompt = Ui.listPrompt(st)
+    end
+    return nil
+  end
+
+  -- pokefirered/src/mystery_gift_menu.c:1394 MG_STATE_HANDLE_GIFT_INPUT
+  if st.state == S.SAVED_VIEW then
+    if st.isNews then tickNewsScroll(st, pressed) end
+    if pressed("a") then
+      se(Song.SE_SELECT)
+      openGiftMenu(st)
+    elseif pressed("b") then
+      se(Song.SE_SELECT)
+      toMainMenu(st)
+    end
+    return nil
+  end
+
+  if st.state == S.GIFT_MENU then
+    local pick = tickList(st, pressed)
+    if pick == nil then return nil end
+    local action = pick == -1 and "cancel" or (st.giftActions or {})[pick]
+    if action == "receive" then
+      -- pokefirered/src/mystery_gift_menu.c:1506 MG_STATE_RECEIVE
+      st.prompt = nil
+      startSearch(st)
+    elseif action == "toss" then
+      askToss(st)
+    else
+      openSaved(st)
     end
     return nil
   end
@@ -648,19 +785,21 @@ function Ui.update(st, pressed, dt)
   if st.state == S.SAVE then
     local ok = true
     if st.onSave then ok = st.onSave(session(st)) ~= false end
+    local after = st.afterSave
+    st.afterSave = nil
     st.state = S.SAVE_DONE
     -- pokefirered/src/strings.c:1322 gText_SaveCompletedPressA
     say(st, ok and RomText.plain("gText_SaveCompletedPressA")
-      or Strings("Save failed."), toMainMenu)
+      or Strings("Save failed."), ok and after or toMainMenu)
     return nil
   end
 
   if st.state == S.GIFT_INPUT then
     if pressed("a") and st.viewOffer then
-      se(5)
+      se(Song.SE_SELECT)
       pickOffer(st, st.viewOffer)
     elseif pressed("a") or pressed("b") then
-      se(5)
+      se(Song.SE_SELECT)
       st.viewCard = nil
       st.viewOffer = nil
       st.state = S.OFFER_LIST
@@ -680,7 +819,7 @@ end
 
 -- pokefirered/src/mystery_gift_menu.c:466 PrintMysteryGiftOrEReaderTopMenu
 local function drawTopBar(st)
-  Window.printPx(RomText.plain("gText_MysteryGift2"), 2, 2, { colors = TOP_TEXT })
+  Window.printPx(RomText.plain(MysteryGift.uiTextKey("gText_MysteryGift2", session(st))), 2, 2, { colors = TOP_TEXT })
   local S = Ui.STATE
   local useExit = st.state == S.SEARCHING
     or st.state == S.OFFER_LIST
@@ -826,9 +965,11 @@ function Ui.drawNews(st)
   end
 end
 
+local CARD_STATES = { gift_input = true, news_view = true, saved_view = true, gift_menu = true, ask_toss = true }
+
 function Ui.draw(st)
   local S = Ui.STATE
-  if st.state == S.GIFT_INPUT or st.state == S.NEWS_VIEW then
+  if CARD_STATES[st.state] then
     if st.isNews then Ui.drawNews(st) else Ui.drawCard(st) end
   else
     drawMenuBg()
@@ -845,6 +986,12 @@ function Ui.draw(st)
     drawYesNo(st)
   elseif st.msg then
     drawMessage(st.msg.text, math.min(st.msg.revealed, st.msg.total))
+  elseif st.state == S.GIFT_MENU then
+    -- pokefirered/src/mystery_gift_menu.c:719
+    Window.fixedStdFrame(GIFT_SELECT_WIN)
+    Window.printPx(st.prompt or "", GIFT_SELECT_WIN.left * T, GIFT_SELECT_WIN.top * T + 2,
+      { colors = TEXT, maxWidth = GIFT_SELECT_WIN.width * T })
+    drawList(st, GIFT_SELECT_OPTIONS[#(st.rows or {})] or GIFT_SELECT_OPTIONS[3])
   elseif st.prompt then
     drawMessage(st.prompt, nil)
   end

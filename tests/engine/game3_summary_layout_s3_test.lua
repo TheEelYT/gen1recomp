@@ -50,12 +50,13 @@ SummaryChrome.manifest = function() return MANIFEST end
 local SESSION = nil
 package.loaded["src.core.game3.runtime"] = { getSession = function() return SESSION end }
 local SummaryData = require("src.core.game3.summary_data")
+local Strings = require("src.core.Strings")
 SummaryData.moveDescription = function() return "" end
 SummaryData.abilityDescription = function() return "" end
 local realMemo = SummaryData.formatTrainerMemo
 SummaryData.formatTrainerMemo = function() return {} end
 SummaryData.expProgress = function() return { totalExp = 0, expNeeded = 0, progressPercent = 0 } end
-Pokemon.abilityName = function() return "STATIC" end
+Pokemon.abilityName = function() return Strings("STATIC") end
 Pokemon.abilityId = function() return 9 end
 Pokemon.monFrontPic = function() calls[#calls + 1] = { name = "pic", args = {} } return nil end
 Pokemon.monIcon = function() calls[#calls + 1] = { name = "icon", args = {} } return nil end
@@ -214,6 +215,29 @@ check(atk and atk.colors == NORMAL and spa and spa.colors == NORMAL, "every stat
 local def = text_at("7")
 eq(def and def.x, 210 + 27 - 6, "a one-digit stat right-aligns too")
 SummaryMenu.close()
+
+print("[test] 5b. translated ability names are looked up once")
+Strings.load({ strings = { STATIC = "STATIQUE", STATIQUE = "NOM ENCORE TRADUIT" } })
+local numericAbility = mon()
+numericAbility.ability = 9
+SummaryMenu.openMenu({ numericAbility }, 1, { page = SummaryMenu.PAGE_SKILLS })
+draw()
+check(text_at("STATIQUE") ~= nil,
+  "the numeric ability getter's translated name is not translated a second time")
+check(text_at("NOM ENCORE TRADUIT") == nil,
+  "a chained catalog entry does not change the numeric ability label")
+SummaryMenu.close()
+
+local externalAbility = mon()
+externalAbility.ability = "STATIC"
+SummaryMenu.openMenu({ externalAbility }, 1, { page = SummaryMenu.PAGE_SKILLS })
+draw()
+check(text_at("STATIQUE") ~= nil,
+  "a raw external ability label is translated once at the summary consumer")
+check(text_at("NOM ENCORE TRADUIT") == nil,
+  "a raw external ability label also avoids chained translation")
+SummaryMenu.close()
+Strings.load({})
 
 local function text_xy(x, y)
   for _, t in ipairs(texts) do if t.x == x and t.y == y then return t end end
@@ -390,6 +414,16 @@ draw()
 eq(drawn, 60 - 32 + 2 + 64, "the egg pic draws h-flipped at its shaken x")
 SummaryMenu.close()
 Pokemon.frontPic = realFront
+
+print("[test] 13. emerald chrome has no egg shake table")
+for _, manifest in ipairs({ nil, {}, { eggPicShake = {} } }) do
+  MANIFEST = manifest
+  SummaryMenu.openMenu({ { species = 1, isEgg = true, friendship = 5 } }, 1, {})
+  frames(200)
+  eq(SummaryMenu._bounce.dx, 0, "missing eggPicShake leaves the egg still")
+  eq(SummaryMenu._bounce.egg, true, "the summary still treats the mon as an egg")
+  SummaryMenu.close()
+end
 MANIFEST = nil
 
 T.finish("game3_summary_layout_s3_test")

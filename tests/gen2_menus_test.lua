@@ -366,7 +366,7 @@ local options = OptionsMenu.new(optionsGame, {
 })
 -- The cart's seven rows, then the port's: CONTROLS, audio, PERFORMANCE,
 -- speed, display, SHADER FX + SHADER FX 2 (the second slot added alongside
-check("thirty-five rows", #OptionsMenu.ROWS, 35)
+check("thirty-seven row descriptors", #OptionsMenu.ROWS, 37)
 check("the cart's rows come first", OptionsMenu.ROWS[7].key, "frame")
 check("then the rebind screen", OptionsMenu.ROWS[8].id, "controls")
 check("then the port's audio group", OptionsMenu.ROWS[9].key, "musicVol")
@@ -377,6 +377,17 @@ check("last row is BACK", OptionsMenu.ROWS[#OptionsMenu.ROWS].cancel, true)
 local function hasRow(rows, key)
   for _, row in ipairs(rows) do if row.key == key then return true end end
   return false
+end
+check("ORIENTATION is a descriptor", hasRow(OptionsMenu.ROWS, "orientation"), true)
+do
+  local oldSystem = love.system
+  for _, osName in ipairs({ "Linux", "Android", "iOS" }) do
+    love.system = { getOS = function() return osName end }
+    local platformOptions = OptionsMenu.new(newGame(Save.newGame()))
+    check(osName .. " orientation row visibility",
+      hasRow(platformOptions.rows, "orientation"), osName ~= "Linux")
+  end
+  love.system = oldSystem
 end
 check("PRINT is still a descriptor", hasRow(OptionsMenu.ROWS, "print"), true)
 check("but never reaches the screen", hasRow(options.rows, "print"), false)
@@ -922,6 +933,7 @@ check("B backs out to the listing", dex.view, "list")
 
 -- The start menu's last row is the port's QUIT, and it asks before throwing
 -- away everything since the last save.  NO is the default.
+do
 local quitSave = Save.newGame("GOLD")
 local quitGame, quitInput = newGame(quitSave)
 local returned = false
@@ -929,11 +941,26 @@ quitGame.returnToTitle = function() returned = true end
 local quitMenu = StartMenu.new(quitGame, { save = quitSave })
 quitMenu.list.index = #quitMenu.items
 check("last row is QUIT", quitMenu.items[#quitMenu.items].value, "quit")
+local function settlePrompt(menu)
+  for _ = 1, 600 do
+    if not menu:promptTyping() then break end
+    menu:update(0)
+  end
+end
 quitInput:press("a")
 quitMenu:update(0)
 check("QUIT asks first", quitMenu.phase, "confirm")
 check("and defaults to NO", quitMenu.confirmChoice, 2)
 check("nothing has happened yet", returned, false)
+for _ = 1, 6 do quitMenu:update(0) end
+check("the question types out", quitMenu.typer ~= nil
+  and quitMenu.typer.shown > 0 and quitMenu.typer.shown < quitMenu.typer.total, true)
+quitInput:press("up")
+quitMenu:update(0)
+quitInput.pressed = {}
+check("up while it prints leaves NO", quitMenu.confirmChoice, 2)
+settlePrompt(quitMenu)
+check("the question finishes", quitMenu:promptTyping(), false)
 quitInput:press("a")
 quitMenu:update(0)
 check("NO backs out", quitMenu.phase, nil)
@@ -941,6 +968,7 @@ check("still nothing", returned, false)
 
 quitInput:press("a")
 quitMenu:update(0)
+settlePrompt(quitMenu)
 quitInput:press("up")
 quitMenu:update(0)
 check("up selects YES", quitMenu.confirmChoice, 1)
@@ -954,10 +982,12 @@ backGame.returnToTitle = function() returned = "again" end
 local backMenu = StartMenu.new(backGame, { save = quitSave })
 backMenu.phase = "confirm"
 backMenu.confirmChoice = 1
+settlePrompt(backMenu)
 backInput:press("b")
 backMenu:update(0)
 check("B is NO", backMenu.phase, nil)
 check("B ran nothing", returned, true)
+end
 
 -- EXIT GAME on the intro menu leaves through the host rather than the cart.
 local exited = false

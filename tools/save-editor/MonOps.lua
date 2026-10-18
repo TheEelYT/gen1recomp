@@ -37,7 +37,6 @@ function MonOps.create(data, species, level, gen)
     for slot = 1, 4 do
       local mvId = moves[slot]
       if mvId and mvId > 0 then
-        local mvName = PokemonG3.moveName(mvId)
         monMoves[slot] = {
           id = mvId,
           moveId = mvId,
@@ -106,7 +105,10 @@ function MonOps.recalc(data, mon, gen)
       if mon.personality then
         mon.nature = PokemonG3.natureId and PokemonG3.natureId(mon.personality) or mon.nature
         mon.gender = PokemonG3.gender and PokemonG3.gender(mon.speciesId or mon.species, mon.personality) or mon.gender
-        mon.ability = PokemonG3.abilityId and PokemonG3.abilityId(mon.speciesId or mon.species, mon.personality) or mon.ability
+        local pair = PokemonG3.abilities(mon.speciesId or mon.species)
+        mon.abilityNum = mon.abilityNum or (pair[2] and pair[2] ~= 0 and mon.personality % 2 or 0)
+        mon.ability = pair[mon.abilityNum + 1] or pair[1]
+        mon.abilityId = mon.ability
       end
       if mon.maxHp then
         mon.hp = math.max(0, math.min(mon.hp or mon.maxHp, mon.maxHp))
@@ -124,12 +126,133 @@ function MonOps.recalc(data, mon, gen)
   mon.hp = math.max(0, math.min(mon.hp or mon.stats.hp, mon.stats.hp))
 end
 
+MonOps.SPECIES_UNOWN_G3 = 201
+MonOps.UNOWN_FORMS_G3 = 28
+
+local function spliceLetterBits(half, lo2, hi2)
+  local bit = require("bit")
+  return bit.bor(bit.band(half, 0xFCFC), lo2, hi2 * 256)
+end
+
+-- include/pokemon.h:364 GET_UNOWN_LETTER, src/pokemon.c:2318 CreateMonWithGenderNatureLetter
+function MonOps.unownPid(pid, letter, nature, shiny, tid, sid)
+  local bit = require("bit")
+  local PokemonG3 = require("src.core.game3.pokemon")
+  pid = (tonumber(pid) or 0) % 4294967296
+  letter = math.floor(tonumber(letter) or 0) % MonOps.UNOWN_FORMS_G3
+  nature = nature ~= nil and tonumber(nature) or nil
+  local tsv = bit.bxor((tonumber(tid) or 0) % 65536, (tonumber(sid) or 0) % 65536)
+  local oldLow, oldHigh = pid % 65536, math.floor(pid / 65536)
+  local function accept(high, low)
+    local p = high * 65536 + low
+    if p == 0 then return nil end
+    if nature ~= nil and p % 25 ~= nature then return nil end
+    local isShiny = bit.bxor(tsv, bit.bxor(high, low)) < 8
+    if shiny ~= nil and isShiny ~= (shiny and true or false) then return nil end
+    if PokemonG3.unownLetter(p) ~= letter then return nil end
+    return p
+  end
+  local same = accept(oldHigh, oldLow)
+  if same then return same end
+  local tsv89 = math.floor(tsv / 256) % 4
+  for d = 0, 4095 do
+    local low0 = bit.bxor(oldLow, (d % 64) * 4 + math.floor(d / 64) * 1024)
+    if shiny then
+      for b1 = 0, 3 do
+        local b3 = bit.bxor(b1, tsv89)
+        for b0 = 0, 3 do
+          for b2 = 0, 3 do
+            if (b3 * 64 + b2 * 16 + b1 * 4 + b0) % MonOps.UNOWN_FORMS_G3 == letter then
+              local low = spliceLetterBits(low0, b0, b1)
+              local base = bit.bxor(low, tsv)
+              for k2 = 0, 1 do
+                local high = bit.bor(bit.band(bit.bxor(base, k2 * 4), 0xFFFC), b2)
+                local p = accept(high, low)
+                if p then return p end
+              end
+            end
+          end
+        end
+      end
+    else
+      for v = letter, 255, MonOps.UNOWN_FORMS_G3 do
+        local b0, b1 = v % 4, math.floor(v / 4) % 4
+        local b2, b3 = math.floor(v / 16) % 4, math.floor(v / 64)
+        local p = accept(spliceLetterBits(oldHigh, b2, b3), spliceLetterBits(low0, b0, b1))
+        if p then return p end
+      end
+    end
+  end
+  return nil
+end
+
+local function unownReq(mon)
+  if tonumber(mon.speciesId or mon.species) ~= MonOps.SPECIES_UNOWN_G3 then return nil end
+  return require("src.core.game3.pokemon").unownLetter(mon.personality)
+end
+
+-- src/pokemon.c:5751 DRAW_SPINDA_SPOTS
+local function spindaPid(base, tsv, accept, shinyOnly)
+  local bit = require("bit")
+  base = (tonumber(base) or 0) % 4294967296
+  local ob = {}
+  for i = 0, 3 do ob[i] = bit.band(bit.rshift(base, 8 * i), 0xFF) end
+  local best, bestCost
+  local function try(p)
+    if not accept(p) then return end
+    local cost = 0
+    for i = 0, 3 do
+      local b = bit.band(bit.rshift(p, 8 * i), 0xFF)
+      if b ~= ob[i] then
+        cost = cost + 1000 + math.abs(b % 16 - ob[i] % 16)
+          + math.abs(bit.rshift(b, 4) - bit.rshift(ob[i], 4))
+      end
+    end
+    if not bestCost or cost < bestCost then best, bestCost = p, cost end
+  end
+  if shinyOnly then
+    for low = 0, 65535 do
+      local h0 = bit.bxor(low, tsv)
+      for s = 0, 7 do try(bit.bxor(h0, s) * 65536 + low) end
+    end
+    return best
+  end
+  try(base)
+  if best then return best end
+  local function with(p, i, v)
+    return p + (v - bit.band(bit.rshift(p, 8 * i), 0xFF)) * 256 ^ i
+  end
+  for i = 0, 3 do
+    for v = 0, 255 do
+      if v ~= ob[i] then try(with(base, i, v)) end
+    end
+  end
+  if best then return best end
+  for i = 0, 2 do
+    for j = i + 1, 3 do
+      for v = 0, 255 do
+        if v ~= ob[i] then
+          local pi = with(base, i, v)
+          for w = 0, 255 do
+            if w ~= ob[j] then try(with(pi, j, w)) end
+          end
+        end
+      end
+    end
+  end
+  return best
+end
+
 function MonOps.generatePid(species, otId, otSecretId, reqs)
   reqs = reqs or {}
   local PokemonG3 = require("src.core.game3.pokemon")
   local bit = require("bit")
 
   local spId = tonumber(species) or (PokemonG3.speciesFromName and PokemonG3.speciesFromName(tostring(species))) or 1
+  if spId == MonOps.SPECIES_UNOWN_G3 and reqs.unownLetter ~= nil then
+    local p = MonOps.unownPid(reqs.basePid, reqs.unownLetter, reqs.nature, reqs.shiny, otId, otSecretId)
+    if p then return p end
+  end
   otId = bit.band(tonumber(otId) or 0, 0xFFFF)
   otSecretId = bit.band(tonumber(otSecretId) or 0, 0xFFFF)
   local trainerXor = bit.bxor(otId, otSecretId)
@@ -141,6 +264,30 @@ function MonOps.generatePid(species, otId, otSecretId, reqs)
   local targetAbility = reqs.ability and tonumber(reqs.ability)
   local targetGender = reqs.gender
   local targetShiny = reqs.shiny
+
+  if spId == PokemonG3.SPECIES_SPINDA and reqs.basePid ~= nil then
+    local p = spindaPid(reqs.basePid, trainerXor, function(p)
+      if p == 0 then return false end
+      if targetNature ~= nil and p % 25 ~= targetNature then return false end
+      local b0 = p % 256
+      if targetAbility ~= nil and b0 % 2 ~= targetAbility then return false end
+      if targetGender ~= nil and targetGender ~= "" and targetGender ~= "U" then
+        local g
+        if ratio == PokemonG3.GENDER_MALE then g = "M"
+        elseif ratio == PokemonG3.GENDER_FEMALE then g = "F"
+        elseif ratio == PokemonG3.GENDER_GENDERLESS then g = "U"
+        elseif ratio > b0 then g = "F"
+        else g = "M" end
+        if g ~= targetGender then return false end
+      end
+      if targetShiny ~= nil then
+        local isShiny = bit.bxor(trainerXor, bit.bxor(math.floor(p / 65536), p % 65536)) < 8
+        if isShiny ~= (targetShiny and true or false) then return false end
+      end
+      return true
+    end, targetShiny == true)
+    if p then return p end
+  end
 
   -- 1. Determine valid low-byte (b0) for gender & ability slot
   local validB0 = {}
@@ -215,13 +362,15 @@ function MonOps.setNature(data, mon, natureId, gen)
   mon.nature = natureId
   local isG3 = (gen == 3) or (mon.speciesId ~= nil) or (mon.personality ~= nil)
   if isG3 then
-    local currentAbility = (mon.personality and (mon.personality % 2)) or 0
+    local currentAbility = mon.abilityNum or (mon.personality and (mon.personality % 2)) or 0
     local isShiny = require("src.core.game3.summary_data").isShiny(mon)
     mon.personality = MonOps.generatePid(mon.speciesId or mon.species, mon.otId or 0, mon.otSecretId or 0, {
       nature = natureId,
       ability = currentAbility,
       gender = mon.gender,
       shiny = isShiny,
+      unownLetter = unownReq(mon),
+      basePid = mon.personality,
     })
     MonOps.recalc(data, mon, gen)
   end
@@ -239,7 +388,10 @@ function MonOps.setAbility(data, mon, abilitySlot, gen)
       ability = abilitySlot,
       gender = mon.gender,
       shiny = isShiny,
+      unownLetter = unownReq(mon),
+      basePid = mon.personality,
     })
+    mon.abilityNum = abilitySlot
     local PokemonG3 = require("src.core.game3.pokemon")
     mon.ability = PokemonG3.abilityId(mon.speciesId or mon.species, mon.personality)
     MonOps.recalc(data, mon, gen)
@@ -251,13 +403,15 @@ function MonOps.setGender(data, mon, gender, gen)
   local isG3 = (gen == 3) or (mon.speciesId ~= nil) or (mon.personality ~= nil)
   if isG3 then
     local currentNature = (mon.personality and (mon.personality % 25)) or mon.nature or 0
-    local currentAbility = (mon.personality and (mon.personality % 2)) or 0
+    local currentAbility = mon.abilityNum or (mon.personality and (mon.personality % 2)) or 0
     local isShiny = require("src.core.game3.summary_data").isShiny(mon)
     mon.personality = MonOps.generatePid(mon.speciesId or mon.species, mon.otId or 0, mon.otSecretId or 0, {
       nature = currentNature,
       ability = currentAbility,
       gender = gender,
       shiny = isShiny,
+      unownLetter = unownReq(mon),
+      basePid = mon.personality,
     })
     local PokemonG3 = require("src.core.game3.pokemon")
     mon.gender = PokemonG3.gender(mon.speciesId or mon.species, mon.personality)
@@ -272,12 +426,14 @@ function MonOps.setShiny(data, mon, shiny, gen)
   local isG3 = (gen == 3) or (mon.speciesId ~= nil) or (mon.personality ~= nil)
   if isG3 then
     local currentNature = (mon.personality and (mon.personality % 25)) or mon.nature or 0
-    local currentAbility = (mon.personality and (mon.personality % 2)) or 0
+    local currentAbility = mon.abilityNum or (mon.personality and (mon.personality % 2)) or 0
     mon.personality = MonOps.generatePid(mon.speciesId or mon.species, mon.otId or 0, mon.otSecretId or 0, {
       nature = currentNature,
       ability = currentAbility,
       gender = mon.gender,
       shiny = shiny,
+      unownLetter = unownReq(mon),
+      basePid = mon.personality,
     })
     mon.isShiny = shiny
     MonOps.recalc(data, mon, gen)
@@ -426,9 +582,14 @@ function MonOps.getBasePp(data, mon, slot)
   return 10
 end
 
-function MonOps.calcMaxPp(basePp, ppUps)
+function MonOps.calcMaxPp(basePp, ppUps, gen)
   basePp = math.max(1, tonumber(basePp) or 10)
   ppUps = math.max(0, math.min(3, tonumber(ppUps) or 0))
+  if gen == 1 or gen == 2 then
+    -- GBPKM.GetMovePP and Gen 2 engine/items/item_effects.asm cap the
+    -- per-PP-Up bonus at seven: a 40 PP move reaches 61, not 64.
+    return basePp + ppUps * math.min(7, math.floor(basePp / 5))
+  end
   return basePp + math.floor(basePp * 20 * ppUps / 100)
 end
 
@@ -436,9 +597,10 @@ function MonOps.setPpUps(data, mon, slot, ppUps, gen)
   if type(mon) ~= "table" or not slot then return end
   ppUps = math.max(0, math.min(3, math.floor(tonumber(ppUps) or 0)))
   local basePp = MonOps.getBasePp(data, mon, slot)
-  local newMaxPp = MonOps.calcMaxPp(basePp, ppUps)
+  if basePp == 1 then ppUps = 0 end -- Sketch cannot receive PP Ups.
 
   local isG3 = (gen == 3) or (mon.speciesId ~= nil) or (mon.personality ~= nil) or (type(mon.ppBonusesPacked) == "number")
+  local newMaxPp = MonOps.calcMaxPp(basePp, ppUps, isG3 and 3 or (gen or 1))
   if isG3 then
     local bit = require("bit")
     local shift = (slot - 1) * 2
@@ -449,6 +611,11 @@ function MonOps.setPpUps(data, mon, slot, ppUps, gen)
     mon.pp = mon.pp or {}
     if mon.pp[slot] == nil or mon.pp[slot] > newMaxPp then
       mon.pp[slot] = newMaxPp
+    end
+    local mv = mon.moves and mon.moves[slot]
+    if type(mv) == "table" then
+      mv.pp, mv.maxPp = mon.pp[slot], newMaxPp
+      mv.ppUps = ppUps > 0 and ppUps or nil
     end
   else
     local mv = mon.moves and mon.moves[slot]
@@ -473,15 +640,16 @@ function MonOps.setPp(data, mon, slot, value, gen)
   if type(mon) ~= "table" or not slot then return end
   local basePp = MonOps.getBasePp(data, mon, slot)
   local ppUps = MonOps.getPpUps(mon, slot)
-  local maxPp = MonOps.calcMaxPp(basePp, ppUps)
-  local target = math.max(0, math.min(maxPp, math.floor(tonumber(value) or 0)))
-
   local isG3 = (gen == 3) or (mon.speciesId ~= nil) or (mon.personality ~= nil) or (type(mon.ppBonusesPacked) == "number")
+  local maxPp = MonOps.calcMaxPp(basePp, ppUps, isG3 and 3 or (gen or 1))
+  local target = math.max(0, math.min(maxPp, math.floor(tonumber(value) or 0)))
   if isG3 then
     mon.pp = mon.pp or {}
     mon.pp[slot] = target
     mon.maxPp = mon.maxPp or {}
     mon.maxPp[slot] = maxPp
+    local mv = mon.moves and mon.moves[slot]
+    if type(mv) == "table" then mv.pp, mv.maxPp = target, maxPp end
   else
     local mv = mon.moves and mon.moves[slot]
     if type(mv) == "table" then
@@ -497,11 +665,15 @@ end
 
 function MonOps.maxAllPpUps(data, mon, gen)
   if type(mon) ~= "table" or not mon.moves then return end
+  local ups = (mon.isEgg or mon.egg) and 0 or 3
   for slot = 1, 4 do
-    if mon.moves[slot] then
-      MonOps.setPpUps(data, mon, slot, 3, gen)
+    local move = mon.moves[slot]
+    local id = type(move) == "table" and (move.moveId or move.id) or move
+    if id and id ~= 0 then
+      MonOps.setPpUps(data, mon, slot, ups, gen)
       local basePp = MonOps.getBasePp(data, mon, slot)
-      local maxPp = MonOps.calcMaxPp(basePp, 3)
+      local isG3 = gen == 3 or mon.speciesId ~= nil or mon.personality ~= nil
+      local maxPp = MonOps.calcMaxPp(basePp, MonOps.getPpUps(mon, slot), isG3 and 3 or (gen or 1))
       MonOps.setPp(data, mon, slot, maxPp, gen)
     end
   end
@@ -513,6 +685,20 @@ function MonOps.syncHpDv(dvs)
   dvs.hp = (dvs.attack % 2) * 8 + (dvs.defense % 2) * 4
          + (dvs.speed % 2) * 2 + (dvs.special % 2)
   return dvs
+end
+
+local function deriveGen2(data, mon)
+  local Mon = require("src.battle.gen2.Mon")
+  local Unown = require("src.core.gen2.Unown")
+  mon.dvs.hp = Mon.hpDV(mon.dvs)
+  local def = data and data.pokemon and data.pokemon[mon.species]
+  if def then
+    mon.gender = Mon.gender(def, mon.dvs, { species = mon.species, level = mon.level })
+  end
+  mon.shiny = Mon.isShiny(mon.dvs, { species = mon.species, def = def, level = mon.level })
+  if mon.species == Unown.SPECIES then
+    mon.unownLetter = Unown.letterFromDVs(mon.dvs)
+  end
 end
 
 function MonOps.setDv(data, mon, key, value, gen)
@@ -533,23 +719,77 @@ function MonOps.setDv(data, mon, key, value, gen)
     mon.ivs.spa = math.min(31, (mon.dvs.special or 0) * 2 + 1)
     mon.ivs.spd = math.min(31, (mon.dvs.special or 0) * 2 + 1)
   elseif gen == 2 or (mon.stats and mon.stats.specialAttack) then
-    local Mon = require("src.battle.gen2.Mon")
-    mon.dvs.hp = Mon.hpDV(mon.dvs)
-    local def = data and data.pokemon and data.pokemon[mon.species]
-    if def then
-      mon.gender = Mon.gender(def, mon.dvs, { species = mon.species, level = mon.level })
-      mon.shiny = Mon.isShiny(mon.dvs, { species = mon.species, def = def, level = mon.level })
-      local Unown = require("src.core.gen2.Unown")
-      if mon.species == Unown.SPECIES then
-        mon.unownLetter = Unown.letterFromDVs(mon.dvs)
-      end
-    end
+    deriveGen2(data, mon)
   end
   MonOps.recalc(data, mon, gen)
 end
 
+local DV_KEYS = { "attack", "defense", "speed", "special" }
+
+-- engine/gfx/load_pics.asm:1 GetUnownLetter, engine/gfx/color.asm:8 CheckShininess
+function MonOps.unownDvs(dvs, letter, keepShiny)
+  local Mon = require("src.battle.gen2.Mon")
+  letter = math.floor(tonumber(letter) or 1)
+  if letter < 1 or letter > 26 then return nil end
+  local lo, hi = (letter - 1) * 10, math.min(255, letter * 10 - 1)
+  local best, bestKey
+  for p = lo, hi do
+    local out = {}
+    for i, k in ipairs(DV_KEYS) do
+      local d = tonumber(dvs[k]) or 0
+      local mid = math.floor(p / 4 ^ (4 - i)) % 4
+      out[k] = d - (math.floor(d / 2) % 4) * 2 + mid * 2
+    end
+    local cost = 0
+    for _, k in ipairs(DV_KEYS) do cost = cost + math.abs(out[k] - (tonumber(dvs[k]) or 0)) end
+    local key = (Mon.vanillaShiny(out) == (keepShiny and true or false) and 0 or 1000) + cost
+    if not bestKey or key < bestKey then best, bestKey = out, key end
+  end
+  return best
+end
+
+-- pokecrystal/engine/gfx/color.asm:8 CheckShininess, pokecrystal/engine/battle/hidden_power.asm:13
+function MonOps.maxGen2Dvs(data, mon, gen)
+  if type(mon) ~= "table" then return end
+  local Mon = require("src.battle.gen2.Mon")
+  local Unown = require("src.core.gen2.Unown")
+  mon.dvs = mon.dvs or {}
+  local keepShiny = mon.shiny == true or Mon.vanillaShiny(mon.dvs)
+  local out = keepShiny and { attack = 15, defense = 10, speed = 10, special = 10 }
+    or { attack = 15, defense = 15, speed = 15, special = 15 }
+  if mon.species == Unown.SPECIES then
+    out = MonOps.unownDvs(out, Unown.monLetter(mon), keepShiny) or out
+  end
+  for k, v in pairs(out) do mon.dvs[k] = v end
+  deriveGen2(data, mon)
+  MonOps.recalc(data, mon, gen)
+  return keepShiny and mon.shiny == true
+end
+
+function MonOps.setUnownForm(data, mon, letter, gen)
+  if type(mon) ~= "table" then return nil end
+  if gen == 3 then
+    local Summary = require("src.core.game3.summary_data")
+    local p = MonOps.unownPid(mon.personality, letter, (tonumber(mon.personality) or 0) % 25,
+      Summary.isShiny(mon), mon.otId, mon.otSecretId)
+    if not p then return nil end
+    mon.personality = p
+    mon.isShiny = nil
+    MonOps.recalc(data, mon, gen)
+    return true
+  end
+  local Mon = require("src.battle.gen2.Mon")
+  mon.dvs = mon.dvs or { attack = 0, defense = 0, speed = 0, special = 0 }
+  local wasShiny = mon.shiny == true or Mon.vanillaShiny(mon.dvs)
+  local out = MonOps.unownDvs(mon.dvs, letter, wasShiny)
+  if not out then return nil end
+  for k, v in pairs(out) do mon.dvs[k] = v end
+  deriveGen2(data, mon)
+  MonOps.recalc(data, mon, gen)
+  return true, wasShiny and not mon.shiny
+end
+
 local EV_KEYS = { "hp", "atk", "def", "spe", "spa", "spd" }
-local IV_KEYS = { "hp", "atk", "def", "spe", "spa", "spd" }
 
 function MonOps.setEv(data, mon, key, value, gen)
   if type(mon) ~= "table" or not key then return end

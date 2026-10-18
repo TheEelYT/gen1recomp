@@ -21,7 +21,7 @@ local SpriteRenderer = require("src.render.SpriteRenderer")
 local Strings = require("src.core.Strings")
 local Theme = require("src.ui.Theme")
 
-local TownMap = {}
+local TownMap = { isMenu = true }
 TownMap.__index = TownMap
 TownMap.isOpaque = true
 
@@ -159,9 +159,9 @@ local function markerSheet(def, seed)
   end
   if not colors then
     if PaletteFX.usesSpriteObp() then
-      colors, group = PaletteFX.ogObj()
+      colors, group = PaletteFX.ogObjNormal() -- home/palettes.asm:24
     else
-      colors, group = PaletteFX.dmgObj()
+      colors, group = PaletteFX.dmgObjLit()
     end
   end
   local ok, img = pcall(SpriteRenderer.obpImage, def and def.image, colors, group)

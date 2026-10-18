@@ -11,6 +11,13 @@
 # Usage:
 #   ./build-rg34xxsp.sh [--version X.Y.Z]
 #
+# LuaJIT: the zip ships a pinned LuaJIT, compiled during the build, so building
+# needs an aarch64 host with docker or podman. Alternatively set
+# GEN1RECOMP_LUAJIT_LIB=/path/libluajit-5.1.so.2 with its COPYRIGHT beside it
+# (or GEN1RECOMP_LUAJIT_COPYRIGHT=/path/to/COPYRIGHT).
+# The ogg/vorbis/theora/mpg123 libraries liblove links are built the same way
+# (scripts/luajit/build_codecs.sh), or taken from GEN1RECOMP_CODEC_DIR.
+#
 # Output:
 #   dist/rg34xxsp/gen1recomp-rg34xxsp-stockos64-mod.zip
 #
@@ -41,9 +48,6 @@ LAUNCHER_NAME="Gen1recomp.sh"
 LOVE_VERSION="11.5"
 VERSION="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)"
 
-# Official PortMaster LÖVE 11.5 aarch64 runtime (small love stub + liblove).
-PM_RUNTIME_BASE="https://raw.githubusercontent.com/PortsMaster/PortMaster-GUI/main/PortMaster/runtimes/love_${LOVE_VERSION}"
-
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarn:\033[0m %s\n' "$*" >&2; }
 fail() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -52,7 +56,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --version) VERSION="$2"; shift ;;
     -h|--help)
-      sed -n '2,24p' "$0"
+      sed -n '2,31p' "$0"
       exit 0
       ;;
     *) fail "unknown argument: $1" ;;
@@ -66,16 +70,9 @@ command -v unzip >/dev/null || fail "unzip is required"
 
 mkdir -p "$CACHE" "$WORK" "$DIST"
 
-download() {
-  local url="$1" dest="$2"
-  if [ -f "$dest" ] && [ -s "$dest" ]; then
-    return 0
-  fi
-  say "downloading $(basename "$dest")"
-  curl -fL --progress-bar "$url" -o "$dest.tmp" \
-    || fail "download failed: $url"
-  mv "$dest.tmp" "$dest"
-}
+# PortMaster pins + LuaJIT pin (LUAJIT_COMMIT, ...) + download/verify helpers.
+# shellcheck source=scripts/luajit/portmaster_runtime.sh
+. "$ROOT/scripts/luajit/portmaster_runtime.sh"
 
 # --------------------------------------------------------------- game tree
 # Unpacked directory (not a .love zip) so the player can drop a .gb next to
@@ -94,7 +91,7 @@ rm -f "$WORK/game-payload.zip"
   tools/rom_manifest.json tools/rom_manifest_blue.json \
   tools/rom_manifest_yellow.json tools/rom_manifest_gold.json \
   tools/rom_manifest_silver.json tools/rom_manifest_crystal.json \
-  tools/rom_manifest_firered.json tools/rom_manifest_leafgreen.json \
+  tools/rom_manifest_firered.json tools/rom_manifest_leafgreen.json tools/rom_manifest_emerald.json tools/rom_manifest_ruby.json tools/rom_manifest_sapphire.json \
   -x '*.DS_Store' 'data/generated/*' 'assets/generated/*')
 unzip -Z1 "$WORK/game-payload.zip" > "$WORK/payload-listing.txt"
 if grep -Eq '^(data|assets)/generated/[^/]+|^(data|assets)/generated/.+/' "$WORK/payload-listing.txt"; then
@@ -102,7 +99,7 @@ if grep -Eq '^(data|assets)/generated/[^/]+|^(data|assets)/generated/.+/' "$WORK
 fi
 for manifest in rom_manifest.json rom_manifest_blue.json rom_manifest_yellow.json \
                 rom_manifest_gold.json rom_manifest_silver.json rom_manifest_crystal.json \
-                rom_manifest_firered.json rom_manifest_leafgreen.json; do
+                rom_manifest_firered.json rom_manifest_leafgreen.json rom_manifest_emerald.json rom_manifest_ruby.json rom_manifest_sapphire.json; do
   grep -qxF "tools/$manifest" "$WORK/payload-listing.txt" \
     || fail "payload is missing tools/$manifest"
 done
@@ -129,15 +126,12 @@ fi
 say "fetching LÖVE $LOVE_VERSION aarch64 runtime"
 LOVE_BIN="$CACHE/love.aarch64"
 LOVE_LIB="$CACHE/liblove-11.5.so"
-LUAJIT_LIB="$CACHE/libluajit-5.1.so.2"
 MODPLUG_LIB="$CACHE/libmodplug.so.1"
-OGG_LIB="$CACHE/libogg.so.0"
 
-download "$PM_RUNTIME_BASE/love.aarch64" "$LOVE_BIN"
-download "$PM_RUNTIME_BASE/libs.aarch64/liblove-11.5.so" "$LOVE_LIB"
-download "$PM_RUNTIME_BASE/libs.aarch64/libluajit-5.1.so.2" "$LUAJIT_LIB"
-download "$PM_RUNTIME_BASE/libs.aarch64/libmodplug.so.1" "$MODPLUG_LIB"
-download "$PM_RUNTIME_BASE/libs.aarch64/libogg.so.0" "$OGG_LIB"
+pm_fetch_runtime "$CACHE"
+
+pm_select_luajit
+pm_select_codecs
 
 # Sanity: love stub must be an aarch64 ELF.
 file "$LOVE_BIN" | grep -qi 'aarch64\|ARM aarch64' \
@@ -155,8 +149,10 @@ mkdir -p "$PORT_ROOT/$PORT_DIR_NAME/bin" \
 cp -R "$GAME_SRC" "$PORT_ROOT/$PORT_DIR_NAME/lovegame"
 cp "$LOVE_BIN" "$PORT_ROOT/$PORT_DIR_NAME/bin/love.aarch64"
 chmod +x "$PORT_ROOT/$PORT_DIR_NAME/bin/love.aarch64"
-cp "$LOVE_LIB" "$LUAJIT_LIB" "$MODPLUG_LIB" "$OGG_LIB" \
+cp "$LOVE_LIB" "$MODPLUG_LIB" \
   "$PORT_ROOT/$PORT_DIR_NAME/libs.aarch64/"
+pm_stage_luajit "$PORT_ROOT/$PORT_DIR_NAME/libs.aarch64" "$PORT_ROOT/$PORT_DIR_NAME/licenses"
+pm_stage_codecs "$PORT_ROOT/$PORT_DIR_NAME/libs.aarch64" "$PORT_ROOT/$PORT_DIR_NAME/licenses"
 
 BRIDGE_LIB="liblibrashader_bridge.so"
 BRIDGE_SRC="${SHADERFX_BRIDGE_LINUX_ARM64:-}"
@@ -173,10 +169,18 @@ else
 fi
 
 # Drop a short license pointer for the bundled LÖVE bits.
-cat > "$PORT_ROOT/$PORT_DIR_NAME/licenses/LICENSE.love2d.txt" <<'EOF'
+cat > "$PORT_ROOT/$PORT_DIR_NAME/licenses/LICENSE.love2d.txt" <<EOF
 This port bundles the LÖVE 11.5 aarch64 runtime from PortMaster
-(https://github.com/PortsMaster/PortMaster-GUI). LÖVE is zlib-licensed;
-see https://love2d.org/ for full terms.
+(https://github.com/PortsMaster/PortMaster-GUI, commit $PM_RUNTIME_COMMIT),
+except for LuaJIT. LÖVE is zlib-licensed; see https://love2d.org/ for full terms.
+
+libs.aarch64/libluajit-5.1.so.2 is LuaJIT, built from source at LuaJIT commit
+$LUAJIT_COMMIT (https://github.com/LuaJIT/LuaJIT, MIT license; see
+LuaJIT-COPYRIGHT). It replaces PortMaster's LuaJIT 2.1.0-beta3.
+
+libs.aarch64/libogg.so.0, libvorbis.so.0, libvorbisfile.so.3, libtheoradec.so.1
+and libmpg123.so.0 are built from upstream ogg, vorbis, theora and mpg123
+releases (BSD-style x3 and LGPL-2.1; see codecs-SOURCE.txt and *-COPYING).
 EOF
 
 # --------------------------------------------------------------- launcher
@@ -355,6 +359,10 @@ Canonical SHA-1 (1 MiB US carts only):
 LÖVE runtime binaries from [PortMaster](https://portmaster.games/).
 Stock OS 64-bit MOD: [cbepx-me](https://github.com/cbepx-me/Anbernic-H700-RG-xx-StockOS-Modification).
 EOF
+cat >> "$PORT_ROOT/README.md" <<EOF
+
+LuaJIT (MIT license) is built from source at LuaJIT commit \`$LUAJIT_COMMIT\` instead of using PortMaster's older LuaJIT 2.1.0-beta3. The JIT stays off by default on this build.
+EOF
 
 # --------------------------------------------------------------- zip
 ZIP_OUT="$DIST/$APP_NAME-$ARTIFACT_SUFFIX.zip"
@@ -362,6 +370,8 @@ rm -f "$ZIP_OUT" "$DIST/$APP_NAME-rg34xxsp.zip"
 say "packing $ZIP_OUT"
 (cd "$PORT_ROOT" && zip -q -9 -r "$ZIP_OUT" \
   "$LAUNCHER_NAME" "$PORT_DIR_NAME" port.json gameinfo.xml README.md)
+
+pm_verify_zip "$ZIP_OUT" "$PORT_DIR_NAME" "$WORK"
 
 say "done."
 say "artifact: $ZIP_OUT ($(du -h "$ZIP_OUT" | cut -f1))"

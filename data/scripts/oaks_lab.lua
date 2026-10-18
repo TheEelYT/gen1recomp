@@ -34,18 +34,19 @@ local function starterBall(askText, species, choseFlag, ownBall,
       { species = species, forceOwned = true } }, -- 5
     { "ask", askText },                           -- 6
     { "jump_if_false", "end" },                   -- 7
-    -- scripts/OaksLab.asm:919
-    { "show_text", "_OaksLabMonEnergeticText" },  -- 8
+    -- scripts/OaksLab.asm:918
+    { "hide_object", "OAKS_LAB", ownBall },       -- 8
+    -- scripts/OaksLab.asm:921
+    { "show_text", "_OaksLabMonEnergeticText" },  -- 9
     -- OaksLab.asm: ReceivedMon (sound_get_key_item) then AddPartyMon; the
     -- jingle fires once the box has typed and holds it (#668)
-    { "text_sound", "Get_Key_Item" },                              -- 9
-    { "show_text", "_OaksLabReceivedMonText", { RAM = species } }, -- 10
-    { "give_pokemon", species, 5 },               -- 11
-    { "set_flag", "EVENT_GOT_STARTER" },          -- 12
-    { "set_flag", choseFlag },                    -- 13
+    { "text_sound", "Get_Key_Item" },                              -- 10
+    { "show_text", "_OaksLabReceivedMonText", { RAM = species } }, -- 11
+    { "give_pokemon", species, 5 },               -- 12
+    { "set_flag", "EVENT_GOT_STARTER" },          -- 13
     -- POKé BALLs come later, at OaksLabOak1Text's .give_poke_balls beat
     -- once the Route 22 rival is beaten (see TEXT_OAKSLAB_OAK1 below)
-    { "hide_object", "OAKS_LAB", ownBall },       -- 14
+    { "set_flag", choseFlag },                    -- 14
     -- the rival walks to the countering ball (around the furniture)
     { "move_npc_to", 1, rivalBallX, 4 },          -- 15
     { "face_object", 1, "up" },                   -- 16
@@ -61,7 +62,7 @@ local function starterBall(askText, species, choseFlag, ownBall,
     -- leftover ball: Oak reads the last-mon line (scripts/OaksLab.asm
     -- OaksLabSelectedPokeBallScript -> OaksLabLastMonScript, #601)
     { "face_object", 5, "down" },                 -- 23
-    { "show_text", "That's PROF.OAK's\nlast Pokémon!" }, -- 24
+    { "show_text", "_OaksLabLastMonText" },           -- 24
     -- OaksLabLastMonScript ends at TextScriptEnd; the port used to fall
     -- through into the pre-pick line below (#601 remnant, reported on #600)
     { "jump", "end" },                            -- 25
@@ -126,7 +127,7 @@ return {
       { "show_text", "_OaksLabOak1ParcelThanksText" },
       { "take_item", "OAKS_PARCEL", 1 },
       { "stop_music" },
-      { "play_music", "Music_MeetRival" },
+      { "play_music", "Music_MeetRival", { start = "rival" } }, -- scripts/OaksLab.asm:517
       { "show_text", "_OaksLabRivalGrampsText" },
       { "show_object", "OAKS_LAB", "OAKSLAB_RIVAL" },
       -- OaksLabCalcRivalMovementScript: sprite map (8,11) → cell (4,7)
@@ -157,7 +158,7 @@ return {
       { "hide_object", "VIRIDIAN_CITY", "VIRIDIANCITY_OLD_MAN_SLEEPY" },
       { "show_object", "VIRIDIAN_CITY", "VIRIDIANCITY_OLD_MAN" },
       { "stop_music" },
-      { "play_music", "Music_MeetRival" },
+      { "play_music", "Music_MeetRival", { start = "rival" } }, -- scripts/OaksLab.asm:618
       { "move_npc_to", 1, 4, 7 },
       { "hide_object", "OAKS_LAB", "OAKSLAB_RIVAL" },
       { "play_music", "Music_OaksLab" },
@@ -295,6 +296,9 @@ return {
     if flags.EVENT_FOLLOWED_OAK_INTO_LAB and not flags.EVENT_GOT_STARTER
        and y >= 6 then
       ow.runner:run({
+        -- scripts/OaksLab.asm:158-167
+        { "face_object", 5, "down" },
+        { "face_object", 1, "down" },
         { "show_text", "_OaksLabOakDontGoAwayYetText" },
         { "move_player", "up", 1 },
       }, {})
@@ -346,10 +350,7 @@ return {
       table.insert(rows, { "set_flag", "EVENT_BATTLED_RIVAL_IN_OAKS_LAB" })
       table.insert(rows, { "jump_if_false", base + 6 })
       table.insert(rows, { "show_text", "_OaksLabRivalSmellYouLaterText" })
-      -- OaksLabRivalStartsExitScript: parting shot, rival exit fanfare, then
-      -- walk out past the player.  The fanfare was dropped here (#683) -- the
-      -- parcel scene above already plays Music_MeetRival on both arrival and
-      -- departure (lines 144-146), and this exit should match (#596).
+      -- scripts/OaksLab.asm:445
       table.insert(rows, { "stop_music" })
       table.insert(rows, { "play_music", "Music_MeetRival", { start = "rival" } })
       -- scripts/OaksLab.asm:448-472 sidestep out of the player's column then

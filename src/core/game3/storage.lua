@@ -1,7 +1,7 @@
 -- Gen 3 (FRLG) Pokémon Storage System & Player PC (pret pokemon_storage_system.c).
 --
 -- 14 Boxes × 30 Slots = 420 Pokémon Capacity.
--- 50 Unique Item Slots in Player's PC.
+-- Unique Item Slots in Player's PC: profile bag.pcItems (30 FRLG, 50 Emerald).
 -- Includes PC Heal Exploit, Circular Spillover, Sparse Serialization, and Bag-Full Guard.
 
 local ItemsData = require("src.core.game3.items_data")
@@ -12,29 +12,58 @@ local Storage = {}
 Storage.TOTAL_BOXES_COUNT = 14
 Storage.IN_BOX_COUNT = 30
 Storage.TOTAL_BOX_MONS = 420
-Storage.PC_ITEMS_COUNT = 50
 Storage.MAX_ITEM_QTY = 999
+Storage.DEFAULT_WALLPAPERS = 4 -- pokefirered/src/pokemon_storage_system_menu.c:420
 
-local VAR_PC_BOX_TO_SEND_MON = 0x4037 -- pokefirered/include/constants/vars.h:105
-local FLAG_SHOWN_BOX_WAS_FULL_MESSAGE = 0x843 -- pokefirered/include/constants/flags.h:1401
-local FLAG_SYS_NOT_SOMEONES_PC = 0x834 -- pokefirered/include/constants/flags.h:1386
+function Storage.defaultWallpaper(boxNumber)
+  return ((boxNumber - 1) % Storage.DEFAULT_WALLPAPERS) + 1
+end
+
+local function save_ids(session)
+  local row = require("src.core.game3.profile").forSession(session)
+  local names = row.save.storage
+  local C = require("src.core.game3.constants").of(row.id)
+  return names.sendVar and C:require("vars", names.sendVar), names.boxFullFlag and C:require("flags", names.boxFullFlag),
+    C:require("flags", names.pcOwnerFlag)
+end
+
+function Storage.pcItemsCount(session)
+  return require("src.core.game3.profile").forSession(session).bag.pcItems
+end
 
 local function script_store(session)
   local Space = package.loaded["src.core.game3.scripting.space"]
   return (Space and Space.store) or (session and session.store) or nil
 end
 
---- Create a fresh Storage instance (14 boxes, 30 slots each, 50-item PC).
+--- Close gaps in the party in place so mons fill slots 1..n in order.
+-- pokefirered/src/pokemon.c CompactPartySlots
+function Storage.compactParty(party)
+  if type(party) ~= "table" then return party end
+  local keys = {}
+  for k, m in pairs(party) do
+    local n = tonumber(k)
+    if n and m ~= nil then keys[#keys + 1] = { n = n, k = k } end
+  end
+  table.sort(keys, function(a, b) return a.n < b.n end)
+  local mons = {}
+  for i, e in ipairs(keys) do mons[i] = party[e.k] end
+  for _, e in ipairs(keys) do party[e.k] = nil end
+  for i, m in ipairs(mons) do party[i] = m end
+  return party
+end
+
+--- Create a fresh Storage instance (14 boxes, 30 slots each).
 function Storage.new()
   local storage = {
     currentBox = 1,
     boxes = {},
-    items = { { id = 13, qty = 1 } }, -- 50-slot Player PC item storage (starts with 1 POTION, pokefirered/src/player_pc.c:100)
+    items = { { id = 13, qty = 1 } }, -- Player PC item storage (starts with 1 POTION, pokefirered/src/player_pc.c:100)
   }
   for b = 1, Storage.TOTAL_BOXES_COUNT do
     storage.boxes[b] = {
       name = string.format("BOX %d", b),
-      wallpaper = ((b - 1) % 16) + 1,
+      wallpaper = Storage.defaultWallpaper(b),
       mons = {}, -- 1..30 slots (nil = empty)
     }
   end
@@ -65,7 +94,7 @@ function Storage.ensure(session)
 end
 
 --- The "PC Heal" Exploit: Fully heals HP, restores all move PPs, and clears status ailments.
-function Storage.fullHealMon(mon)
+function Storage.fullHealMon(mon, session)
   if not mon or type(mon) ~= "table" then return mon end
   -- Restore HP
   if mon.maxHp and mon.maxHp > 0 then
@@ -74,7 +103,10 @@ function Storage.fullHealMon(mon)
     mon.hp = mon.maxHp or mon.hp
   end
   -- Restore move PPs
-  if type(mon.moves) == "table" then
+  local edition = require("src.core.game3.profile").forSession(session).id
+  if edition == "ruby" or edition == "sapphire" then
+    require("src.core.game3.rse.storage_rs").restorePP(mon)
+  elseif type(mon.moves) == "table" then
     for _, move in ipairs(mon.moves) do
       if type(move) == "table" then
         if move.maxPp and move.maxPp > 0 then
@@ -176,7 +208,7 @@ function Storage.deposit(session, partyIdx, targetBoxId, targetSlotIdx)
   end
 
   local mon = table.remove(session.party, partyIdx)
-  Storage.fullHealMon(mon)
+  Storage.fullHealMon(mon, session)
   box.mons[slot] = mon
   require("src.core.game3.quest_log_recorder").event(session,"DepositedMonInPC",
     {D0=require("src.core.game3.pokemon").displayMonName(mon),D1=box.name})
@@ -232,13 +264,15 @@ function Storage.moveMon(session, srcLoc, srcIdx, destLoc, destIdx, srcBox, dest
   if not srcMon then return false, "src_empty" end
 
   -- Cannot leave party empty if withdrawing/moving away
-  if srcLoc == "party" and destLoc == "box" and not destMon and #session.party <= 1 then
+  local partyCount = 0
+  for _, m in pairs(session.party) do if m ~= nil then partyCount = partyCount + 1 end end
+  if srcLoc == "party" and destLoc == "box" and not destMon and partyCount <= 1 then
     return false, "last_pokemon"
   end
 
   -- Apply PC heal to any mon landing in a box
-  if destLoc == "box" then Storage.fullHealMon(srcMon) end
-  if srcLoc == "box" and destMon then Storage.fullHealMon(destMon) end
+  if destLoc == "box" then Storage.fullHealMon(srcMon, session) end
+  if srcLoc == "box" and destMon then Storage.fullHealMon(destMon, session) end
 
   -- Assign to dest
   if destLoc == "party" then
@@ -251,20 +285,6 @@ function Storage.moveMon(session, srcLoc, srcIdx, destLoc, destIdx, srcBox, dest
   -- Assign to src
   if srcLoc == "party" then
     session.party[srcIdx] = destMon
-    -- Clean up trailing nils in party array if moved without swap
-    if not destMon and srcIdx > #session.party then
-      local keys = {}
-      for k in pairs(session.party) do
-        if type(k) == "number" then keys[#keys + 1] = k end
-      end
-      table.sort(keys)
-      local newParty = {}
-      for _, k in ipairs(keys) do
-        local m = session.party[k]
-        if m then newParty[#newParty + 1] = m end
-      end
-      session.party = newParty
-    end
   elseif srcLoc == "box" then
     local box = storage.boxes[srcBox or storage.currentBox]
     box.mons[srcIdx] = destMon
@@ -289,7 +309,88 @@ function Storage.moveMon(session, srcLoc, srcIdx, destLoc, destIdx, srcBox, dest
   elseif srcLoc=="party" then
     Q.event(session,"DepositedMonInPC",{D0=srcName,D1=dstBoxName})
   else Q.event(session,"WithdrewMonFromPC",{D0=srcBoxName,D1=srcName}) end
+  -- A mon moved out of (or into) the middle of the party must not leave a gap.
+  Storage.compactParty(session.party)
   return true
+end
+
+function Storage.pickUpMon(session, loc, slot, boxId)
+  local storage = Storage.ensure(session)
+  if not storage then return nil, "no_session" end
+  local box = storage.boxes[boxId or storage.currentBox]
+  local slots = loc == "party" and session.party or box and box.mons
+  local mon = slots and slots[slot]
+  if not mon then return nil, "empty_slot" end
+  if loc == "party" then
+    local count = 0; for _, other in pairs(slots) do if other then count = count + 1 end end
+    if count <= 1 then return nil, "last_pokemon" end
+  end
+  slots[slot] = nil
+  if loc == "party" then Storage.compactParty(slots) end
+  return mon
+end
+
+function Storage.placeHeldMon(session, mon, loc, slot, boxId, origin)
+  local storage = Storage.ensure(session)
+  if not storage or not mon then return false, nil, "no_mon" end
+  session.party = session.party or {}
+  local box = storage.boxes[boxId or storage.currentBox]
+  local slots = loc == "party" and session.party or box and box.mons
+  local limit = loc == "party" and 6 or Storage.IN_BOX_COUNT
+  if not slots or slot < 1 or slot > limit then return false, nil, "invalid_slot" end
+  local target = slots[slot]
+  if loc == "box" then Storage.fullHealMon(mon, session) end
+  slots[slot] = mon
+  if loc == "party" then Storage.compactParty(slots) end
+  if origin then
+    local Q = require("src.core.game3.quest_log_recorder")
+    local Pokemon = require("src.core.game3.pokemon")
+    local srcName, targetName = Pokemon.displayMonName(mon), target and Pokemon.displayMonName(target)
+    local fromBox = storage.boxes[origin.boxId or storage.currentBox]
+    local fromName, toName = fromBox and fromBox.name, box and box.name
+    if origin.loc == "party" and loc == "party" then Q.event(session, "SwitchMon1WithMon2", {srcName, targetName})
+    elseif origin.loc == "box" and loc == "box" then
+      local same = origin.boxId == (boxId or storage.currentBox)
+      local key = target and (same and "SwitchedMonsWithinBox" or "SwitchedMonsBetweenBoxes")
+        or (same and "MovedMonWithinBox" or "MovedMonToNewBox")
+      Q.event(session, key, {D0 = fromName, D1 = srcName, D2 = target and same and targetName or toName, D3 = targetName})
+    elseif target then Q.event(session, "SwitchedPartyMonForPCMon", {D0 = origin.loc == "box" and fromName or toName,
+      D1 = origin.loc == "box" and srcName or targetName, D2 = origin.loc == "party" and srcName or targetName})
+    elseif loc == "box" then Q.event(session, "DepositedMonInPC", {D0 = srcName, D1 = toName})
+    else Q.event(session, "WithdrewMonFromPC", {D0 = fromName, D1 = srcName}) end
+  end
+  return true, target
+end
+
+function Storage.restoreHeldMon(session, mon, origin)
+  if not mon then return true end
+  local storage = Storage.ensure(session)
+  if not storage then return false end
+  session.party = session.party or {}
+  local mail = require("src.core.game3.mail").isMailItem(mon.heldItem or mon.item)
+  if origin and origin.loc == "party" and #session.party < 6 then
+    table.insert(session.party, math.min(origin.slot or 1, #session.party + 1), mon)
+    return true
+  end
+  if mail then
+    if #session.party >= 6 then return false end
+    session.party[#session.party + 1] = mon
+    return true
+  end
+  local box = origin and origin.loc == "box" and storage.boxes[origin.boxId]
+  if box and not box.mons[origin.slot] then
+    Storage.fullHealMon(mon, session)
+    box.mons[origin.slot] = mon
+    return true
+  end
+  if #session.party < 6 then session.party[#session.party + 1] = mon; return true end
+  local bi, si = Storage.findOpenSlot(storage)
+  if bi then
+    Storage.fullHealMon(mon, session)
+    storage.boxes[bi].mons[si] = mon
+    return true
+  end
+  return false
 end
 
 --- Release a Pokémon from a box slot.
@@ -311,19 +412,20 @@ function Storage.sendMonToPC(session, mon)
   local Flags = require("src.core.game3.scripting.flags")
   local Queries = require("src.core.game3.scripting.natives_queries")
   local store = script_store(session)
-  Queries.setPCBoxToSendMon(Flags.getVar(store, nil, VAR_PC_BOX_TO_SEND_MON))
+  local VAR_PC_BOX_TO_SEND_MON, FLAG_SHOWN_BOX_WAS_FULL_MESSAGE = save_ids(session)
+  Queries.setPCBoxToSendMon(VAR_PC_BOX_TO_SEND_MON and Flags.getVar(store, nil, VAR_PC_BOX_TO_SEND_MON) or (storage.currentBox - 1))
   local intended = tonumber(Queries.pcBoxToSendMon) or 0
 
-  Storage.fullHealMon(mon)
+  Storage.fullHealMon(mon, session)
   local bId, slot = Storage.findOpenSlot(storage)
   if not bId or not slot then
     return false, nil, nil, intended
   end
   storage.boxes[bId].mons[slot] = mon
   if (bId - 1) ~= intended then
-    Flags.setFlag(store, nil, FLAG_SHOWN_BOX_WAS_FULL_MESSAGE, false)
+    if FLAG_SHOWN_BOX_WAS_FULL_MESSAGE then Flags.setFlag(store, nil, FLAG_SHOWN_BOX_WAS_FULL_MESSAGE, false) end
   end
-  Flags.setVar(store, nil, VAR_PC_BOX_TO_SEND_MON, bId - 1)
+  if VAR_PC_BOX_TO_SEND_MON then Flags.setVar(store, nil, VAR_PC_BOX_TO_SEND_MON, bId - 1) end
   session.monBoxId = bId - 1
   session.monBoxPos = slot - 1
   return true, bId, slot, intended
@@ -337,8 +439,7 @@ end
 -- pokefirered/src/field_specials.c:1985
 local function should_show_box_was_full()
   local Queries = require("src.core.game3.scripting.natives_queries")
-  local Std = require("src.core.game3.scripting.stdscripts")
-  local handler = Queries.HANDLERS and Queries.HANDLERS[Std.SPECIAL.ShouldShowBoxWasFullMessage]
+  local handler = Queries.BY_NAME and Queries.BY_NAME.ShouldShowBoxWasFullMessage
   if not handler then return false end
   local _, v = handler(nil)
   return (tonumber(v) or 0) ~= 0
@@ -350,14 +451,15 @@ function Storage.isDestinationBoxFull(session)
   local Flags = require("src.core.game3.scripting.flags")
   local Queries = require("src.core.game3.scripting.natives_queries")
   local store = script_store(session)
-  Queries.setPCBoxToSendMon(Flags.getVar(store, nil, VAR_PC_BOX_TO_SEND_MON))
+  local VAR_PC_BOX_TO_SEND_MON, FLAG_SHOWN_BOX_WAS_FULL_MESSAGE = save_ids(session)
+  Queries.setPCBoxToSendMon(VAR_PC_BOX_TO_SEND_MON and Flags.getVar(store, nil, VAR_PC_BOX_TO_SEND_MON) or (storage.currentBox - 1))
   local bId = Storage.findOpenSlot(storage)
   if not bId then return false end
   if (bId - 1) ~= (tonumber(Queries.pcBoxToSendMon) or 0) then
-    Flags.setFlag(store, nil, FLAG_SHOWN_BOX_WAS_FULL_MESSAGE, false)
+    if FLAG_SHOWN_BOX_WAS_FULL_MESSAGE then Flags.setFlag(store, nil, FLAG_SHOWN_BOX_WAS_FULL_MESSAGE, false) end
   end
-  Flags.setVar(store, nil, VAR_PC_BOX_TO_SEND_MON, bId - 1)
-  return should_show_box_was_full()
+  if VAR_PC_BOX_TO_SEND_MON then Flags.setVar(store, nil, VAR_PC_BOX_TO_SEND_MON, bId - 1) end
+  return FLAG_SHOWN_BOX_WAS_FULL_MESSAGE and should_show_box_was_full() or false
 end
 
 -- pokefirered/src/battle_script_commands.c:9617
@@ -366,7 +468,13 @@ function Storage.pcTransferMessage(session, name, boxWasFull)
   local Flags = require("src.core.game3.scripting.flags")
   local Queries = require("src.core.game3.scripting.natives_queries")
   local store = script_store(session)
+  local VAR_PC_BOX_TO_SEND_MON, _, FLAG_SYS_NOT_SOMEONES_PC = save_ids(session)
   name = tostring(name or "")
+  local policy = require("src.core.game3.profile").forSession(session).save.storage
+  if policy.transferText then
+    -- pokeruby/src/naming_screen.c:1591
+    return require("src.core.game3.rom_text").box(policy.transferText, { stringVars = { name } })
+  end
   local sent = box_name(storage, Flags.getVar(store, nil, VAR_PC_BOX_TO_SEND_MON))
   local shown = boxWasFull
   if shown == nil then shown = should_show_box_was_full() end
@@ -388,7 +496,7 @@ function Storage.depositCaught(session, mon)
   return true, bId, slot, intended
 end
 
---- Player PC Item Storage (50 unique items capacity).
+--- Player PC Item Storage (profile bag.pcItems unique items).
 function Storage.depositItem(session, bagPocket, bagIdx, qty)
   if not session or not session.bag then return false, "no_bag" end
   local storage = Storage.ensure(session)
@@ -433,7 +541,7 @@ function Storage.addPcItem(session, itemId, qty)
     end
     storage.items[foundIdx].qty = curQty + qty
   else
-    if #storage.items >= Storage.PC_ITEMS_COUNT then
+    if #storage.items >= Storage.pcItemsCount(session) then
       return false, "pc_items_full"
     end
     storage.items[#storage.items + 1] = { id = itemId, qty = qty }
@@ -531,7 +639,7 @@ function Storage.serialize(storage)
           hasMon = true
         end
       end
-      if hasMon or box.name ~= string.format("BOX %d", b) or box.wallpaper ~= (((b - 1) % 16) + 1) then
+      if hasMon or box.name ~= string.format("BOX %d", b) or box.wallpaper ~= Storage.defaultWallpaper(b) then
         data.boxes[b] = boxData
       end
     end
@@ -586,7 +694,7 @@ function Storage.restore(data, legacyPc, pcItems)
       for _, it in ipairs(legacyPc.items or {}) do
         local id = type(it) == "table" and tonumber(it.id or it.itemId)
         local qty = type(it) == "table" and (tonumber(it.qty or it.quantity) or 0) or 0
-        if id and qty > 0 and #storage.items < Storage.PC_ITEMS_COUNT then
+        if id and qty > 0 and #storage.items < Storage.pcItemsCount() then
           storage.items[#storage.items + 1] = { id = id, qty = math.min(Storage.MAX_ITEM_QTY, qty) }
         end
       end
@@ -613,7 +721,7 @@ function Storage.restore(data, legacyPc, pcItems)
         id = k
         qty = v
       end
-      if id and qty > 0 and #storage.items < Storage.PC_ITEMS_COUNT then
+      if id and qty > 0 and #storage.items < Storage.pcItemsCount() then
         storage.items[#storage.items + 1] = { id = id, qty = math.min(Storage.MAX_ITEM_QTY, qty) }
       end
     end

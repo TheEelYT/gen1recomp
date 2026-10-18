@@ -71,7 +71,9 @@ mobile/dist/
 /build/tiled/
 
 # Local visual scratch from minigame development (not wired to CI).
-/tests/fixtures/
+/tests/fixtures/*
+!/tests/fixtures/save/
+!/tests/fixtures/gen2_buena.lua
 
 # per-machine iOS bundle-id pin (see scripts/build_ios.sh)
 mobile/ios/bundle_id.local
@@ -108,6 +110,8 @@ tools/reimport.local
 
 # Reference decompilation repositories (used for reference / extraction only)
 pokefirered/
+pokeemerald/
+pokeruby/
 pokered/
 pokegold/
 pokecrystal/

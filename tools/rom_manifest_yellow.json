@@ -4670,6 +4670,10 @@
             {
               "column": 3,
               "text": "YELLOW VERSION"
+            },
+            {
+              "column": 3,
+              "text": "    STAFF"
             }
           ],
           "mon": "VENUSAUR"
@@ -4924,6 +4928,10 @@
             {
               "column": 5,
               "text": "SHOGAKUKAN"
+            },
+            {
+              "column": 5,
+              "text": "PRODUCTION"
             }
           ],
           "mon": "OMASTAR"
@@ -4932,8 +4940,8 @@
           "fade": true,
           "lines": [
             {
-              "column": 6,
-              "text": "××××××××"
+              "column": 3,
+              "text": "PIKACHU VOICE"
             },
             {
               "column": 4,
@@ -5156,7 +5164,30 @@
           "lines": [],
           "mon": "GENGAR"
         }
-      ]
+      ],
+      "theEnd": {
+        "display": "T H E  E N D",
+        "height": 16,
+        "letterHeight": 16,
+        "letterWidth": 8,
+        "letters": "THEND",
+        "path": "assets/generated/credits/the_end.png",
+        "pattern": [
+          0,
+          -1,
+          1,
+          -1,
+          2,
+          -1,
+          -1,
+          2,
+          -1,
+          3,
+          -1,
+          4
+        ],
+        "width": 40
+      }
     },
     "cutTreeSwaps": [
       {
@@ -5618,27 +5649,6 @@
             "y": 4
           }
         ],
-        "SAFARI_ZONE_EAST_REST_HOUSE": [
-          {
-            "facing": "left",
-            "x": 0,
-            "y": 4
-          }
-        ],
-        "SAFARI_ZONE_NORTH_REST_HOUSE": [
-          {
-            "facing": "left",
-            "x": 0,
-            "y": 4
-          }
-        ],
-        "SAFARI_ZONE_WEST_REST_HOUSE": [
-          {
-            "facing": "left",
-            "x": 0,
-            "y": 4
-          }
-        ],
         "SAFFRON_POKECENTER": [
           {
             "facing": "up",
@@ -5756,13 +5766,6 @@
         ]
       },
       "pcTiles": {
-        "CELADON_HOTEL": [
-          {
-            "facing": "up",
-            "x": 13,
-            "y": 3
-          }
-        ],
         "CELADON_MANSION_2F": [
           {
             "facing": "up",
@@ -5846,27 +5849,6 @@
           }
         ],
         "ROCK_TUNNEL_POKECENTER": [
-          {
-            "facing": "up",
-            "x": 13,
-            "y": 3
-          }
-        ],
-        "SAFARI_ZONE_EAST_REST_HOUSE": [
-          {
-            "facing": "up",
-            "x": 13,
-            "y": 3
-          }
-        ],
-        "SAFARI_ZONE_NORTH_REST_HOUSE": [
-          {
-            "facing": "up",
-            "x": 13,
-            "y": 3
-          }
-        ],
-        "SAFARI_ZONE_WEST_REST_HOUSE": [
           {
             "facing": "up",
             "x": 13,
@@ -6105,16 +6087,23 @@
       ],
       "CERULEAN_CAVE_1F": [
         {
-          "item": "RARE_CANDY",
-          "x": 14,
-          "y": 11
+          "item": "PP_UP",
+          "x": 18,
+          "y": 7
+        }
+      ],
+      "CERULEAN_CAVE_2F": [
+        {
+          "item": "PP_UP",
+          "x": 16,
+          "y": 13
         }
       ],
       "CERULEAN_CAVE_B1F": [
         {
-          "item": "ULTRA_BALL",
-          "x": 27,
-          "y": 3
+          "item": "PP_UP",
+          "x": 8,
+          "y": 14
         }
       ],
       "CERULEAN_CITY": [
@@ -9943,22 +9932,22 @@
           "y": 9
         },
         "POKEMON_MANSION_1F": {
-          "name": "POKéMON MANSION",
+          "name": "<PK><MN> MANSION",
           "x": 2,
           "y": 15
         },
         "POKEMON_MANSION_2F": {
-          "name": "POKéMON MANSION",
+          "name": "<PK><MN> MANSION",
           "x": 2,
           "y": 15
         },
         "POKEMON_MANSION_3F": {
-          "name": "POKéMON MANSION",
+          "name": "<PK><MN> MANSION",
           "x": 2,
           "y": 15
         },
         "POKEMON_MANSION_B1F": {
-          "name": "POKéMON MANSION",
+          "name": "<PK><MN> MANSION",
           "x": 2,
           "y": 15
         },
@@ -20073,6 +20062,14 @@
       12,
       29744
     ],
+    "AnimationFlashScreen": [
+      30,
+      21036
+    ],
+    "AnimationIdSpecialEffects": [
+      30,
+      20317
+    ],
     "ArbokPicBack": [
       10,
       22645
@@ -21225,6 +21222,10 @@
       19,
       32486
     ],
+    "CongratulationsTiles": [
+      58,
+      23478
+    ],
     "CooltrainerFPic": [
       19,
       26521
@@ -21333,6 +21334,46 @@
       24,
       24441
     ],
+    "DiplomaCongrats": [
+      58,
+      23172
+    ],
+    "DiplomaGameFreak": [
+      58,
+      23240
+    ],
+    "DiplomaGraphics": [
+      58,
+      23546
+    ],
+    "DiplomaMewTiles": [
+      58,
+      23489
+    ],
+    "DiplomaPikachuTiles": [
+      58,
+      23358
+    ],
+    "DiplomaPlayTime": [
+      58,
+      23509
+    ],
+    "DiplomaPlayer": [
+      58,
+      23165
+    ],
+    "DiplomaText": [
+      58,
+      23155
+    ],
+    "DisplayBattleMenu.oldManName": [
+      15,
+      20455
+    ],
+    "DisplayBattleMenu.profOakName": [
+      15,
+      20463
+    ],
     "DittoPicBack": [
       11,
       17853
@@ -21340,6 +21381,18 @@
     "DittoPicFront": [
       11,
       17693
+    ],
+    "DoBlizzardSpecialEffects": [
+      30,
+      20609
+    ],
+    "DoExplodeSpecialEffects": [
+      30,
+      20596
+    ],
+    "DoRockSlideSpecialEffects": [
+      30,
+      20548
     ],
     "DodrioPicBack": [
       12,
@@ -21552,6 +21605,14 @@
     "FlareonPicFront": [
       11,
       26347
+    ],
+    "FlashScreenEveryEightFrameBlocks": [
+      30,
+      20578
+    ],
+    "FlashScreenEveryFourFrameBlocks": [
+      30,
+      20587
     ],
     "FlowerTile1": [
       0,
@@ -21781,125 +21842,13 @@
       29,
       18588
     ],
-    "GFX_e4841": [
-      57,
-      18497
+    "GFX_ea563": [
+      58,
+      25955
     ],
-    "GFX_e4ce0": [
-      57,
-      19680
-    ],
-    "GFX_e4e70": [
-      57,
-      20080
-    ],
-    "GFX_e50af": [
-      57,
-      20655
-    ],
-    "GFX_e52fe": [
-      57,
-      21246
-    ],
-    "GFX_e5541": [
-      57,
-      21825
-    ],
-    "GFX_e5794": [
-      57,
-      22420
-    ],
-    "GFX_e59ed": [
-      57,
-      23021
-    ],
-    "GFX_e5c4d": [
-      57,
-      23629
-    ],
-    "GFX_e5e90": [
-      57,
-      24208
-    ],
-    "GFX_e6020": [
-      57,
-      24608
-    ],
-    "GFX_e61b0": [
-      57,
-      25008
-    ],
-    "GFX_e63f7": [
-      57,
-      25591
-    ],
-    "GFX_e6646": [
-      57,
-      26182
-    ],
-    "GFX_e682f": [
-      57,
-      26671
-    ],
-    "GFX_e69bf": [
-      57,
-      27071
-    ],
-    "GFX_e6b4f": [
-      57,
-      27471
-    ],
-    "GFX_e6cdf": [
-      57,
-      27871
-    ],
-    "GFX_e6e6f": [
-      57,
-      28271
-    ],
-    "GFX_e6fff": [
-      57,
-      28671
-    ],
-    "GFX_e718f": [
-      57,
-      29071
-    ],
-    "GFX_e731f": [
-      57,
-      29471
-    ],
-    "GFX_e74af": [
-      57,
-      29871
-    ],
-    "GFX_e763f": [
-      57,
-      30271
-    ],
-    "GFX_e7863": [
-      57,
-      30819
-    ],
-    "GFX_e79f3": [
-      57,
-      31219
-    ],
-    "GFX_e7b83": [
-      57,
-      31619
-    ],
-    "GFX_e7d13": [
-      57,
-      32019
-    ],
-    "GFX_f0b64": [
-      60,
-      19300
-    ],
-    "GFX_f0d82": [
-      60,
-      19842
+    "GFX_ea56b": [
+      58,
+      25963
     ],
     "GamblerPic": [
       19,
@@ -22112,6 +22061,10 @@
     "GymLeaderFaceAndBadgeTileGraphics": [
       3,
       26907
+    ],
+    "GymTrashCans3c": [
+      60,
+      27953
     ],
     "HallOfFameOakText": [
       22,
@@ -23125,6 +23078,10 @@
       10,
       16778
     ],
+    "PTile": [
+      4,
+      22146
+    ],
     "PalletTownFisherText": [
       6,
       20497
@@ -23337,98 +23294,6 @@
       7,
       20102
     ],
-    "Pic_e4000": [
-      57,
-      16384
-    ],
-    "Pic_e411c": [
-      57,
-      16668
-    ],
-    "Pic_e4272": [
-      57,
-      17010
-    ],
-    "Pic_e4383": [
-      57,
-      17283
-    ],
-    "Pic_e458b": [
-      57,
-      17803
-    ],
-    "Pic_e467b": [
-      57,
-      18043
-    ],
-    "Pic_e476e": [
-      57,
-      18286
-    ],
-    "Pic_e49d1": [
-      57,
-      18897
-    ],
-    "Pic_e4b39": [
-      57,
-      19257
-    ],
-    "Pic_e4c3e": [
-      57,
-      19518
-    ],
-    "Pic_e5000": [
-      57,
-      20480
-    ],
-    "Pic_e523f": [
-      57,
-      21055
-    ],
-    "Pic_e548e": [
-      57,
-      21646
-    ],
-    "Pic_e56d1": [
-      57,
-      22225
-    ],
-    "Pic_e5924": [
-      57,
-      22820
-    ],
-    "Pic_e5b7d": [
-      57,
-      23421
-    ],
-    "Pic_e5ddd": [
-      57,
-      24029
-    ],
-    "Pic_e6340": [
-      57,
-      25408
-    ],
-    "Pic_e6587": [
-      57,
-      25991
-    ],
-    "Pic_e67d6": [
-      57,
-      26582
-    ],
-    "Pic_e77cf": [
-      57,
-      30671
-    ],
-    "Pic_f0abf": [
-      60,
-      19135
-    ],
-    "Pic_f0cf4": [
-      60,
-      19700
-    ],
     "PickUpItemText": [
       0,
       9199
@@ -23508,6 +23373,86 @@
     "PokedexTileGraphics": [
       4,
       20504
+    ],
+    "PikachuEmotionTable": [
+      63,
+      20505
+    ],
+    "PikachuMovementDatabase": [
+      63,
+      21424
+    ],
+    "Printer_GetMonStats.Blank": [
+      58,
+      25940
+    ],
+    "Printer_GetMonStats.OT": [
+      58,
+      25903
+    ],
+    "Printer_GetMonStats.Stats": [
+      58,
+      25911
+    ],
+    "Printer_PrepareSurfingMinigameHighScoreTileMap.HiScoreString": [
+      58,
+      21067
+    ],
+    "Printer_PrepareSurfingMinigameHighScoreTileMap.PikachusBeachString": [
+      58,
+      21052
+    ],
+    "Printer_PrepareSurfingMinigameHighScoreTileMap.PointsString": [
+      58,
+      21078
+    ],
+    "Printer_PrepareSurfingMinigameHighScoreTileMap.Tilemap1": [
+      58,
+      20932
+    ],
+    "Printer_PrepareSurfingMinigameHighScoreTileMap.Tilemap2": [
+      58,
+      20956
+    ],
+    "SineWave_3f": [
+      63,
+      22840
+    ],
+    "PikaPicAnimPointers": [
+      63,
+      23134
+    ],
+    "PikaPicAnimBGFramesPointers": [
+      63,
+      23497
+    ],
+    "PikaPicTilemapPointers": [
+      63,
+      23992
+    ],
+    "PikaPicAnimGFXHeaders": [
+      63,
+      25970
+    ],
+    "PikachuMoodLookupTable": [
+      63,
+      22940
+    ],
+    "PikaPicAnimationScriptPointerLookupTable": [
+      63,
+      22950
+    ],
+    "MapSpecificPikachuExpression.Emotions": [
+      63,
+      20683
+    ],
+    "IsPlayerPikachuAsleepInParty": [
+      63,
+      20688
+    ],
+    "PikaPicAnimThunderboltPals": [
+      63,
+      25154
     ],
     "PokemaniacPic": [
       19,
@@ -26409,6 +26354,10 @@
       9,
       18497
     ],
+    "SpecialTrainerMoves": [
+      14,
+      23659
+    ],
     "SpinnerArrowAnimTiles": [
       17,
       20775
@@ -26508,6 +26457,10 @@
     "SurfingMinigame_UseControlPadTilemap": [
       62,
       20908
+    ],
+    "SurfingPikachu2Graphics": [
+      58,
+      21130
     ],
     "SurfingPikachuSprite": [
       63,
@@ -38196,6 +38149,42 @@
     "_ZubatDexEntry": [
       46,
       20240
+    ],
+    "CancelTextString": [
+      1,
+      22624
+    ],
+    "DrawText": [
+      4,
+      30766
+    ],
+    "TradeCanceled": [
+      1,
+      23278
+    ],
+    "TradeCenter_SelectMon.statsTrade": [
+      1,
+      22464
+    ],
+    "TradeCompleted": [
+      1,
+      23261
+    ],
+    "TwoOptionMenuStrings.TradeCancelMenu": [
+      1,
+      30065
+    ],
+    "WaitingText": [
+      1,
+      19371
+    ],
+    "YouLoseText": [
+      4,
+      30757
+    ],
+    "YouWinText": [
+      4,
+      30749
     ]
   },
   "text": {

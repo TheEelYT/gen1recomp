@@ -87,18 +87,24 @@ Sample.CRY_MODES = {
   [12] = { length = 20, release = 225, pitch = 15000, chorus = 0, reverse = false },
 }
 
-function Sample.cryParams(mode, volume)
+function Sample.cryParams(mode, volume, overrides)
   mode = tonumber(mode) or 0
   if not Sample.CRY_MODES[mode] then mode = 0 end
   local m = Sample.CRY_MODES[mode]
+  local o = type(overrides) == "table" and overrides[mode] or nil
+  if type(o) ~= "table" then o = nil end
+  local function pick(key)
+    if o and o[key] ~= nil then return o[key] end
+    return m[key]
+  end
   return {
     mode = mode,
-    length = m.length,
-    release = m.release,
-    pitch = m.pitch,
-    chorus = m.chorus,
-    reverse = m.reverse,
-    volume = m.volume or tonumber(volume) or Sample.CRY_VOLUME,
+    length = pick("length"),
+    release = pick("release"),
+    pitch = pick("pitch"),
+    chorus = pick("chorus"),
+    reverse = pick("reverse"),
+    volume = pick("volume") or tonumber(volume) or Sample.CRY_VOLUME,
   }
 end
 
@@ -175,6 +181,7 @@ function Sample.renderCryMix(pcm, sampleRate, params, opts)
   local gain = (tonumber(params.volume) or Sample.CRY_VOLUME) / 127
   local reverse = params.reverse and true or false
   local out = {}
+  local warm = package.loaded["src.core.game3.warm"]
   for i = 0, nOut - 1 do
     local g = env.gain(math.floor(i * frameRate / outRate)) * gain
     local acc = 0
@@ -190,6 +197,7 @@ function Sample.renderCryMix(pcm, sampleRate, params, opts)
       if acc > 1 then acc = 1 elseif acc < -1 then acc = -1 end
     end
     out[i + 1] = acc
+    if warm and i % 2048 == 2047 then warm.yield() end
   end
   local v1 = voices[1]
   local sampleFrames = v1.samples * frameRate / outRate
@@ -210,21 +218,23 @@ function Sample.renderCry(pcm, sampleRate, params, opts)
   if not (love and love.sound and love.sound.newSoundData) then return nil, info end
   local n = math.max(1, #out)
   local pan = opts.pan
-  local channels = pan and 2 or 1
+  local channels = pan and not opts.mono and 2 or 1
   local sd = love.sound.newSoundData(n, info.outRate, 16, channels)
   local gainL, gainR = 1, 1
   if pan then
     gainL = (127 - pan) / 191
     gainR = (128 + pan) / 191
   end
+  local warm = package.loaded["src.core.game3.warm"]
   for i = 0, #out - 1 do
     local v = out[i + 1]
     if channels == 2 then
       sd:setSample(i, 1, v * gainL)
       sd:setSample(i, 2, v * gainR)
     else
-      sd:setSample(i, v)
+      sd:setSample(i, v * (gainL + gainR) * 0.5)
     end
+    if warm and i % 2048 == 2047 then warm.yield() end
   end
   return sd, info
 end

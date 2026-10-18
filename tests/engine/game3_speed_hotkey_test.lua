@@ -11,8 +11,9 @@ local Game3 = require("src.core.Game3")
 
 local battleActive = false
 package.loaded["src.core.game3.battle"] = { isActive = function() return battleActive end }
-local stackBusy = false
-package.loaded["src.ui.game3.stack"] = { busy = function() return stackBusy end, clear = function() end }
+local Stack = require("src.ui.game3.stack")
+local StartMenu = require("src.ui.game3.start_menu")
+Stack.clear()
 
 local function newGame3(phase)
   local g = setmetatable({
@@ -29,12 +30,13 @@ Input:applyBindings(nil)
 
 do
   local g = newGame3("field")
-  stackBusy = true
-  eq(g:speedCategory(), "overworld", "menu over the field inherits overworld")
+  Stack.push("start", StartMenu)
+  eq(g:speedCategory(), "menu", "an explicit field menu owns MENU SPEED")
   g:keypressed("1")
-  eq(g.options.speedOverworld, 2, "1 with a field menu open bumps OVERWORLD SPEED")
-  eq(g.options.speedMenu, 1, "1 with a field menu open leaves MENU SPEED alone")
-  stackBusy = false
+  eq(g.options.speedOverworld, 2, "1 with a field menu open syncs OVERWORLD SPEED")
+  eq(g.options.speedMenu, 2, "1 with a field menu open syncs MENU SPEED")
+  eq(g.options.speedBattle, 2, "and syncs BATTLE SPEED")
+  Stack.pop("start")
   eq(g:logicSpeed(), 2, "walk speed sticks after the menu closes")
   battleActive = true
   eq(g:speedCategory(), "battle", "battle stays battle")
@@ -42,7 +44,7 @@ do
   eq(g:logicSpeed(), 10, "a local gen3 battle runs at BATTLE SPEED")
   g:keypressed("1")
   check(g.options.speedBattle ~= 10, "1 in battle cycles BATTLE SPEED")
-  eq(g.options.speedOverworld, 2, "and leaves OVERWORLD SPEED alone")
+  eq(g.options.speedOverworld, g.options.speedBattle, "and syncs OVERWORLD SPEED")
   battleActive = false
   eq(newGame3("boot"):speedCategory(), "menu", "boot phase stays menu")
   eq(newGame3("quest_log"):speedCategory(), "menu", "quest log stays menu")
@@ -62,6 +64,55 @@ do
   eq(Input.hotkeyKey("kp3"), "3", "numpad 3 normalizes")
   eq(Input.hotkeyKey("kp4"), "4", "numpad 4 normalizes")
   eq(Input.hotkeyKey("z"), "z", "letters pass through")
+end
+
+do
+  local g = newGame3("field")
+  g.options.speedOverworld, g.options.speedBattle, g.options.speedMenu = 4, 4, 4
+  g:keypressed("0")
+  eq(g.options.speedOverworld, 3, "0 steps OVERWORLD SPEED down")
+  eq(g.options.speedBattle, 3, "0 syncs BATTLE SPEED")
+  eq(g.options.speedMenu, 3, "0 syncs MENU SPEED")
+  g:keypressed("kp0")
+  eq(g.options.speedOverworld, 2, "numpad 0 steps speed down")
+  local realKb = love.keyboard
+  love.keyboard = setmetatable({
+    getScancodeFromKey = function(key) return key == "à" and "0" or key end,
+  }, { __index = realKb })
+  g:keypressed("à")
+  eq(g.options.speedOverworld, 1, "AZERTY top-row 0 steps speed down by scancode")
+  love.keyboard = realKb
+  Input:armCapture()
+  g.options.speedOverworld = 3
+  g:keypressed("0")
+  eq(g.options.speedOverworld, 3, "0 is ignored while a capture is armed")
+  Input:takeCaptureEvents()
+  Input:disarmCapture()
+  Input:reset()
+end
+
+do
+  local g1 = setmetatable({ save = { options = { speedOverworld = 3, speedBattle = 3, speedMenu = 3 } },
+    stack = { states = {}, top = function() return nil end },
+    writeOptions = function() end }, { __index = Game })
+  g1:keypressed("0")
+  eq(g1.save.options.speedOverworld, 2, "Gen 1 0 steps speed down")
+  g1:keypressed("kp0")
+  eq(g1.save.options.speedOverworld, 1, "Gen 1 numpad 0 steps speed down")
+  g1:keypressed("1")
+  eq(g1.save.options.speedOverworld, 2, "Gen 1 1 still steps speed up")
+end
+
+do
+  local Game2 = require("src.core.Game2")
+  local g2 = setmetatable({ options = { speed = 3 }, persistOptions = function() end },
+    { __index = Game2 })
+  check(g2:hotkey("0"), "Gen 2 0 is a hotkey")
+  eq(g2.options.speed, 2, "Gen 2 0 steps speed down")
+  g2:hotkey("kp0")
+  eq(g2.options.speed, 1, "Gen 2 numpad 0 steps speed down")
+  g2:hotkey("1")
+  eq(g2.options.speed, 2, "Gen 2 1 still steps speed up")
 end
 
 do

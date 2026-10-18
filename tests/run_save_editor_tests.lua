@@ -342,7 +342,7 @@ do
   check(Ops.nicknameUsable(S, "Nidoking"), "lower case is renderable")
   check(Ops.nicknameUsable(S, "é") == true, "a charmap glyph is renderable")
   check(Ops.nicknameUsable(S, "PIKA€") == false, "a non-charmap glyph is not renderable")
-  check(Ops.nicknameUsable(S, "🤖") == false, "an emoji is not renderable")
+  check(Ops.nicknameUsable(S, "😀") == false, "an emoji is not renderable")
   -- "@" is the Gen1 string terminator: the codec has an entry for it but the
   -- game font has no tile, so Font.encode draws it as a space in-game
   check(Ops.nicknameUsable(S, "POKE@MON") == false,
@@ -1049,6 +1049,8 @@ do
   f:write(SaveData.encode(data))
   f:close()
 
+  local stubDimensions = love.graphics.getDimensions
+  love.graphics.getDimensions = function() return 1280, 900 end
   App.load(tmpPath, { version = "red" })
   local S = App.getState()
   S.tab = "party"
@@ -1107,6 +1109,7 @@ do
   App.textinput("POKE@MON")
   App.draw()
   eq(S.nicknameDraft, "POKEMON", "the @ terminator is stripped at input")
+  love.graphics.getDimensions = stubDimensions
 
   os.remove(tmpPath)
   for _, bak in ipairs(FsIo.globPrefix(tmpPath .. ".bak-")) do os.remove(bak) end
@@ -1190,22 +1193,31 @@ do
           msg .. string.format(" (got %.4f, want %.4f)", got, want))
   end
 
-  about(Kit.layout(720, 1560), 720 / 640,
-    "portrait phone scales off its width, gently")
-  check(Kit.layout(720, 1560) >= 0.9,
-        "a portrait phone never drops below the readability floor")
-  about(Kit.layout(1560, 720), 720 / 768, "landscape phone still scales off height")
-  about(Kit.layout(360, 640), 0.9,
-    "a tiny window stops at the readable floor and reflows instead of shrinking")
-  about(Kit.layout(500, 800), 0.9, "500px wide sits on the floor too")
-
-  -- desktop and laptop sizes keep the height-only scale they always had
-  for _, size in ipairs({ { 1280, 800 }, { 1024, 768 }, { 1920, 1080 },
-                          { 1440, 900 }, { 2560, 1440 }, { 900, 700 } }) do
-    about(Kit.layout(size[1], size[2]),
-      Theme.clamp(math.min(size[1] / 640, size[2] / 768), 0.9, 1.6),
-      ("%dx%d keeps its height-based scale"):format(size[1], size[2]))
+  local previousOS = love.system.getOS
+  for _, platform in ipairs({ "Android", "iOS", "NX" }) do
+    love.system.getOS = function() return platform end
+    for _, size in ipairs({ { 720, 1560, 1.4625 }, { 1560, 720, 1.21875 },
+                            { 360, 640, 1.17 }, { 500, 800, 1.17 },
+                            { 1920, 1080, 1.828125 } }) do
+      about(Kit.layout(size[1], size[2]), size[3],
+        ("%s %dx%d keeps touch-readable scale"):format(platform, size[1], size[2]))
+      check(not Kit.desktop, platform .. " keeps touch layout at every window size")
+    end
   end
+  for _, platform in ipairs({ "OS X", "Windows", "Linux" }) do
+    love.system.getOS = function() return platform end
+    for _, size in ipairs({ { 1280, 800, 1.0416666667 }, { 1024, 768, 1 },
+                            { 1920, 1080, 1.15 }, { 1440, 900, 1.15 },
+                            { 2560, 1440, 1.15 } }) do
+      about(Kit.layout(size[1], size[2]), size[3],
+        ("%s %dx%d keeps compact desktop scale"):format(platform, size[1], size[2]))
+      check(Kit.desktop, platform .. " selects desktop layout at desktop sizes")
+    end
+    about(Kit.layout(900, 700), 1.1848958333,
+      platform .. " narrow window reflows with readable scale")
+    check(not Kit.desktop, platform .. " narrow window uses reflow layout")
+  end
+  love.system.getOS = previousOS
 end
 
 do
@@ -1524,8 +1536,8 @@ do
 
   local saveBtn
   for _, r in ipairs(Kit.audit) do
-    if r.class == "control" and (r.label == "SAVE" or r.label == "SAVED"
-        or r.label == "SAVE LOCKED") then
+    if r.class == "control" and (r.label == "Save" or r.label == "Saved"
+        or r.label == "Save locked") then
       saveBtn = r
       break
     end
@@ -1624,8 +1636,57 @@ do
 end
 
 do
+  local tmpPath = os.tmpname() .. "-fix-all-names.lua"
+  local f = io.open(tmpPath, "wb")
+  f:write(SaveData.encode(SaveData.newGame()))
+  f:close()
+  App.load(tmpPath, { version = "blue" })
+  local S = App.getState()
+  Ops.partyAdd(S)
+  Ops.partyAdd(S)
+  Ops.partyAdd(S)
+  Ops.boxAdd(S)
+  local plain, named, pk = S.save.party[1], S.save.party[2], S.save.party[3]
+  local boxed = S.save.boxes[S.selectedBox or 1][1]
+  check(plain.nickname == nil, "fix-all setup: party 1 is un-nicknamed")
+  Ops.setNickname(S, named, "SPARKY")
+  pk.nickname = "<PK><MN>"
+  boxed.nickname = nil
+  plain.otName, plain.ot = nil, nil
+  for _, mon in ipairs({ plain, named, pk, boxed }) do
+    mon.level = -2
+  end
+  check(Ops.fixAllErrors(S), "fix all repairs nicknamed and plain mons: " .. tostring(S.status))
+  eq(require("Legality").save(S).errors, 0, "fix all leaves no errors")
+  eq(plain.nickname, nil, "fix all keeps an un-nicknamed party mon un-nicknamed")
+  eq(boxed.nickname, nil, "fix all keeps an un-nicknamed box mon un-nicknamed")
+  eq(named.nickname, "SPARKY", "fix all keeps a nickname")
+  eq(pk.nickname, "<PK><MN>", "fix all keeps naming-screen <PK><MN> glyphs")
+  eq(plain.otName, nil, "fix all does not blank a missing OT name")
+  eq(Ops.nicknameLength("<PK><MN>", S), 2, "<PK> and <MN> count as one character each")
+  plain.level = -2
+  check(Ops.fixMonErrors(S, plain), "fix one repairs an un-nicknamed mon")
+  eq(plain.nickname, nil, "fix one keeps the mon un-nicknamed")
+
+  local GenSave = require("src.save_convert.GenSave")
+  GenSave.setCharmap(loadfile("src/save_convert/data/charmap.lua")())
+  local bytes = GenSave.encode(S.save, S.data)
+  local back = GenSave.decode(bytes, S.data)
+  eq(back.party[1].nickname, nil, "the fixed un-nicknamed mon exports with its species name")
+  eq(back.party[2].nickname, "SPARKY", "the fixed nickname exports")
+  eq(back.party[3].nickname, "<PK><MN>", "the fixed <PK><MN> nickname exports")
+
+  local S3 = { save = {}, version = "firered", data = {} }
+  check(Ops.nicknameUsable(S3, "Zoë&Glüh"), "Gen 3 names may hold the Gen 3 charmap's glyphs")
+  eq(Ops.nicknameSanitize(S3, "¡Hola+50%!"), "¡Hola+50%!", "Gen 3 sanitize keeps Gen 3 charmap glyphs")
+  check(not Ops.nicknameUsable(S3, "FARFETCH’D"), "Gen 3 names refuse a glyph the Gen 3 codec cannot store")
+  os.remove(tmpPath)
+end
+
+do
   local interp = arg and arg[-1] or "luajit"
-  for _, suite in ipairs({ "tests/save_editor_gen3_tests.lua", "tests/save_editor_gen3_persistence_tests.lua" }) do
+  for _, suite in ipairs({ "tests/save_editor_gen3_tests.lua", "tests/save_editor_gen3_persistence_tests.lua",
+      "tests/save_editor_split_stack_bug2671_test.lua" }) do
     local r = os.execute(interp .. " " .. suite)
     check(r == true or r == 0, suite .. " passes")
   end

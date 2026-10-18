@@ -4,14 +4,14 @@ local Bg = require("src.core.game3.bg")
 local Oam = require("src.core.game3.oam")
 local Pal = require("src.core.game3.pal_fade")
 local Trig = require("src.core.game3.trig")
+local PixelCanvas = require("src.render.PixelCanvas")
 
 local IntroMovie = {}
 IntroMovie.__index = IntroMovie
 
 IntroMovie.GBA_HZ = 16777216 / 280896
 
-local MUS_INTRO_FIGHT = 277
-local MUS_GAME_FREAK = 321
+local Song = require("src.core.game3.song_ids")
 local SPECIES_NIDORINO = 33
 
 local BG_GF_TEXT_LOGO = 2
@@ -118,8 +118,7 @@ local function relayoutTiles(img, startTile, wTiles, hTiles)
   if not (img and love and love.graphics and love.graphics.newCanvas) then return nil end
   local iw, ih = img:getDimensions()
   local sheetCols = iw / 8
-  local canvas = love.graphics.newCanvas(wTiles * 8, hTiles * 8)
-  canvas:setFilter("nearest", "nearest")
+  local canvas = PixelCanvas.new(wTiles * 8, hTiles * 8, "nearest")
   love.graphics.push("all")
   love.graphics.setCanvas(canvas)
   love.graphics.origin()
@@ -142,8 +141,7 @@ end
 
 local function composeGfWindow(text, logo)
   if not (love and love.graphics and love.graphics.newCanvas) then return nil end
-  local canvas = love.graphics.newCanvas(Display.W, Display.H)
-  canvas:setFilter("nearest", "nearest")
+  local canvas = PixelCanvas.new(Display.W, Display.H, "nearest")
   love.graphics.push("all")
   love.graphics.setCanvas(canvas)
   love.graphics.origin()
@@ -601,7 +599,7 @@ end
 -- pokefirered/src/intro.c:1169
 function IntroMovie.IntroCB_GF_Star(self, p)
   if p.state == 0 then
-    Audio.playSong(MUS_GAME_FREAK, { restart = true })
+    Audio.playSong(Song.MUS_GAME_FREAK, { restart = true })
     self:loadGfxCreateStar()
     p.timer = 0
     p.state = 1
@@ -772,7 +770,7 @@ function IntroMovie.IntroCB_Scene1(self, p)
     p.state = 3
   elseif st == 3 then
     if not self.pal:fadeActive() then
-      Audio.playSong(MUS_INTRO_FIGHT, { restart = true })
+      Audio.playSong(Song.MUS_INTRO_FIGHT, { restart = true })
       p.timer = 0
       p.state = 4
     end

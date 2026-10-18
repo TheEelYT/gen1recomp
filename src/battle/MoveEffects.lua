@@ -53,15 +53,18 @@ local STAT_LABEL = {
 -- ---------------------------------------------------------------------
 
 local function changeStage(battle, who, stat, delta, fromEnemy)
+  -- engine/battle/core.asm:5285
   if fromEnemy and (who.substituteHP or who.mist) then
-    if who.mist then
-      return { Strings("%s is\nprotected by MIST!", displayName(who)), failed = true }
-    end
     return butItFailed(battle)
   end
   local cur = who.stages[stat] or 0
   local new = math.max(-6, math.min(6, cur + delta))
   if new == cur then
+    return { romText(battle.data, "_NothingHappenedText", "Nothing happened!"), failed = true }
+  end
+  -- pokered/engine/battle/effects.asm:508
+  if delta > 0 and Damage.statAtCap(battle, who, stat) then
+    who.stages[stat] = new - 1
     return { romText(battle.data, "_NothingHappenedText", "Nothing happened!"), failed = true }
   end
   who.stages[stat] = new
@@ -137,6 +140,17 @@ local function statusMove(status)
     end
     return msgs
   end
+end
+
+-- engine/battle/move_effects/heal.asm:13
+local function healFails(battle, mon)
+  local cur, max = mon.hp, mon.stats.hp
+  if cur == max then return true end
+  if battle and battle.ruleset and battle.ruleset.healHpLowByteBug == false then
+    return false
+  end
+  local carry = math.floor(cur / 256) % 256 < math.floor(max / 256) % 256 and 1 or 0
+  return (cur % 256 - max % 256 - carry) % 256 == 0
 end
 
 local function statusSide(status, chance)
@@ -237,16 +251,26 @@ MoveEffects.primary = {
   HEAL_EFFECT = function(battle, user, target, move)
     local mon = user.mon
     if move.id == "REST" then
-      if mon.hp == mon.stats.hp then return butItFailed(battle) end
+      if healFails(battle, mon) then return butItFailed(battle) end
       mon.hp = mon.stats.hp
+      Status.keepPenaltyOnCure(battle, user)
+      local hadStatus = mon.status ~= nil
       mon.status = "SLP"
       user.sleepTurns = 2
-      user.toxicCounter = nil
-      return { romText(battle.data, "_StartedSleepingEffect", "%s\nstarted sleeping!", displayName(user)) }
+      mon.sleepTurns = 2
+      if not Status.toxicSurvivesCure(battle) then user.toxicCounter = nil end
+      -- engine/battle/move_effects/heal.asm:35
+      local lead = hadStatus
+        and romText(battle.data, "_FellAsleepBecameHealthyText",
+          "%s\nfell asleep and\nbecame healthy!", displayName(user))
+        or romText(battle.data, "_StartedSleepingEffect", "%s\nstarted sleeping!", displayName(user))
+      return { lead, romText(battle.data, "_RegainedHealthText", "%s\nregained health!", displayName(user)),
+               restLead = true, hpBarFirst = true }
     end
-    if mon.hp == mon.stats.hp then return butItFailed(battle) end
+    if healFails(battle, mon) then return butItFailed(battle) end
     mon.hp = math.min(mon.stats.hp, mon.hp + math.floor(mon.stats.hp / 2))
-    return { romText(battle.data, "_RegainedHealthText", "%s\nregained health!", displayName(user)) }
+    return { romText(battle.data, "_RegainedHealthText", "%s\nregained health!", displayName(user)),
+             hpBarFirst = true }
   end,
 
   LIGHT_SCREEN_EFFECT = function(battle, user)
@@ -323,15 +347,14 @@ MoveEffects.primary = {
                failed = true }
     end
     local cost = math.floor(user.mon.stats.hp / 4)
-    -- A Substitute costs one quarter of max HP, rounded down. Do not let
-    -- the cost consume the user's last HP: the move must fail at the exact
-    -- boundary as well as below it, or the next turn's HP guard can leave a
-    -- trainer battle unable to progress.
-    if user.mon.hp <= cost then
+    -- ../pokered/engine/battle/move_effects/substitute.asm:34-40
+    local zeroHpBug = not (battle.ruleset and battle.ruleset.substituteZeroHpBug == false)
+    if user.mon.hp < cost or (not zeroHpBug and user.mon.hp == cost) then
       return { romText(battle.data, "_TooWeakSubstituteText", "Too weak to make\na SUBSTITUTE!"),
                failed = true }
     end
     user.mon.hp = user.mon.hp - cost
+    -- ../pokered/engine/battle/core.asm:4874-4877
     user.substituteHP = cost + 1
     -- ../pokered/engine/battle/move_effects/substitute.asm:47-55
     user.substitutePending = true
@@ -380,6 +403,9 @@ MoveEffects.primary = {
       speed = target.curStats.speed, special = target.curStats.special,
     }
     user.curTypes = { target.curTypes[1], target.curTypes[2] }
+    -- engine/battle/move_effects/transform.asm:57
+    user.critBaseSpeed = target.critBaseSpeed
+      or (target.def and target.def.baseStats and target.def.baseStats.speed)
     -- transform.asm:130-132 copies the target's stat MODS into the user
     -- (wEnemyMonStatMods -> wPlayerMonStatMods), it does NOT clear them;
     -- deep copy so later stage changes on either mon stay independent
@@ -516,11 +542,14 @@ end
 -- engine/battle/core.asm ApplyDamageToEnemyPokemon
 local function drainHalf(label, text)
   return function(ctx)
+    -- engine/battle/core.asm:4899
+    if ctx.brokeSub then return end
     local heal = math.max(1, math.floor(ctx.totalDealt / 2))
     ctx.battle.lastDamage = heal
     local mon = ctx.user.mon
     mon.hp = math.min(mon.stats.hp, mon.hp + heal)
-    ctx.drain()
+    -- engine/battle/move_effects/drain_hp.asm:81
+    ctx.battle:drainNext(ctx.user, mon.hp)
     -- `text` arrives as a source string (Strings.source at the call
     -- site keeps it in the catalog); the ROM's own line wins when the
     -- import carries it, and both are resolved here, at use time
@@ -600,11 +629,12 @@ MoveEffects.full = {
 
   RECOIL_EFFECT = {
     afterDamage = function(ctx)
+      -- engine/battle/core.asm:4899
+      if ctx.brokeSub then return end
       -- engine/battle/move_effects/recoil.asm
       local recoil = math.max(1, math.floor(ctx.totalDealt
                                             / (ctx.moveInst.struggle and 2 or 4)))
-      ctx.say(romText(ctx.battle.data, "_HitWithRecoilText", "%s's\nhit with recoil!", displayName(ctx.user)))
-      ctx.battle:applyDamage(ctx.user, recoil)
+      ctx.battle:applyRecoil(ctx.user, recoil)
     end,
   },
   DRAIN_HP_EFFECT = {
@@ -679,6 +709,8 @@ MoveEffects.full = {
       ctx.battle:selfDestruct(ctx.user)
     end,
     afterDamage = function(ctx)
+      -- engine/battle/core.asm:4899
+      if ctx.brokeSub then return end
       ctx.battle:selfDestruct(ctx.user)
     end,
   },

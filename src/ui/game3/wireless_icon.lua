@@ -150,6 +150,11 @@ end
 function WirelessIcon.onLinkMap(mapId)
   if type(mapId) ~= "string" then return false end
   if WirelessIcon.LINK_MAPS[mapId] then return true end
+  local Family = require("src.core.game3.link.family")
+  for key in pairs(Family.MAPS) do
+    local ok, id = pcall(Family.mapId, nil, key)
+    if ok and id == mapId then return true end
+  end
   if require("src.core.game3.link.union_room").isUnionMap(mapId) then return true end
   return mapId:match("_POKEMON_CENTER_2F$") ~= nil
 end
@@ -163,6 +168,12 @@ end
 
 -- pokefirered/src/overworld.c:1829
 function WirelessIcon.drawField()
+  local Runtime = package.loaded["src.core.game3.runtime"]
+  local session = Runtime and Runtime.getSession and Runtime.getSession()
+  if not require("src.core.game3.profile").has(session, "unionRoom") then
+    WirelessIcon._lastTime = nil
+    return false
+  end
   if not WirelessIcon.onLinkMap(currentMap()) then
     WirelessIcon._lastTime = nil
     return false

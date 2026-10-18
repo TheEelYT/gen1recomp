@@ -88,7 +88,8 @@ check(complete, "every natives_*.lua on disk is in the known-name fallback roste
 local bound = true
 for _, base in ipairs(Natives.KNOWN_MODULES or {}) do
   local okMod, mod = pcall(require, "src.core.game3.scripting." .. base)
-  if okMod and type(mod) == "table" then
+  local allowed = require("src.core.game3.capabilities").nativeAllowed(nil, base)
+  if okMod and type(mod) == "table" and allowed then
     for id in pairs(mod.HANDLERS or {}) do
       if Natives.ALLOW["special:" .. id] == nil then
         bound = false
@@ -137,6 +138,8 @@ for name, id in pairs(Std.SPECIAL) do
 end
 eq(collisions, 0, "distinct id per special name")
 
+local savedRoamer = package.loaded["src.core.game3.roamer"]
+package.loaded["src.core.game3.roamer"] = { init = function() return true end }
 print("[test] 4. no registered event special logs as unknown")
 Natives.resetLog()
 local logs = {}
@@ -307,6 +310,7 @@ for _, name in ipairs(NOOPS) do
   eq(yield, false, name .. " does not yield")
   eq(getVar(ctx, 0x800D), 0, name .. " leaves VAR_RESULT at 0")
 end
+package.loaded["src.core.game3.roamer"] = savedRoamer
 
 print("[test] 14. SampleResortGorgeousMonAndReward buffers the sampled species into STR_VAR_1")
 local savedPokemon = package.loaded["src.core.game3.pokemon"]

@@ -92,7 +92,9 @@ end
 
 local fs = { prefix = "" }
 function fs.exists(rel) return isFile(saveDir .. "/" .. fs.prefix .. rel) end
-function fs.read(rel) return readFile(saveDir .. "/" .. fs.prefix .. rel) end
+function fs.read(rel)
+  return require("src.import.CacheBlob").decode(rel, readFile(saveDir .. "/" .. fs.prefix .. rel))
+end
 
 if not identityOnly and sourceTreeHasData() then
   print("READY source tree")
@@ -114,7 +116,7 @@ end
 if not CacheContract.cacheVersionCurrent(version, fs) then
   local raw = fs.read(GameVersion.cachePrefix(version) .. "data/generated/gba/meta.json") or ""
   print("STALE gba cache_version " .. tostring(raw:match('"cache_version"%s*:%s*(%d+)'))
-    .. " want " .. tostring(require("src.import.gba.versions").CACHE_VERSION))
+    .. " want " .. tostring(require("src.import.gba.versions").forGame(version).CACHE_VERSION))
   os.exit(1)
 end
 local complete, missing = CacheContract.allRequiredFilesExist(version, fs)

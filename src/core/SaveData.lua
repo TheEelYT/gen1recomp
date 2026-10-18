@@ -38,6 +38,7 @@ local OPTIONS_FILENAME = "options.lua"
 -- "reset" at once.  Same .bak/.tmp witness names the save files use.
 local OPTIONS_BACKUP_FILENAME = OPTIONS_FILENAME .. ".bak"
 local OPTIONS_TMP_FILENAME = OPTIONS_FILENAME .. ".tmp"
+SaveData.OPTIONS_FILENAME = OPTIONS_FILENAME
 
 -- Main / backup / staged-witness names for a version (defaults to the active
 -- one).  The backup is a rolling copy and .tmp is the staged-write witness;
@@ -68,55 +69,328 @@ local SEP = package.config:sub(1, 1)
 local portableChecked = false
 local portableBase = false      -- resolved base dir when active, else false
 local portableFsCache = nil
+local portableTried = {}
+
+local IS_WIN = SEP == "\\"
+local NON_ASCII = "[\128-\255]"
+
+local winApi = nil
+local function loadWinApi()
+  if winApi ~= nil then return winApi end
+  winApi = false
+  if not IS_WIN then return winApi end
+  local okFfi, ffi = pcall(require, "ffi")
+  if not (okFfi and ffi.os == "Windows") then return winApi end
+  pcall(ffi.cdef, [[
+    int MultiByteToWideChar(uint32_t cp, uint32_t flags, const char *s, int n, uint16_t *w, int wn);
+    int WideCharToMultiByte(uint32_t cp, uint32_t flags, const uint16_t *w, int wn, char *s, int n, const char *def, int *used);
+    uint32_t GetFileAttributesW(const uint16_t *path);
+    int CreateDirectoryW(const uint16_t *path, void *sec);
+    int DeleteFileW(const uint16_t *path);
+    void *CreateFileW(const uint16_t *path, uint32_t access, uint32_t share, void *sec, uint32_t disp, uint32_t flags, void *tmpl);
+    int ReadFile(void *h, void *buf, uint32_t n, uint32_t *got, void *ov);
+    int WriteFile(void *h, const void *buf, uint32_t n, uint32_t *put, void *ov);
+    int CloseHandle(void *h);
+    int SetFilePointerEx(void *h, int64_t dist, int64_t *newpos, uint32_t method);
+    typedef struct {
+      uint32_t attrs; uint32_t ct[2]; uint32_t at[2]; uint32_t wt[2];
+      uint32_t sizeHigh; uint32_t sizeLow; uint32_t r0; uint32_t r1;
+      uint16_t name[260]; uint16_t alt[14];
+    } PP_FIND_DATA_W;
+    void *FindFirstFileW(const uint16_t *pattern, PP_FIND_DATA_W *data);
+    int FindNextFileW(void *h, PP_FIND_DATA_W *data);
+    int FindClose(void *h);
+  ]])
+  local C = ffi.C
+  if not pcall(function()
+    return C.FindFirstFileW, C.CreateFileW, C.SetFilePointerEx, C.CreateDirectoryW, C.DeleteFileW
+  end) then
+    return winApi
+  end
+
+  local function wide(s)
+    local n = C.MultiByteToWideChar(65001, 0, s, #s, nil, 0)
+    if n <= 0 then return nil end
+    local buf = ffi.new("uint16_t[?]", n + 1)
+    C.MultiByteToWideChar(65001, 0, s, #s, buf, n)
+    buf[n] = 0
+    return buf
+  end
+  local function narrow(w)
+    local n = C.WideCharToMultiByte(65001, 0, w, -1, nil, 0, nil, nil)
+    if n <= 1 then return "" end
+    local buf = ffi.new("char[?]", n)
+    C.WideCharToMultiByte(65001, 0, w, -1, buf, n, nil, nil)
+    return ffi.string(buf, n - 1)
+  end
+  local function validHandle(h)
+    return tonumber(ffi.cast("intptr_t", h)) ~= -1
+  end
+
+  local api = {}
+  function api.attrs(p)
+    local w = wide(p)
+    if not w then return nil end
+    local a = C.GetFileAttributesW(w)
+    if a == 0xFFFFFFFF then return nil end
+    return a
+  end
+  function api.mkdir(p)
+    local w = wide(p)
+    if w then C.CreateDirectoryW(w, nil) end
+  end
+  function api.remove(p)
+    local w = wide(p)
+    if not w then return false end
+    return C.DeleteFileW(w) ~= 0
+  end
+
+  local handle = {}
+  handle.__index = handle
+  function handle:read(fmt)
+    if type(fmt) == "number" then
+      if fmt == 0 then return "" end
+      local buf = ffi.new("uint8_t[?]", fmt)
+      local got = ffi.new("uint32_t[1]")
+      if C.ReadFile(self.h, buf, fmt, got, nil) == 0 or got[0] == 0 then return nil end
+      return ffi.string(buf, got[0])
+    end
+    local parts = {}
+    local chunk = 1048576
+    local buf = ffi.new("uint8_t[?]", chunk)
+    local got = ffi.new("uint32_t[1]")
+    while C.ReadFile(self.h, buf, chunk, got, nil) ~= 0 and got[0] > 0 do
+      parts[#parts + 1] = ffi.string(buf, got[0])
+    end
+    return table.concat(parts)
+  end
+  function handle:write(...)
+    local put = ffi.new("uint32_t[1]")
+    for i = 1, select("#", ...) do
+      local s = tostring((select(i, ...)))
+      local off = 0
+      while off < #s do
+        local n = math.min(#s - off, 1048576)
+        if C.WriteFile(self.h, ffi.cast("const char *", s) + off, n, put, nil) == 0 or put[0] == 0 then
+          return nil, "write failed"
+        end
+        off = off + put[0]
+      end
+    end
+    return self
+  end
+  function handle:seek(whence, off)
+    local method = ({ set = 0, cur = 1, ["end"] = 2 })[whence or "cur"] or 1
+    local np = ffi.new("int64_t[1]")
+    if C.SetFilePointerEx(self.h, off or 0, np, method) == 0 then return nil, "seek failed" end
+    return tonumber(np[0])
+  end
+  function handle:flush() return self end
+  function handle:close()
+    if self.h then C.CloseHandle(self.h); self.h = nil end
+    return true
+  end
+  function api.open(p, mode)
+    local w = wide(p)
+    if not w then return nil, "bad path" end
+    local writing = mode:find("[wa]") ~= nil
+    local h = C.CreateFileW(w, writing and 0x40000000 or 0x80000000, 3, nil,
+      writing and 2 or 3, 0x80, nil)
+    if not validHandle(h) then return nil, "cannot open " .. p end
+    local f = setmetatable({ h = h }, handle)
+    if mode:find("a") then f:seek("end", 0) end
+    return f
+  end
+
+  function api.list(p)
+    local out = {}
+    local w = wide((p:gsub("/", "\\")) .. "\\*")
+    if not w then return out end
+    local data = ffi.new("PP_FIND_DATA_W[1]")
+    local h = C.FindFirstFileW(w, data)
+    if not validHandle(h) then return out end
+    repeat
+      local name = narrow(data[0].name)
+      if name ~= "." and name ~= ".." and name ~= "" then out[#out + 1] = name end
+    until C.FindNextFileW(h, data) == 0
+    C.FindClose(h)
+    return out
+  end
+
+  winApi = api
+  return winApi
+end
+
+local posixApi = nil
+local function loadPosixApi()
+  if posixApi ~= nil then return posixApi end
+  posixApi = false
+  if IS_WIN then return posixApi end
+  local okFfi, ffi = pcall(require, "ffi")
+  if not okFfi then return posixApi end
+  local osx = ffi.os == "OSX"
+  local osxIntel = osx and ffi.arch == "x64"
+  pcall(ffi.cdef, "int mkdir(const char *pathname, unsigned int mode);")
+  pcall(ffi.cdef, "void *opendir(const char *name);")
+  pcall(ffi.cdef, "int closedir(void *dirp);")
+  pcall(ffi.cdef, "void *readdir(void *dirp);")
+  if osxIntel then
+    pcall(ffi.cdef, 'void *pp_readdir64(void *dirp) __asm__("readdir$INODE64");')
+  end
+  local C = ffi.C
+  if not pcall(function() return C.mkdir end) then return posixApi end
+
+  local api = {}
+  function api.mkdir(p) pcall(C.mkdir, p, 493) end
+
+  local readdirFn = nil
+  local nameOff = nil
+  if osxIntel then
+    local okR, fn = pcall(function() return C.pp_readdir64 end)
+    if okR then readdirFn = fn end
+    nameOff = 21
+  elseif osx then
+    local okR, fn = pcall(function() return C.readdir end)
+    if okR then readdirFn = fn end
+    nameOff = 21
+  elseif ffi.os == "Linux" and ffi.abi("64bit") then
+    local okR, fn = pcall(function() return C.readdir end)
+    if okR then readdirFn = fn end
+    nameOff = 19
+  end
+  if readdirFn and pcall(function() return C.opendir, C.closedir end) then
+    function api.list(p)
+      local out = {}
+      local d = C.opendir(p)
+      if d == nil then return out end
+      while true do
+        local ent = readdirFn(d)
+        if ent == nil then break end
+        local name = ffi.string(ffi.cast("const char *", ent) + nameOff)
+        if name ~= "." and name ~= ".." then out[#out + 1] = name end
+      end
+      C.closedir(d)
+      return out
+    end
+  end
+  posixApi = api
+  return posixApi
+end
+
+local function nativeOpen(path, mode)
+  mode = mode or "rb"
+  local w = loadWinApi()
+  if w and path:find(NON_ASCII) then return w.open(path, mode) end
+  return io.open(path, mode)
+end
+
+local function nativeRemove(path)
+  local w = loadWinApi()
+  if w and path:find(NON_ASCII) then return w.remove(path) end
+  return os.remove(path)
+end
+
+local function nativeStat(path)
+  local w = loadWinApi()
+  if w then
+    local a = w.attrs(path)
+    if not a then return nil end
+    if a % 32 >= 16 then return { type = "directory" } end
+    local f = w.open(path, "rb")
+    local size = nil
+    if f then size = f:seek("end"); f:close() end
+    return { type = "file", size = size }
+  end
+  local f = io.open(path, "rb")
+  if not f then return nil end
+  local okRead, _, rerr = pcall(f.read, f, 0)
+  local isDir = okRead and rerr ~= nil
+  local size = nil
+  if not isDir then size = f:seek("end") end
+  f:close()
+  return { type = isDir and "directory" or "file", size = size }
+end
+
+local function nativeMkdirp(path)
+  if type(path) ~= "string" or path == "" then return false end
+  local function isDir(p)
+    local st = nativeStat(p)
+    return st ~= nil and st.type == "directory"
+  end
+  if isDir(path) then return true end
+  local api = loadWinApi() or loadPosixApi()
+  if not api then return false end
+  local norm = path:gsub("\\", "/")
+  local cur = norm:sub(1, 1) == "/" and "" or nil
+  for part in norm:gmatch("[^/]+") do
+    cur = cur == nil and part or (cur .. "/" .. part)
+    if not cur:match("^%a:$") and not isDir(cur) then api.mkdir(cur) end
+  end
+  return isDir(path)
+end
+
+local function nativeList(path)
+  local api = loadWinApi() or loadPosixApi()
+  if not (api and api.list) then return nil end
+  return api.list(path)
+end
 
 local function pathExists(path)
-  local f = io.open(path, "rb")
-  if not f then return false end
-  f:close()
-  return true
+  return nativeStat(path) ~= nil
 end
+
+SaveData.openNative = nativeOpen
+SaveData.removeNative = nativeRemove
+SaveData.statNative = nativeStat
+SaveData.mkdirNative = nativeMkdirp
+SaveData.listNative = nativeList
 
 -- an io.* filesystem exposing the love.filesystem subset the save/options
 -- round-trip needs (getInfo/read/write/remove), rooted at `dir`
 local function makePortableFs(dir)
   local function full(name) return dir .. SEP .. name end
   return {
-    getInfo = function(name)
-      if not pathExists(full(name)) then return nil end
-      return { type = "file" }
+    getInfo = function(name, filter)
+      local st = nativeStat(full(name))
+      if not st then return nil end
+      if filter and filter ~= st.type then return nil end
+      return st
+    end,
+    getDirectoryItems = function(name)
+      local items = nativeList(full(name))
+      if not items then
+        items = {}
+        if love and love.filesystem and love.filesystem.getDirectoryItems then
+          items = love.filesystem.getDirectoryItems(name)
+        end
+      end
+      table.sort(items)
+      return items
     end,
     read = function(name)
-      local f = io.open(full(name), "rb")
+      local f = nativeOpen(full(name), "rb")
       if not f then return nil, "no file: " .. name end
       local data = f:read("*a")
       f:close()
       return data
     end,
     write = function(name, data)
-      local f, err = io.open(full(name), "wb")
+      local f, err = nativeOpen(full(name), "wb")
       if not f then return false, err end
       f:write(data)
       f:close()
       return true
     end,
     remove = function(name)
-      os.remove(full(name))
+      nativeRemove(full(name))
       return true
     end,
     createDirectory = function(name)
-      -- portable mode writes real files through io.*, which will not
-      -- create missing parent directories; mkdir the tree so a slot path
-      -- like "saves/red" exists before a write lands inside it
-      if type(name) ~= "string" or name:find("[^%w%._%-%/]") or name:find("%.%.") then
+      if type(name) ~= "string" or name == "" or name:find("[%c\\:*?\"<>|]")
+          or name:find("%.%.") or name:sub(1, 1) == "/" then
         return false
       end
-      local osPath = full(name):gsub("/", SEP)
-      if SEP == "\\" then
-        os.execute('mkdir "' .. osPath .. '" 2>nul')
-      else
-        os.execute('mkdir -p "' .. osPath .. '" 2>/dev/null')
-      end
-      return true
+      return nativeMkdirp(full(name))
     end,
   }
 end
@@ -133,8 +407,9 @@ function SaveData.gameFolders()
   -- ROM cache) in the game folder next to the executable/source.  On
   -- Android/iOS the source is a read-only package with no such folder, so
   -- portable mode never applies there.
+  local osName
   if type(love.system) == "table" and type(love.system.getOS) == "function" then
-    local osName = love.system.getOS()
+    osName = love.system.getOS()
     if osName ~= "Windows" and osName ~= "Linux" and osName ~= "OS X" then
       return {}
     end
@@ -171,6 +446,20 @@ function SaveData.gameFolders()
   if appDir then candidates[#candidates + 1] = appDir end
   if sbd and sbd ~= "" then candidates[#candidates + 1] = sbd end
   if src and src ~= "" then candidates[#candidates + 1] = src end
+  -- A certificate trailer on a fused Windows executable can leave both
+  -- source paths empty. The native executable path still locates its marker.
+  if osName == "Windows" and (not src or src == "") and (not sbd or sbd == "")
+      and love.filesystem.isFused and love.filesystem.isFused()
+      and love.filesystem.getExecutablePath then
+    local ok, exe = pcall(love.filesystem.getExecutablePath)
+    if ok and type(exe) == "string" then
+      local dir = parentDir(exe:gsub("\\", "/"))
+      if dir and dir ~= "" then
+        if dir:match("^%a:$") then dir = dir .. "/" end
+        candidates[#candidates + 1] = dir
+      end
+    end
+  end
   return candidates
 end
 
@@ -185,11 +474,11 @@ local function dirIsWritable(dir)
     local name = string.format(".write_probe_%d_%d.tmp",
       os.time() % 100000000, math.random(0, 999999))
     local path = dir .. SEP .. name
-    local f, err = io.open(path, "wb")
+    local f = nativeOpen(path, "wb")
     if not f then return false end
     local wrote = f:write("ok")
     f:close()
-    pcall(os.remove, path)
+    pcall(nativeRemove, path)
     return wrote ~= nil
   end)
   return ok and writable == true
@@ -203,17 +492,36 @@ local function detectPortable()
   if type(os.getenv) == "function" and os.getenv("FLATPAK_ID") then
     return portableBase
   end
+  portableTried = {}
   for _, base in ipairs(SaveData.gameFolders()) do
     local markerOk = false
     pcall(function()
       markerOk = pathExists(base .. SEP .. PORTABLE_MARKER)
     end)
-    if markerOk and dirIsWritable(base) then
+    local writable = markerOk and dirIsWritable(base) or false
+    local reason = nil
+    if not markerOk then
+      reason = "no portable.txt"
+    elseif not writable then
+      reason = "folder not writable"
+    end
+    portableTried[#portableTried + 1] = {
+      path = base, marker = markerOk, writable = writable, reason = reason,
+    }
+    if markerOk and not writable then
+      require("src.core.Logger").warn("portable rejected %s: %s", tostring(base), reason)
+    end
+    if markerOk and writable then
       portableBase = base
       break
     end
   end
   return portableBase
+end
+
+function SaveData.portableStatus()
+  local base = detectPortable()
+  return { base = base or nil, tried = portableTried }
 end
 
 -- Soft-reset cache so tests can re-run detect after env changes.
@@ -302,6 +610,7 @@ function SaveData.defaultOptions()
     -- (the PIKACHU VOL row appears only on Yellow; see Sound.lua)
     pikaVol = 7,
     musicFilter = 0,
+    audioMode = "both",
     -- Per-category logic fast-forward multiplier (RFC 0007); audio is
     -- unaffected (GameSpeed.lua). Superseded from a single "speed" field --
     -- mergeOptions migrates an old save's value into all three below.
@@ -362,19 +671,11 @@ function SaveData.defaultOptions()
     modProfiles = {},
     modProfilesSeeded = false,
     modOrder = {},
-    -- GitHub release checks for mods with a manifest "github" field
-    -- (src/mods/ModUpdate.lua). Keyed by owner/repo; TTL is six hours.
-    modUpdateCache = {},
-    -- Community mod indexes the player has chosen to browse
-    -- (src/mods/ModIndex.lua), in the order they added them.  Empty by
-    -- default and never populated automatically: adding an index is how a
-    -- player says they trust whoever publishes it, so the launcher asks
-    -- rather than shipping one.  Rows are { url, feed, base, fallback,
-    -- label }.
+    -- Player-added mod indexes, in their chosen order.  ModIndex.sources()
+    -- includes the permanent main index alongside these and reuses any
+    -- main-index row saved by an older launcher.  Rows are
+    -- { url, feed, base, fallback, label }.
     modIndexes = {},
-    -- Parsed index listings keyed by feed URL; TTL is 24 hours, matching how
-    -- often the feeds themselves rebuild.
-    modIndexCache = {},
     -- On-screen touch overlay (Android/iOS; see src/core/TouchControls.lua).
     -- enabled=false hides it permanently (distinct from auto-hide-on-gamepad).
     -- layouts.portrait / layouts.landscape each hold optional normalized
@@ -438,6 +739,8 @@ function SaveData.mergeOptions(loaded)
       opts.speedMenu = loaded.speed
     end
     opts.speed = nil
+    opts.modIndexCache = nil
+    opts.modUpdateCache = nil
   end
   return opts
 end
@@ -569,7 +872,36 @@ end
 -- Both take an optional fs (write/getInfo/read) defaulting to
 -- love.filesystem, so the mod loader's injected filesystem can carry the
 -- options round-trip headless (no love global).
+SaveData.LAUNCHER_KEYS = {
+  "autoReimport", "splashVideo", "splashMute", "themeVideoBg", "reduceMotion",
+  "boxMusicVol", "boxCryVol", "romSources", "lastVersion", "activeCart", "modSort",
+}
+
+function SaveData.launcherKeys()
+  local out = {}
+  for _, key in ipairs(SaveData.LAUNCHER_KEYS) do out[#out + 1] = key end
+  local ok, SecretGames = pcall(require, "src.import.SecretGames")
+  if ok and type(SecretGames) == "table" and type(SecretGames.GAMES) == "table" then
+    for _, key in pairs(SecretGames.GAMES) do out[#out + 1] = key end
+  end
+  return out
+end
+
+function SaveData.invalidateOptionsCache()
+  for _, slot in pairs(optionsCache) do slot.rev = slot.rev + 1 end
+end
+
+local writeOptions
+
 function SaveData.saveOptions(opts, fs)
+  return writeOptions(opts, fs, false)
+end
+
+function SaveData.saveSessionOptions(opts, fs)
+  return writeOptions(opts, fs, true)
+end
+
+writeOptions = function(opts, fs, launcherFromDisk)
   fs = persistFs(fs)
   -- #932: options.lua is a WHOLE-FILE rewrite, so a caller that hands over a
   -- PARTIAL table (just the keys it changed) would silently drop every key it
@@ -591,6 +923,11 @@ function SaveData.saveOptions(opts, fs)
   -- a partial write would push the global value into the cart's bucket.
   local cartGlobalValues = cartGlobals(onDisk)
   applyCartOverlay(onDisk)
+  if launcherFromDisk and type(opts) == "table" and type(onDisk) == "table" then
+    for _, key in ipairs(SaveData.launcherKeys()) do
+      opts[key] = deepCopy(onDisk[key])
+    end
+  end
   local isFull = type(opts) == "table"
   if isFull then
     for k in pairs(SaveData.defaultOptions()) do
@@ -1049,6 +1386,18 @@ local function tryMigrateLegacy(key, fs)
   -- refuse to delete the originals unless the new slot is loadable (from
   -- the main copy or, failing that, the backup)
   if not decodeSlot(fs, key, id) then return nil end
+  local lbase, dbase = lmain:gsub("%.lua$", ""), dmain:gsub("%.lua$", "")
+  for _, suffix in ipairs({ "_trade.lua", "_xtrade.lua", "_xtrade.lua.tmp" }) do
+    local from = lbase .. suffix
+    local body = fs.getInfo(from) and fs.read(from)
+    if body then
+      fs.write(dbase .. suffix, body)
+      if not fs.getInfo(dbase .. suffix) then return nil end
+    end
+  end
+  for _, suffix in ipairs({ "_trade.lua", "_xtrade.lua", "_xtrade.lua.tmp" }) do
+    if fs.getInfo(lbase .. suffix) then remove(fs, lbase .. suffix) end
+  end
   remove(fs, lmain)
   remove(fs, lbak)
   remove(fs, ltmp)
@@ -1164,7 +1513,9 @@ function SaveData.slotSummary(save)
   local dexCount = 0
   if gen3 then
     local okD, Dex = pcall(require, "src.core.game3.dex")
-    dexCount = okD and Dex and Dex.summaryCount and Dex.summaryCount(save) or 0
+    local okC, n = false, nil
+    if okD and Dex and Dex.summaryCount then okC, n = pcall(Dex.summaryCount, save) end
+    dexCount = okC and tonumber(n) or 0
   elseif gen2 then
     for _, has in pairs((save.pokedex and save.pokedex.caught) or {}) do
       if has then dexCount = dexCount + 1 end
@@ -1193,9 +1544,27 @@ function SaveData.slotSummary(save)
   if gen3 then
     local okF, Flags = pcall(require, "src.core.game3.scripting.flags")
     badges = 0
-    if okF and Flags and Flags.BADGES then
-      for _, b in ipairs(Flags.BADGES) do
-        if Flags.getFlag(save, nil, b.flag) or Flags.getFlag(save, nil, b.name) then
+    local vt = okF and Flags or nil
+    if vt and type(save.version) == "string" and Flags.forVersion then
+      local okV, t = pcall(Flags.forVersion, save.version)
+      if okV and type(t) == "table" then vt = t end
+    end
+    local getFlag = okF and Flags and Flags.getFlag
+    if vt and vt.NAMES ~= Flags.NAMES then
+      getFlag = function(store, _, id)
+        if type(id) ~= "number" then id = vt.IDS[id] end
+        local f = store.flags
+        if not id or type(f) ~= "table" then return false end
+        if f[id] == true or f[tostring(id)] == true or f[string.format("0x%X", id)] == true then
+          return true
+        end
+        local n = vt.NAMES[id]
+        return n ~= nil and f[n] == true
+      end
+    end
+    if okF and Flags and vt and vt.BADGES then
+      for _, b in ipairs(vt.BADGES) do
+        if getFlag(save, nil, b.flag) or getFlag(save, nil, b.name) then
           badges = badges + 1
         end
       end
@@ -1449,7 +1818,27 @@ end
 function SaveData.writeSlot(version, slotId, saveTable)
   version = version or GameVersion.get()
   if not knownVersion(version) then return false, "unknown version" end
-  return writeSlotIn(version, slotId, saveTable)
+  local imported = type(saveTable) == "table" and saveTable.importedOptions
+  if type(imported) ~= "table" then return writeSlotIn(version, slotId, saveTable) end
+  local body = {}
+  for k, v in pairs(saveTable) do
+    if k ~= "importedOptions" then body[k] = v end
+  end
+  local ok, err = writeSlotIn(version, slotId, body)
+  if not ok then return ok, err end
+  local info = GameVersion.info(version)
+  if info and info.generation == 2 then
+    local Gen2Save = require("src.core.gen2.Save")
+    local opts = Gen2Save.loadOptions()
+    for k, v in pairs(imported) do opts[k] = v end
+    Gen2Save.saveOptions(opts)
+  else
+    local opts = SaveData.loadOptions()
+    for k, v in pairs(imported) do opts[k] = v end
+    SaveData.saveOptions(opts)
+  end
+  saveTable.importedOptions = nil
+  return true
 end
 
 -- Delete a registered slot: remove its main/.bak/.tmp files, drop it from the
@@ -1508,6 +1897,162 @@ function SaveData.deleteSlot(version, slotId)
   version = version or GameVersion.get()
   if not knownVersion(version) then return false, "unknown version" end
   return deleteSlotIn(version, slotId)
+end
+
+local function copyTree(fs, from, to)
+  if not (fs.getDirectoryItems and fs.getInfo(from)) then return end
+  for _, name in ipairs(fs.getDirectoryItems(from)) do
+    local src, dst = from .. "/" .. name, to .. "/" .. name
+    local info = fs.getInfo(src)
+    if info and info.type == "directory" then
+      if fs.createDirectory then fs.createDirectory(dst) end
+      copyTree(fs, src, dst)
+    elseif info then
+      local body = fs.read(src)
+      if type(body) == "string" then
+        ensureParentDir(fs, dst)
+        fs.write(dst, body)
+      end
+    end
+  end
+end
+
+local function pendingTradeSent(fs, main)
+  local base = main:gsub("%.lua$", "")
+  for _, journal in ipairs({ base .. "_trade.lua", base .. "_xtrade.lua" }) do
+    if fs.getInfo(journal) then
+      local data = SaveSerializer.decode(fs.read(journal) or "")
+      if type(data) == "table" and type(data.entries) == "table" then
+        for _, e in ipairs(data.entries) do
+          if type(e) == "table" and (type(e.sent) == "table" or type(e.out) == "table") then
+            return true
+          end
+        end
+      end
+    end
+  end
+  return false
+end
+
+local function duplicateSlotIn(key, srcId, label)
+  local fs = persistFs(nil)
+  ensureSlots(key, fs)
+  local opts = SaveData.loadOptions(fs)
+  local reg = registryOf(opts, key)
+  local found = false
+  for _, id in ipairs(reg and type(reg.list) == "table" and reg.list or {}) do
+    if id == srcId then found = true break end
+  end
+  if not found then return nil, "slot not registered" end
+  local main = slotNames(key, srcId)
+  if not main then return nil, "invalid slot id" end
+  local body = readSlotSourceIn(key, srcId, fs)
+  local save = body and SaveSerializer.decode(body)
+  if type(save) ~= "table" then return nil, "that save could not be read" end
+  if pendingTradeSent(fs, main) then
+    return nil, "finish this save's pending trade first"
+  end
+  save.meta = type(save.meta) == "table" and save.meta or {}
+  local oldId = save.meta.playthroughId
+  if type(oldId) ~= "string" or oldId == "" then
+    local mapped = type(opts.playthroughIds) == "table" and opts.playthroughIds[key]
+    oldId = type(mapped) == "table" and mapped[srcId] or nil
+  end
+  local newId = SaveData.newPlaythroughId()
+  save.meta.playthroughId = newId
+  local id = createSlotIn(key)
+  local ok, err = writeSlotIn(key, id, save)
+  if not ok or not readSlotSourceIn(key, id, fs) then
+    deleteSlotIn(key, id)
+    return nil, err or "the copy did not read back"
+  end
+  local cart = slotDir(key) .. "/" .. srcId .. ".cart"
+  if fs.getInfo(cart) then
+    local bytes = fs.read(cart)
+    if type(bytes) == "string" then fs.write(slotDir(key) .. "/" .. id .. ".cart", bytes) end
+  end
+  opts = SaveData.loadOptions(fs)
+  reg = registryOf(opts, key)
+  local name = type(label) == "string" and label:match("^%s*(.-)%s*$") or ""
+  if name ~= "" then
+    reg.names = type(reg.names) == "table" and reg.names or {}
+    reg.names[id] = name
+  end
+  if type(reg.hashes) == "table" and reg.hashes[srcId] then reg.hashes[id] = reg.hashes[srcId] end
+  if type(reg.broken) == "table" and reg.broken[srcId] then reg.broken[id] = true end
+  putRegistry(opts, key, reg)
+  opts.playthroughIds = type(opts.playthroughIds) == "table" and opts.playthroughIds or {}
+  opts.playthroughIds[key] = opts.playthroughIds[key] or {}
+  opts.playthroughIds[key][id] = newId
+  SaveData.saveOptions(opts, fs)
+  local version = save.version == nil and not isCartKey(key) and key or save.version
+  if type(oldId) == "string" and oldId:match("^[%w_-]+$")
+      and type(version) == "string" and version:match("^[%w_-]+$") then
+    copyTree(fs, "mod_storage/" .. version .. "/" .. oldId,
+      "mod_storage/" .. version .. "/" .. newId)
+  end
+  return id
+end
+
+function SaveData.duplicateSlot(version, slotId, label)
+  version = version or GameVersion.get()
+  if not knownVersion(version) then return nil, "unknown version" end
+  return duplicateSlotIn(version, slotId, label)
+end
+
+function SaveData.duplicateCartSlot(cartId, slotId, label)
+  local key = cartKey(cartId or activeCart)
+  if not key then return nil, "unknown cart" end
+  return duplicateSlotIn(key, slotId, label)
+end
+
+local function playthroughIdTaken(fs, opts, key, slotId, id)
+  if type(opts.playthroughIds) == "table" then
+    for scope, ids in pairs(opts.playthroughIds) do
+      if type(ids) == "table" then
+        for sid, pid in pairs(ids) do
+          if pid == id and not (scope == key and sid == slotId) then return true end
+        end
+      end
+    end
+  end
+  local reg = registryOf(opts, key)
+  for _, other in ipairs(reg and type(reg.list) == "table" and reg.list or {}) do
+    if other ~= slotId then
+      local body = readSlotSourceIn(key, other, fs)
+      local save = body and SaveSerializer.decode(body)
+      local meta = type(save) == "table" and save.meta
+      if type(meta) == "table" and meta.playthroughId == id then return true end
+    end
+  end
+  return false
+end
+
+function SaveData.claimImportPlaythroughId(version, slotId, save)
+  version = version or GameVersion.get()
+  if not knownVersion(version) or type(slotId) ~= "string" then return nil end
+  local meta = type(save) == "table" and save.meta
+  local id = type(meta) == "table" and meta.playthroughId
+  if type(id) ~= "string" or id == "" then return nil end
+  local fs = persistFs(nil)
+  ensureSlots(version, fs)
+  local opts = SaveData.loadOptions(fs)
+  if playthroughIdTaken(fs, opts, version, slotId, id) then
+    local newId = SaveData.newPlaythroughId()
+    if id:match("^[%w_-]+$") and version:match("^[%w_-]+$") then
+      copyTree(fs, "mod_storage/" .. version .. "/" .. id,
+        "mod_storage/" .. version .. "/" .. newId)
+    end
+    id = newId
+    meta.playthroughId = id
+  end
+  opts.playthroughIds = type(opts.playthroughIds) == "table" and opts.playthroughIds or {}
+  opts.playthroughIds[version] = opts.playthroughIds[version] or {}
+  if opts.playthroughIds[version][slotId] ~= id then
+    opts.playthroughIds[version][slotId] = id
+    SaveData.saveOptions(opts, fs)
+  end
+  return id
 end
 
 -- Drop the process-global "have we resolved slots for this scope" cache so
@@ -2137,11 +2682,19 @@ function SaveData.runMigrations(save, modChains, activeMods)
   return save
 end
 
+local function rollTrainerId()
+  if love and love.math and love.math.random then
+    return love.math.random(0, 65535)
+  end
+  return math.random(0, 65535)
+end
+SaveData.rollTrainerId = rollTrainerId
+
 -- saves from before the trainer ID existed: backfill once on load
 -- (like the OT backfill for old saves)
 SaveData.addCoreMigration(1, function(save)
   if save.player and not save.player.id then
-    save.player.id = math.random(0, 65535)
+    save.player.id = rollTrainerId()
   end
 end)
 
@@ -2220,7 +2773,7 @@ end)
 function SaveData.saveLiveOptions(data)
   if type(data) ~= "table" or type(data.options) ~= "table" then return nil end
   data.options = rememberPlaythroughId(data, data.options)
-  return SaveData.saveOptions(data.options)
+  return SaveData.saveSessionOptions(data.options)
 end
 
 -- Game progress only; options are written separately via saveOptions.
@@ -2240,7 +2793,7 @@ function SaveData.save(data, mods)
     SaveData.saveLiveOptions(data)
   else
     local opts, changed = rememberPlaythroughId(data)
-    if changed then SaveData.saveOptions(opts) end
+    if changed then SaveData.saveSessionOptions(opts) end
   end
   if activeCart and type(data.meta) == "table" then
     data.meta.cartId = activeCart
@@ -2318,12 +2871,30 @@ function SaveData.load(version)
   end
   SaveData.runMigrations(data)
   data.options = SaveData.loadOptions()
+  local loadInfo = type(data.version) == "string" and GameVersion.info(data.version)
+  if loadInfo and loadInfo.generation == 3 then
+    pcall(function() require("src.save_convert.Gen3Save").repairJapaneseNames(data) end)
+  end
+  if loadInfo and loadInfo.generation == 2 then
+    data.options = require("src.core.gen2.Save").loadOptions()
+  end
   local mapped = SaveData.selectedPlaythroughId(data)
   if type(mapped) == "string" and mapped ~= "" then
     data.meta.playthroughId = mapped
   end
   Logger.info("loaded save")
   return data, recovered
+end
+
+-- engine/menus/save.asm:622
+function SaveData.previousFileDiffers(save, injectedFs)
+  if type(save) ~= "table" then return false end
+  local fs = persistFs(injectedFs)
+  local disk = readTable(fs, (saveNames(save.version, injectedFs)))
+  local p = type(disk) == "table" and disk.player
+  if type(p) ~= "table" or type(p.name) ~= "string" or p.name == "" then return false end
+  if p.id == nil then return false end
+  return p.id ~= (save.player and save.player.id)
 end
 
 -- ------- validation and quarantine
@@ -2440,7 +3011,7 @@ local function scrubKnownMon(mon, data)
       local base = ppInt(mdef and mdef.pp, 0)
       local ppUps = math.min(3, ppInt(slot.ppUps, 0))
       if slot.ppUps ~= nil then slot.ppUps = ppUps end
-      slot.pp = ppInt(slot.pp, base + ppUps * math.floor(base / 5))
+      slot.pp = ppInt(slot.pp, base + ppUps * math.min(7, math.floor(base / 5)))
     end
   end
 end
@@ -2686,9 +3257,10 @@ function SaveData.newGame(boot)
       facing = facing,
       name = boot.playerName or "RED",
       rival = boot.rivalName or "BLUE",
-      -- 16-bit trainer ID rolled at new game (wPlayerID, filled from
-      -- hRandomAdd in OakSpeech)
-      id = math.random(0, 65535),
+      -- 16-bit trainer ID rolled at new game (wPlayerID). The cart copies
+      -- hRandomAdd/hRandomSub, which have been advancing since power-on;
+      -- love.math is the stream that has actually been advancing here.
+      id = rollTrainerId(),
     },
     flags = {},
     inventory = {},

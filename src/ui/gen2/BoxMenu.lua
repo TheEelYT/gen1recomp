@@ -649,14 +649,6 @@ function BoxMenu:update(_dt)
     self:stepBox(1)
   elseif input:wasPressed("a") then
     self:act()
-  -- RELEASE and the nickname keyboard are BillsPC_WithdrawMenu's and the
-  -- CHANGE BOX menu's rows; .MoveMonWOMailSubmenu has neither, and a stray
-  -- SELECT on the move screen must not put "Release <PK><MN>?" in front of a
-  -- player who only meant to reorder a box.
-  elseif input:wasPressed("select") and self.mode == "withdraw" then
-    self:askRelease()
-  elseif input:wasPressed("start") and self.mode == "withdraw" then
-    self:askNickname()
   elseif input:wasPressed("b") then
     if self.onClose then self.onClose() end
   end
@@ -684,9 +676,6 @@ function BoxMenu:playMonCry(mon)
   end
 end
 
--- BillsPC's RELEASE, which the model has always supported and nothing on
--- screen reached.  The cart asks first and starts the prompt on NO, the way
--- every irreversible choice in the game does.
 function BoxMenu:askRelease()
   if self:isCancel() then return end
   local mon = self:selected()
@@ -734,31 +723,6 @@ function BoxMenu:askRelease()
     self.phase = nil
     self:clampIndex()
   end, { defaultNo = true }))
-end
-
--- The naming screen the cart opens from BillsPC's own nickname option.
-function BoxMenu:askNickname()
-  if self:isCancel() then return end
-  local mon = self:selected()
-  if not mon then return end
-  local game = self.game
-  if not (game and game.stack) then return end
-  -- The resolve is guarded rather than the construction: a keyboard that will
-  -- not even load is a nickname the player cannot type, not a crash.  Same
-  -- shape as the openscreen script command (src/script/Commands.lua).
-  if not pcall(Screens.get, game, "Gen2NamingScreen") then return end
-  Screens.push(game, "Gen2NamingScreen", {
-    -- The "nickname" kind is MON_NAME_LENGTH - 1 wide and takes its header
-    -- from the mon rather than from a fixed prompt.
-    type = "nickname",
-    monName = mon.name or mon.species,
-    initial = mon.nickname or "",
-    onDone = function(name)
-      game.stack:pop()
-      if name and #name > 0 then mon.nickname = name end
-    end,
-    onCancel = function() game.stack:pop() end,
-  })
 end
 
 function BoxMenu:image(path)
@@ -852,6 +816,39 @@ end
 -- GetFrontpic's `cp EGG / jr nz, .not_egg` arm hands back EggPic, never the
 -- hatchling's pic (engine/gfx/load_pics.asm:88-91); it rides menu_gfx.eggHatch,
 -- with the party list's ICON_EGG standing in for a cache built before that.
+-- One reusable quad per role, re-aimed per draw rather than a new Quad a
+-- frame.  nil when the backend cannot make one (the old pcall's degrade).
+local function reusedQuad(self, slot, x, y, w, h, sw, sh)
+  local quads = self.reusedQuads
+  if not quads then
+    quads = {}
+    self.reusedQuads = quads
+  end
+  local quad = quads[slot]
+  if quad then
+    quad:setViewport(x, y, w, h, sw, sh)
+    return quad
+  end
+  local ok, made = pcall(love.graphics.newQuad, x, y, w, h, sw, sh)
+  if not ok then return nil end
+  quads[slot] = made
+  return made
+end
+
+-- GbcPalette.with without a closure: set `colors` (when there is a shader),
+-- returning what finishShade needs to put the caller's shader back.
+local function startShade(colors)
+  if not (colors and GbcPalette.available()) then return false end
+  local G = love.graphics
+  local previous = G.getShader and G.getShader() or nil
+  GbcPalette.use(colors)
+  return true, previous
+end
+
+local function finishShade(shaded, previous)
+  if shaded then love.graphics.setShader(previous) end
+end
+
 function BoxMenu:drawEggPic(mon)
   local G = love.graphics
   local colors = self:panelColors("EGG", mon and mon.shiny)
@@ -866,18 +863,15 @@ function BoxMenu:drawEggPic(mon)
   local w = entry.width or 16
   local h = math.min(entry.height or 16, image:getHeight())
   if (entry.frames or 1) > 1 then h = math.floor(h / entry.frames) end
-  local ok, quad = pcall(love.graphics.newQuad, 0, 0, w, h,
+  local quad = reusedQuad(self, "egg", 0, 0, w, h,
     image:getWidth(), image:getHeight())
-  if not ok then return end
+  if not quad then return end
   local x = PIC_X * 8 + math.floor((7 * 8 - w * 2) / 2)
   local y = PIC_Y * 8 + math.floor((7 * 8 - h * 2) / 2)
   G.setColor(1, 1, 1, 1)
-  local function body() G.draw(image, quad, x, y, 0, 2, 2) end
-  if colors and GbcPalette.available() then
-    GbcPalette.with(colors, body)
-  else
-    body()
-  end
+  local shaded, previous = startShade(colors)
+  G.draw(image, quad, x, y, 0, 2, 2)
+  finishShade(shaded, previous)
   G.setColor(1, 1, 1, 1)
 end
 
@@ -889,18 +883,14 @@ function BoxMenu:drawHeldIcon(mon)
   local gfx = (self.menuGfx or {}).billsPc
   local image = self:image(gfx and gfx.icons)
   if not image then return end
-  local ok, quad = pcall(love.graphics.newQuad, row * 8, 0, 8, 8,
-    image:getDimensions())
-  if not ok then return end
+  local iw, ih = image:getDimensions()
+  local quad = reusedQuad(self, "held", row * 8, 0, 8, 8, iw, ih)
+  if not quad then return end
   local G = love.graphics
   G.setColor(1, 1, 1, 1)
-  local function body() G.draw(image, quad, ICON_X * 8, ICON_Y * 8) end
-  local colors = gfx and gfx.palette
-  if colors and GbcPalette.available() then
-    GbcPalette.with(colors, body)
-  else
-    body()
-  end
+  local shaded, previous = startShade(gfx and gfx.palette)
+  G.draw(image, quad, ICON_X * 8, ICON_Y * 8)
+  finishShade(shaded, previous)
   G.setColor(1, 1, 1, 1)
 end
 
@@ -911,25 +901,17 @@ function BoxMenu:drawBoxArrows()
   local image = self:image(gfx and gfx.icons)
   if not image then return end
   local G = love.graphics
-  local quads = {}
-  for _, arrow in ipairs({ ARROW_LEFT, ARROW_RIGHT }) do
-    local ok, quad = pcall(love.graphics.newQuad, arrow[1] * 8, 0, 8, 8,
-      image:getDimensions())
-    if not ok then return end
-    quads[#quads + 1] = { quad, arrow[2] }
-  end
+  local iw, ih = image:getDimensions()
+  local left = reusedQuad(self, "arrowLeft", ARROW_LEFT[1] * 8, 0, 8, 8, iw, ih)
+  if not left then return end
+  local right = reusedQuad(self, "arrowRight", ARROW_RIGHT[1] * 8, 0, 8, 8,
+    iw, ih)
+  if not right then return end
   G.setColor(1, 1, 1, 1)
-  local function body()
-    for _, entry in ipairs(quads) do
-      G.draw(image, entry[1], entry[2] * 8, ARROW_ROW * 8)
-    end
-  end
-  local colors = gfx and gfx.palette
-  if colors and GbcPalette.available() then
-    GbcPalette.with(colors, body)
-  else
-    body()
-  end
+  local shaded, previous = startShade(gfx and gfx.palette)
+  G.draw(image, left, ARROW_LEFT[2] * 8, ARROW_ROW * 8)
+  G.draw(image, right, ARROW_RIGHT[2] * 8, ARROW_ROW * 8)
+  finishShade(shaded, previous)
   G.setColor(1, 1, 1, 1)
 end
 

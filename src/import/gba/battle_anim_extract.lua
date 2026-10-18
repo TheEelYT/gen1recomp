@@ -6,11 +6,19 @@
 
 local Versions  = require("src.import.gba.versions")
 local Lz77      = require("src.import.gba.lz77")
+local CacheBlob = require("src.import.CacheBlob")
 
 local BattleAnimExtract = {}
 
-BattleAnimExtract.FORMAT_VERSION = 5
+BattleAnimExtract.FORMAT_VERSION = 6
 BattleAnimExtract.CACHE_SUB      = "pokemon/battle_anims"
+BattleAnimExtract.REQUIRED       = { "pokemon/battle_anims/pack.lua" }
+BattleAnimExtract.LEVEL_UP_VERTICAL_VERSION = 1
+BattleAnimExtract.FRLG_REQUIRED = {
+  "pokemon/battle_anims/tags/LEVEL_UP_VERTICAL.png",
+  "pokemon/battle_anims/tags/LEVEL_UP_VERTICAL.4bpp",
+  "pokemon/battle_anims/tags/LEVEL_UP_VERTICAL.gbapal",
+}
 
 local V = Versions.BATTLE_ANIMS or {}
 
@@ -49,6 +57,21 @@ local OP_FIXED = {
 
 local SPRITES_START = V.sprites_start or 10000
 local TAG_NAMES     = Versions.ANIM_TAG_NAMES or {}
+local unresolved    = nil
+
+local function refresh_config()
+  V = Versions.BATTLE_ANIMS or {}
+  SPRITES_START = V.sprites_start or 10000
+  TAG_NAMES = Versions.ANIM_TAG_NAMES or {}
+end
+
+local function note_unresolved(kind, ptr, at)
+  if not unresolved then return end
+  local key = kind .. string.format(" 0x%08X", ptr or 0)
+  if not unresolved[key] then
+    unresolved[key] = string.format("%s pointer 0x%08X (script offset 0x%06X)", kind, ptr or 0, at or 0)
+  end
+end
 
 local BATTLER_NAMES = { [0]="attacker", [1]="target", [2]="atk_partner", [3]="def_partner" }
 
@@ -142,6 +165,8 @@ local function decode_script(rom, startOff, visited, labels, tag_dims)
       local cb_gba = tmpl_off and rom:u32(tmpl_off + 20) or 0
       local cb_name = Versions.ANIM_CALLBACK_NAMES and Versions.ANIM_CALLBACK_NAMES[cb_gba]
       local tmpl_name = Versions.ANIM_TEMPLATE_NAMES and Versions.ANIM_TEMPLATE_NAMES[tmpl_gba]
+      if not tmpl_name then note_unresolved("template", tmpl_gba, i) end
+      if not cb_name then note_unresolved("callback", cb_gba, i) end
 
       if tag_name and tag_dims and not tag_dims[tag_name] then
         tag_dims[tag_name] = { w = w, h = h }
@@ -182,6 +207,7 @@ local function decode_script(rom, startOff, visited, labels, tag_dims)
         args[ai + 1] = s16(rom:u16(i + 7 + ai * 2))
       end
       local task_name = Versions.ANIM_TASK_NAMES and Versions.ANIM_TASK_NAMES[fn_gba]
+      if not task_name then note_unresolved("task", fn_gba, i) end
       ops[#ops + 1] = {
         op       = "createvisualtask",
         task     = task_name or string.format("0x%08X", fn_gba),
@@ -324,6 +350,7 @@ local function decode_script(rom, startOff, visited, labels, tag_dims)
         args[ai + 1] = s16(rom:u16(i + 6 + ai * 2))
       end
       local snd_name = Versions.ANIM_TASK_NAMES and Versions.ANIM_TASK_NAMES[fn_gba]
+      if not snd_name then note_unresolved("sound task", fn_gba, i) end
       ops[#ops + 1] = {
         op   = "createsoundtask",
         task = snd_name or string.format("0x%08X", fn_gba),
@@ -478,16 +505,6 @@ local function crc32(str)
   return bxor(c, 0xFFFFFFFF)
 end
 
-local function adler32(str)
-  local s1 = 1
-  local s2 = 0
-  for i = 1, #str do
-    s1 = (s1 + str:byte(i)) % 65521
-    s2 = (s2 + s1) % 65521
-  end
-  return s2 * 65536 + s1
-end
-
 local function u32be(n)
   n = band(n, 0xFFFFFFFF)
   return string.char(
@@ -496,10 +513,6 @@ local function u32be(n)
     band(rshift(n, 8), 0xFF),
     band(n, 0xFF)
   )
-end
-
-local function u16le(n)
-  return string.char(band(n, 0xFF), band(rshift(n, 8), 0xFF))
 end
 
 local function make_chunk(type_str, data)
@@ -581,31 +594,7 @@ local function encode_png(pixels, w, h)
     raw_data = table.concat(raw_lines)
   end
 
-  local idat_data
-  if love and love.data and love.data.compress then
-    local ok, comp = pcall(love.data.compress, "string", "zlib", raw_data)
-    if ok and comp then
-      idat_data = comp
-    end
-  end
-
-  if not idat_data then
-    -- Deflate uncompressed blocks (max 65535 per block)
-    local zlib_blocks = { string.char(0x78, 0x01) } -- ZLIB header
-    local pos = 1
-    local total_len = #raw_data
-    while pos <= total_len do
-      local chunk_len = math.min(total_len - pos + 1, 65535)
-      local is_final = (pos + chunk_len > total_len) and 1 or 0
-      zlib_blocks[#zlib_blocks + 1] = string.char(is_final)
-      zlib_blocks[#zlib_blocks + 1] = u16le(chunk_len)
-      zlib_blocks[#zlib_blocks + 1] = u16le(bxor(chunk_len, 0xFFFF))
-      zlib_blocks[#zlib_blocks + 1] = raw_data:sub(pos, pos + chunk_len - 1)
-      pos = pos + chunk_len
-    end
-    zlib_blocks[#zlib_blocks + 1] = u32be(adler32(raw_data))
-    idat_data = table.concat(zlib_blocks)
-  end
+  local idat_data = CacheBlob.deflate(raw_data, 9)
 
   -- PNG Signature + IHDR + IDAT + IEND
   local sig = "\137PNG\r\n\026\n"
@@ -749,6 +738,50 @@ local function lz_at(rom, ptr)
   local ok, bytes = pcall(Lz77.decompress, function(j) return rom:get(j) end, off)
   if ok and bytes then return bytes end
   return nil
+end
+
+-- pokefirered/src/pokemon_special_anim_scene.c:58
+local LEVEL_UP_VERTICAL = {
+  firered = {gfx = 0x459888, pal = 0x459868},
+  leafgreen = {gfx = 0x4592A8, pal = 0x459288},
+}
+
+local function extract_level_up_vertical(rom, cache, root, game)
+  local offsets = LEVEL_UP_VERTICAL[game]
+  if not offsets then return nil end
+  local tb = lz_at(rom, offsets.gfx + 0x08000000)
+  assert(tb and #tb == 64, "battle_anim_extract: native level-up streak must contain two 4bpp tiles")
+  local pb = {}
+  for i = 0, 31 do pb[i + 1] = rom:get(offsets.pal + i) end
+  local ints = pal_ints(pb)
+  local pixels = {}
+  for y = 0, 15 do
+    for x = 0, 7 do
+      local b = tb[math.floor(y / 8) * 32 + (y % 8) * 4 + math.floor(x / 2) + 1]
+      local ci = x % 2 == 0 and b % 16 or math.floor(b / 16)
+      local v = ints[ci + 1]
+      local o = (y * 8 + x) * 4 + 1
+      pixels[o] = math.floor((v % 32) * 255 / 31 + 0.5)
+      pixels[o + 1] = math.floor((math.floor(v / 32) % 32) * 255 / 31 + 0.5)
+      pixels[o + 2] = math.floor((math.floor(v / 1024) % 32) * 255 / 31 + 0.5)
+      pixels[o + 3] = ci == 0 and 0 or 255
+    end
+  end
+  local png = assert(encode_png(pixels, 8, 16), "battle_anim_extract: level-up streak PNG failed")
+  local stem = "tags/LEVEL_UP_VERTICAL"
+  cache:write(root .. "/" .. stem .. ".png", png)
+  local unpackBytes = table.unpack or unpack
+  cache:write(root .. "/" .. stem .. ".4bpp", string.char(unpackBytes(tb)))
+  cache:write(root .. "/" .. stem .. ".gbapal", string.char(unpackBytes(pb)))
+  return {version = 1, tag = "LEVEL_UP_VERTICAL", game = game, w = 8, h = 16,
+    count = 18, eva = 12, evb = 6, priority = 1, subpriority = 0,
+    file = stem .. ".png", raw = stem .. ".4bpp", palette = stem .. ".gbapal",
+    pal = ints, gfxOffset = offsets.gfx, palOffset = offsets.pal}
+end
+
+function BattleAnimExtract.extractLevelUpVertical(rom, cache, cacheRoot, game)
+  return extract_level_up_vertical(rom, cache,
+    (cacheRoot or "data/generated/gba") .. "/" .. BattleAnimExtract.CACHE_SUB, game)
 end
 
 local function raw_at(rom, off, n)
@@ -915,7 +948,8 @@ local function extract_stat_mask(rom, cache, root)
   if not tiles then return nil end
   local out = { files = {}, pals = {} }
   for k = 1, 8 do
-    local pb = lz_at(rom, anim.stat_mask_pal + (k - 1) * 0x20 + 0x08000000)
+    local palOff = anim.stat_mask_pals and anim.stat_mask_pals[k] or (anim.stat_mask_pal + (k - 1) * 0x20)
+    local pb = lz_at(rom, palOff + 0x08000000)
     if not pb then return nil end
     local pal = decode_palette(pb)
     local row = {}
@@ -1022,6 +1056,23 @@ local GENERIC = {
 function BattleAnimExtract.ready(cache, cacheRoot)
   local root = (cacheRoot or "data/generated/gba") .. "/" .. BattleAnimExtract.CACHE_SUB
   local path = root .. "/pack.lua"
+  if LEVEL_UP_VERTICAL[Versions.active()] then
+    local source = cache and cache.read and cache:read(path)
+    if type(source) ~= "string" then return false end
+    local fn = loadstring and loadstring(source, "@" .. path) or load(source, "@" .. path, "t", {})
+    if not fn then return false end
+    if setfenv then setfenv(fn, {}) end
+    local ok, pack = pcall(fn)
+    local spec = ok and type(pack) == "table" and pack.levelUpVertical
+    if type(spec) ~= "table" or spec.version ~= 1 or spec.game ~= Versions.active() then return false end
+    local tag = pack.tags and pack.tags.LEVEL_UP_VERTICAL
+    if type(tag) ~= "table" or tag.w ~= 8 or tag.h ~= 16 then return false end
+    for _, file in ipairs({"tags/LEVEL_UP_VERTICAL.png", "tags/LEVEL_UP_VERTICAL.4bpp", "tags/LEVEL_UP_VERTICAL.gbapal"}) do
+      if not (cache.exists and cache:exists(root .. "/" .. file))
+          and not cache:read(root .. "/" .. file) then return false end
+    end
+    return true
+  end
   if cache and cache.exists and cache:exists(path) then return true end
   if cache and cache.read  and cache:read(path)   then return true end
   return false
@@ -1034,6 +1085,11 @@ end
 function BattleAnimExtract.run(rom, cache, opts)
   opts      = opts or {}
   local root = (opts.cacheRoot or "data/generated/gba") .. "/" .. BattleAnimExtract.CACHE_SUB
+  refresh_config()
+  local strict = opts.strict == true
+  unresolved = strict and {} or nil
+  local failures = {}
+  local function fail(msg) failures[#failures + 1] = msg end
 
   -- Skip if already extracted and not forced
   if not opts.force and BattleAnimExtract.ready(cache, opts.cacheRoot or "data/generated/gba") then
@@ -1047,6 +1103,9 @@ function BattleAnimExtract.run(rom, cache, opts)
   end
 
   local anim = Versions.BATTLE_ANIMS
+  if strict and not (rom and anim and anim.moves_table) then
+    error("battle_anim_extract: no ROM or BATTLE_ANIMS key table for this game")
+  end
   if not (rom and anim and anim.moves_table) then
     -- No ROM — write generic fallback
     local pack = {
@@ -1089,9 +1148,21 @@ function BattleAnimExtract.run(rom, cache, opts)
         end
       end
     else
+      if strict then fail(string.format("move %d has no script pointer", id)) end
       moves[id] = GENERIC
     end
   end
+
+  -- pokefirered/src/battle_anim.c:234
+  local quietBgmMoves = {}
+  if anim.quiet_bgm_moves then
+    for i = 0, 15 do
+      local id = rom:u16(anim.quiet_bgm_moves + i * 2)
+      if id == 0xFFFF then break end
+      quietBgmMoves[#quietBgmMoves + 1] = id
+    end
+  end
+  if #quietBgmMoves == 0 then error("battle_anim_extract: quiet BGM move list did not decode") end
 
   local tag_count = 0
   local function decode_table(base, count, names)
@@ -1102,6 +1173,7 @@ function BattleAnimExtract.run(rom, cache, opts)
       if off then
         out[idx] = decode_script(rom, off, visited, labels, tagDims)
       else
+        if strict then fail(string.format("table 0x%06X entry %d has no script pointer", base, idx)) end
         out[idx] = GENERIC
       end
       outNames[idx] = names and names[idx] or tostring(idx)
@@ -1214,6 +1286,38 @@ function BattleAnimExtract.run(rom, cache, opts)
   end
 
   local statMask = cache and extract_stat_mask(rom, cache, root) or nil
+  local levelUpVertical = cache and extract_level_up_vertical(rom, cache, root, Versions.active()) or nil
+  if levelUpVertical then
+    tagMeta.LEVEL_UP_VERTICAL = {file = levelUpVertical.file, w = 8, h = 16,
+      frameW = 8, frameH = 16, pal = levelUpVertical.pal}
+    tagPals.LEVEL_UP_VERTICAL = levelUpVertical.pal
+  end
+
+  if strict then
+    local keys = {}
+    for k in pairs(unresolved) do keys[#keys + 1] = k end
+    table.sort(keys)
+    for _, k in ipairs(keys) do fail("unresolved " .. unresolved[k]) end
+    for name in pairs(usedTags) do
+      if not tagMeta[name] then fail("tag " .. name .. " has no sprite sheet") end
+    end
+    for id = 0, (anim.bg_count or 27) - 1 do
+      if not animBgs[id] then fail("anim bg " .. id .. " did not decode") end
+    end
+    for key in pairs(anim.named_bgs or {}) do
+      if not animBgs[key] then fail("named anim bg " .. key .. " did not decode") end
+    end
+    if anim.stat_mask_gfx and not statMask then fail("stat mask did not decode") end
+    if anim.smokescreen_gfx and not tagMeta.TAG_SMOKESCREEN then fail("smokescreen did not decode") end
+    if anim.substitute_pal and not (tagMeta.SUBSTITUTE_DOLL_FRONT and tagMeta.SUBSTITUTE_DOLL_BACK) then
+      fail("substitute doll did not decode")
+    end
+    if anim.muddy_water_pal and not bgPals.MUDDY_WATER then fail("muddy water palette did not decode") end
+    unresolved = nil
+    if #failures > 0 then
+      error("battle_anim_extract: " .. #failures .. " failures:\n  " .. table.concat(failures, "\n  "))
+    end
+  end
 
   -- ── Step 3: Serialize pack ──────────────────────────────────────────
   local pack = {
@@ -1231,6 +1335,8 @@ function BattleAnimExtract.run(rom, cache, opts)
     tagPals      = tagPals,
     bgPals       = bgPals,
     statMask     = statMask,
+    levelUpVertical = levelUpVertical,
+    quietBgmMoves = quietBgmMoves,
   }
 
   local lua = "return " .. serialize(pack) .. "\n"

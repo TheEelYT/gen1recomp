@@ -1,3 +1,9 @@
+local function lazyReq(name)
+  local m = package.loaded[name]
+  if type(m) == "table" then return m end
+  return require(name)
+end
+
 local Stack = require("src.ui.game3.stack")
 
 local UiPass = {}
@@ -18,25 +24,31 @@ local function tryDraw(mod)
 end
 
 function UiPass.drawUi()
-  local Message = require("src.ui.game3.message")
-  local Choice = require("src.ui.game3.choice")
-  local StartMenu = require("src.ui.game3.start_menu")
-  local BagMenu = require("src.ui.game3.bag_menu")
-  local RegionMap = require("src.ui.game3.region_map")
-  local PartyMenu = require("src.ui.game3.party_menu")
-  local Pokedex = require("src.ui.game3.pokedex")
-  local OptionMenu = require("src.ui.game3.option_menu")
-  local SaveMenu = require("src.ui.game3.save_menu")
-  local TrainerCard = require("src.ui.game3.trainer_card")
-  local PcMenu = require("src.ui.game3.pc_menu")
-  local MoneyBox = require("src.ui.game3.money_box")
-  local CoinsBox = require("src.ui.game3.coins_box")
-  local ElevatorWindow = require("src.ui.game3.elevator_window")
+  local Message = lazyReq("src.ui.game3.message")
+  local Choice = lazyReq("src.ui.game3.choice")
+  local StartMenu = lazyReq("src.ui.game3.start_menu")
+  local BagMenu = lazyReq("src.ui.game3.bag_menu")
+  local RegionMap = lazyReq("src.ui.game3.region_map")
+  local PartyMenu = lazyReq("src.ui.game3.party_menu")
+  local Pokedex = lazyReq("src.ui.game3.pokedex")
+  local OptionMenu = lazyReq("src.ui.game3.option_menu")
+  local SaveMenu = lazyReq("src.ui.game3.save_menu")
+  local TrainerCard = lazyReq("src.ui.game3.trainer_card")
+  local PcMenu = lazyReq("src.ui.game3.pc_menu")
+  local MoneyBox = lazyReq("src.ui.game3.money_box")
+  local CoinsBox = lazyReq("src.ui.game3.coins_box")
+  local ElevatorWindow = lazyReq("src.ui.game3.elevator_window")
 
+  local Screens = lazyReq("src.ui.game3.screens")
   local order = Stack.drawOrder()
   if #order > 0 then
     for _, layer in ipairs(order) do
-      tryDraw(layer.mod)
+      local skin = Screens.skin(layer.id)
+      if skin and skin.draw then
+        tryDraw({ draw = function() skin.draw(layer.mod) end })
+      else
+        tryDraw(layer.mod)
+      end
     end
   else
     if StartMenu.isOpen() then tryDraw(StartMenu) end
@@ -63,7 +75,7 @@ function UiPass.drawUi()
   end
 
   -- pokefirered/src/berry_powder.c:113
-  local BerryPowderBox = require("src.ui.game3.berry_powder_box")
+  local BerryPowderBox = lazyReq("src.ui.game3.berry_powder_box")
   if BerryPowderBox.isVisible() then
     tryDraw(BerryPowderBox)
   end
@@ -74,7 +86,7 @@ function UiPass.drawUi()
   end
 
   -- pokefirered/src/map_name_popup.c
-  local okPrev, MapPreviewScreen = pcall(require, "src.ui.game3.map_preview_screen")
+  local okPrev, MapPreviewScreen = pcall(lazyReq, "src.ui.game3.map_preview_screen")
   local previewActive = okPrev and MapPreviewScreen and MapPreviewScreen.isActive
     and MapPreviewScreen.isActive()
   if previewActive then
@@ -87,7 +99,7 @@ function UiPass.drawUi()
     end
   end
 
-  local okPop, MapNamePopup = pcall(require, "src.ui.game3.map_name_popup")
+  local okPop, MapNamePopup = pcall(lazyReq, "src.ui.game3.map_name_popup")
   if okPop and MapNamePopup and MapNamePopup.isActive and MapNamePopup.isActive()
       and not previewActive then
     local top = Stack.top()
@@ -97,13 +109,24 @@ function UiPass.drawUi()
     end
   end
 
-  local okPic, MonPic = pcall(require, "src.ui.game3.mon_pic")
+  local okPic, MonPic = pcall(lazyReq, "src.ui.game3.mon_pic")
   if okPic and MonPic and MonPic.active then
     tryDraw(MonPic)
   end
 
   local top = Stack.top()
   local suppressOverworldDialog = top and top.hideBelow
+
+  local MuseumPic = lazyReq("src.ui.game3.museum_fossil_pic")
+  if MuseumPic.isActive() and not suppressOverworldDialog
+      and not Stack.fullscreen() and not Stack.has("box_storage") and not Stack.has("pc_menu") then
+    tryDraw(MuseumPic)
+  end
+
+  local towerRecords = package.loaded["src.ui.game3.rs.battle_tower_records"]
+  if towerRecords and towerRecords.isVisible() and not suppressOverworldDialog then tryDraw(towerRecords) end
+  local linkRecords = package.loaded["src.ui.game3.rs.link_records"]
+  if linkRecords and linkRecords.isVisible() and not suppressOverworldDialog then tryDraw(linkRecords) end
 
   if Message.isOpen() and not suppressOverworldDialog and not Stack.has("box_storage") and not Stack.has("pc_menu") then
     Message.draw()
@@ -113,32 +136,37 @@ function UiPass.drawUi()
     tryDraw(Choice)
   end
 
-  local okN, Naming = pcall(require, "src.ui.game3.naming")
+  local okN, Naming = pcall(lazyReq, "src.ui.game3.naming")
   if okN and Naming.isOpen and Naming.isOpen() then
     tryDraw(Naming)
   end
 
-  local okTr, BattleTransition = pcall(require, "src.core.game3.battle_transition")
+  local okTr, BattleTransition = pcall(lazyReq, "src.core.game3.battle_transition")
   if okTr and BattleTransition and BattleTransition.draw then
     BattleTransition.draw()
   end
 
-  local okSea, SeagallopUi = pcall(require, "src.ui.game3.seagallop")
+  local okSea, SeagallopUi = pcall(lazyReq, "src.ui.game3.seagallop")
   if okSea and SeagallopUi and SeagallopUi.isActive and SeagallopUi.isActive() then
     tryDraw(SeagallopUi)
   end
 
   -- pokefirered/src/overworld.c:1833
-  local okW, WirelessIcon = pcall(require, "src.ui.game3.wireless_icon")
+  local okW, WirelessIcon = pcall(lazyReq, "src.ui.game3.wireless_icon")
   if okW and WirelessIcon.drawField then tryDraw({ draw = WirelessIcon.drawField }) end
 
-  local okF, Fade = pcall(require, "src.ui.game3.fade")
+  local okF, Fade = pcall(lazyReq, "src.ui.game3.fade")
+  local okN, Naming = pcall(lazyReq, "src.ui.game3.naming")
   local isNamingOpen = okN and Naming.isOpen and Naming.isOpen()
-  local okR, RegionMap = pcall(require, "src.ui.game3.region_map")
+  local okR, RegionMap = pcall(lazyReq, "src.ui.game3.region_map")
   local isRegionMapOpen = okR and RegionMap.isOpen and RegionMap.isOpen()
-  local okEC, EasyChat = pcall(require, "src.ui.game3.easy_chat")
+  local okEC, EasyChat = pcall(lazyReq, "src.ui.game3.easy_chat")
   local isEasyChatOpen = okEC and EasyChat.isOpen and EasyChat.isOpen()
-  if okF and Fade.draw and not isNamingOpen and not isRegionMapOpen and not isEasyChatOpen then
+  local isFullscreen = Stack.fullscreen() or Stack.has("bag") or BagMenu.isOpen()
+  if isFullscreen or isNamingOpen or isRegionMapOpen or isEasyChatOpen then
+    local okRen, Renderer = pcall(lazyReq, "src.render.Renderer")
+    if okRen and Renderer then Renderer.screenVeil = nil end
+  elseif okF and Fade.draw then
     Fade.draw()
   end
 

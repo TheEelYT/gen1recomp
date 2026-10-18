@@ -1,5 +1,6 @@
 -- pokefirered/src/party_menu_specials.c:24, pokefirered/src/learn_move.c:367
 
+local Std = require("src.core.game3.scripting.stdscripts")
 local MoveLearn = require("src.core.game3.move_learn")
 
 local MoveTeach = {}
@@ -33,6 +34,7 @@ local PARTY_SIZE = 6 -- pokefirered/include/constants/global.h:78
 local MAX_MON_MOVES = 4 -- pokefirered/include/constants/global.h:77
 -- pokefirered/include/constants/party_menu.h:62
 local PARTY_MENU_TYPE_MOVE_RELEARNER = 7
+local PARTY_NOTHING_CHOSEN = 0xFF -- pokeemerald/include/constants/party_menu.h:4
 
 MoveTeach.SPECIAL = {
   ChooseMonForMoveRelearner = SPECIAL_CHOOSE_MON_FOR_MOVE_RELEARNER,
@@ -112,16 +114,24 @@ local function takeScreen()
   end
 end
 
-MoveTeach.HANDLERS = {
+MoveTeach.BY_NAME = {
   -- pokefirered/src/party_menu_specials.c:24
-  [SPECIAL_CHOOSE_MON_FOR_MOVE_RELEARNER] = function(ctx, adapters)
+  ChooseMonForMoveRelearner = function(ctx, adapters)
     local Natives = require("src.core.game3.scripting.natives")
     local applied = false
     local function apply()
       if applied then return end
       applied = true
+      local mon, session = chosenMon(ctx)
+      if not mon then
+        -- pokeemerald/src/party_menu.c:6299
+        if require("src.core.game3.profile").family(session) == "rse" then
+          varSet(ctx, VAR_0x8004, PARTY_NOTHING_CHOSEN)
+        end
+        return
+      end
       -- pokefirered/src/party_menu.c:1201
-      varSet(ctx, VAR_0x8005, MoveLearn.countRelearnableMoves((chosenMon(ctx))))
+      varSet(ctx, VAR_0x8005, MoveLearn.countRelearnableMoves(mon))
     end
     local yielded = Natives.choosePartyMon(ctx, adapters, PARTY_MENU_TYPE_MOVE_RELEARNER)
     if not yielded then
@@ -137,9 +147,14 @@ MoveTeach.HANDLERS = {
     return true
   end,
   -- pokefirered/src/learn_move.c:367
-  [SPECIAL_TEACH_MOVE_RELEARNER_MOVE] = function(ctx, adapters)
+  TeachMoveRelearnerMove = function(ctx, adapters)
     local mon, session = chosenMon(ctx)
-    local okUi, MoveRelearner = pcall(require, "src.ui.game3.move_relearner")
+    local screen = "src.ui.game3.move_relearner"
+    if require("src.core.game3.profile").family(session) == "rse" then
+      -- pokeemerald/src/move_relearner.c:373
+      screen = "src.ui.game3.rse.move_relearner"
+    end
+    local okUi, MoveRelearner = pcall(require, screen)
     if not (mon and okUi and type(MoveRelearner) == "table" and MoveRelearner.show) then
       varSet(ctx, VAR_0x8004, 0)
       return false
@@ -162,7 +177,7 @@ MoveTeach.HANDLERS = {
     end)
   end,
   -- pokefirered/src/party_menu_specials.c:44
-  [SPECIAL_SELECT_MOVE_DELETER_MOVE] = function(ctx, adapters)
+  SelectMoveDeleterMove = function(ctx, adapters)
     local mon, session = chosenMon(ctx)
     local okUi, SummaryMenu = pcall(require, "src.ui.game3.summary_menu")
     if not (mon and okUi and type(SummaryMenu) == "table" and SummaryMenu.openMenu) then
@@ -191,14 +206,14 @@ MoveTeach.HANDLERS = {
     end)
   end,
   -- pokefirered/src/party_menu_specials.c:92
-  [SPECIAL_MOVE_DELETER_FORGET_MOVE] = function(ctx)
+  MoveDeleterForgetMove = function(ctx)
     local mon = chosenMon(ctx)
     if not mon then return false end
     MoveLearn.forgetMove(mon, varGet(ctx, VAR_0x8005))
     return false
   end,
   -- pokefirered/src/party_menu_specials.c:61
-  [SPECIAL_BUFFER_MOVE_DELETER_NICKNAME_AND_MOVE] = function(ctx, adapters)
+  BufferMoveDeleterNicknameAndMove = function(ctx, adapters)
     local mon = chosenMon(ctx)
     if not mon then return false end
     local Pokemon = require("src.core.game3.pokemon")
@@ -208,14 +223,14 @@ MoveTeach.HANDLERS = {
     return false
   end,
   -- pokefirered/src/party_menu_specials.c:50
-  [SPECIAL_GET_NUM_MOVES_SELECTED_MON_HAS] = function(ctx)
+  GetNumMovesSelectedMonHas = function(ctx)
     local mon = chosenMon(ctx)
     local Pokemon = require("src.core.game3.pokemon")
     varSet(ctx, VAR_RESULT, mon and Pokemon.moveSlotCount(mon) or 0)
     return false
   end,
   -- pokefirered/src/party_menu.c:5793 ChooseMonForMoveTutor
-  [SPECIAL_CHOOSE_MON_FOR_MOVE_TUTOR] = function(ctx, adapters)
+  ChooseMonForMoveTutor = function(ctx, adapters)
     -- pokefirered/src/party_menu.c:855
     varSet(ctx, VAR_RESULT, 0)
     local tutor = varGet(ctx, VAR_0x8005)
@@ -226,7 +241,11 @@ MoveTeach.HANDLERS = {
       return false
     end
     local auto = nil
-    if tutor >= MoveLearn.TUTOR_MOVE_COUNT then
+    local tutorCount = MoveLearn.TUTOR_MOVE_COUNT
+    if require("src.core.game3.profile").family() == "rse" then
+      tutorCount = MoveLearn.tutorMoveCount()
+    end
+    if tutor >= tutorCount then
       -- pokefirered/src/party_menu.c:5814
       auto = varGet(ctx, VAR_0x8007) + 1
     end
@@ -250,7 +269,7 @@ MoveTeach.HANDLERS = {
     end)
   end,
   -- pokefirered/src/field_specials.c:2219 CapeBrinkGetMoveToTeachLeadPokemon
-  [SPECIAL_CAPE_BRINK_GET_MOVE] = function(ctx, adapters)
+  CapeBrinkGetMoveToTeachLeadPokemon = function(ctx, adapters)
     local session = sessionOf()
     local party = (session and session.party) or {}
     local lead = MoveLearn.leadMonIndex(party)
@@ -273,7 +292,7 @@ MoveTeach.HANDLERS = {
     return false
   end,
   -- pokefirered/src/field_specials.c:2274 HasLearnedAllMovesFromCapeBrinkTutor
-  [SPECIAL_HAS_LEARNED_ALL_CAPE_BRINK] = function(ctx)
+  HasLearnedAllMovesFromCapeBrinkTutor = function(ctx)
     local tutor = varGet(ctx, VAR_0x8005)
     local Flags = flagsMod()
     local store = flagStore()
@@ -290,5 +309,6 @@ MoveTeach.HANDLERS = {
     return false
   end,
 }
+Std.legacyHandlers(MoveTeach)
 
 return MoveTeach

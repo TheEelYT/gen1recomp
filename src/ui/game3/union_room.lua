@@ -1,7 +1,7 @@
 local Stack = require("src.ui.game3.stack")
 local Window = require("src.ui.game3.window")
 local Strings = require("src.core.Strings")
-local RomText = require("src.core.game3.rom_text")
+local RomText = require("src.core.game3.link.family").romText()
 local FrlgFont = require("src.ui.game3.frlg_font")
 local ListMenu = require("src.ui.game3.list_menu")
 
@@ -184,9 +184,14 @@ function UnionRoomScreen.printBoardRow(entry, px, py, colors)
     FrlgFont.draw(RomText.plain("gText_UR_EggTrade"), ox + 68, py, { colors = colors, letterSpacing = 1 })
     return
   end
-  local okS, SummaryChrome = pcall(require, "src.ui.game3.summary_chrome")
-  if okS and SummaryChrome.drawTypeBadge then
-    SummaryChrome.drawTypeBadge(tonumber(entry.wantType) or 0, ox + 68, py + 1)
+  if require("src.core.game3.profile").family() == "rse" then
+    -- pokeemerald/src/union_room.c:4111
+    require("src.ui.game3.rse.bag_chrome").drawMenuInfoIcon((tonumber(entry.wantType) or 0) + 1, ox + 68, py + 1)
+  else
+    local okS, SummaryChrome = pcall(require, "src.ui.game3.summary_chrome")
+    if okS and SummaryChrome.drawTypeBadge then
+      SummaryChrome.drawTypeBadge(tonumber(entry.wantType) or 0, ox + 68, py + 1)
+    end
   end
   local okP, Pokemon = pcall(require, "src.core.game3.pokemon")
   local name = okP and Pokemon.name and Pokemon.name(species) or ""
@@ -409,6 +414,7 @@ UnionRoomScreen.LABELS = RomText.lazy({
 })
 
 function UnionRoomScreen.labelFor(item)
+  if type(item) == "table" and type(item.label) == "string" then return item.label end
   return UnionRoomScreen.LABELS[item and item.key] or ""
 end
 
@@ -424,7 +430,11 @@ UnionRoomScreen.ACTIVITY_LABELS = RomText.lazy({
 
 function UnionRoomScreen.activityLabel(activity)
   local id = (tonumber(activity) or 0) % 0x40
-  return UnionRoomScreen.ACTIVITY_LABELS[id] or ""
+  local label = UnionRoomScreen.ACTIVITY_LABELS[id]
+  if label then return label end
+  local key = RomText.key("sLinkGroupActivityNameTexts", id)
+  if id > 0 and RomText.has(key) then return RomText.plain(key) end
+  return ""
 end
 
 local function draw_frame(tpl)

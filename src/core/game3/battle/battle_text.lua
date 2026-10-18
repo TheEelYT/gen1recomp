@@ -39,11 +39,21 @@ local function monName(ref)
   return require("src.core.game3.battle.state").displayName(ref)
 end
 
+-- A foe's name with the cart's wild/foe word. The US and Japanese rows go
+-- before the name ("Wild ", "やせいの　"); the French, Italian and Spanish
+-- carts write theirs to follow it (" sauvage", " salvaje", " selvatico") and
+-- append it (pret pokeemerald multi-language, src/battle_message.c:4042,
+-- :4649). The German row has the same shape (" (Wild)").
+function BattleText.withMonPrefix(prefix, name)
+  if prefix:sub(1, 1) == " " then return name .. prefix end
+  return prefix .. name
+end
+
 -- src/battle_message.c:1807 HANDLE_NICKNAME_STRING_CASE
 local function withPrefix(fill, ref)
   if isPlayer(ref) then return monName(ref) end
   local prefix = fill.trainer and "sText_FoePkmnPrefix" or "sText_WildPkmnPrefix"
-  return RomText.plain(prefix) .. monName(ref)
+  return BattleText.withMonPrefix(RomText.plain(prefix), monName(ref))
 end
 
 local function moveName(fill, move)
@@ -126,11 +136,45 @@ local RESOLVE = {
   [0x2F] = function(f) return need(f, "trainer2WinText", 0x2F) end,
 }
 
+local function class_name(class)
+  if type(class) == "string" then return class end
+  return RomText.plain(RomText.key("gTrainerClassNames", class))
+end
+
+-- pokeemerald/include/battle_message.h:57
+local RESOLVE_RSE = {}
+for code, fn in pairs(RESOLVE) do
+  if code <= 0x2D then RESOLVE_RSE[code] = fn end
+end
+-- pokeemerald/src/battle_message.c:2631
+RESOLVE_RSE[0x27] = function(f)
+  return RomText.plain(need(f, "lanettePc", 0x27) and "sText_Lanettes" or "sText_Someones")
+end
+RESOLVE_RSE[0x2E] = function(f) return class_name(need(f, "trainer2Class", 0x2E)) end
+RESOLVE_RSE[0x2F] = function(f) return need(f, "trainer2Name", 0x2F) end
+RESOLVE_RSE[0x30] = function(f) return need(f, "trainer2LoseText", 0x30) end
+RESOLVE_RSE[0x31] = function(f) return need(f, "trainer2WinText", 0x31) end
+RESOLVE_RSE[0x32] = function(f) return class_name(need(f, "partnerClass", 0x32)) end
+RESOLVE_RSE[0x33] = function(f) return need(f, "partnerName", 0x33) end
+RESOLVE_RSE[0x34] = function(f) return need(f, "buff3", 0x34) end
+BattleText.RESOLVE_RSE = RESOLVE_RSE
+BattleText.RESOLVE = RESOLVE
+local RsText = require("src.core.game3.rs.battle_text_policy")
+local RESOLVE_RS = RsText.resolvers(RESOLVE, RESOLVE_RSE)
+BattleText.RESOLVE_RS = RESOLVE_RS
+
 function BattleText.context(fill)
   fill = fill or {}
+  local codes = RESOLVE
+  local dialect
+  if RsText.matches() then
+    codes, dialect = RESOLVE_RS, "rs"
+  elseif require("src.core.game3.battle.profile").get().family == "rse" then
+    codes = RESOLVE_RSE
+  end
   local values = setmetatable({}, {
     __index = function(t, code)
-      local resolve = RESOLVE[code]
+      local resolve = codes[code]
       if not resolve then
         error("battle text placeholder code " .. tostring(code) .. " is not a B_TXT id", 0)
       end
@@ -139,7 +183,7 @@ function BattleText.context(fill)
       return v
     end,
   })
-  return { battle = values, stringVars = fill.stringVars, playerName = fill.playerName,
+  return { battle = values, dialect = dialect, stringVars = fill.stringVars, playerName = fill.playerName,
     rivalName = fill.rivalName, maxWidth = fill.maxWidth }
 end
 
@@ -147,30 +191,40 @@ end
 local function special(id, fill)
   if id == 0 then
     if fill.trainer then
+      -- pokeemerald/src/battle_message.c:1991
+      if fill.towerLinkMulti then return "sText_TwoTrainersWantToBattle" end
       if fill.link then
         if fill.multi then return "sText_TwoLinkTrainersWantToBattle" end
         return fill.unionRoom and "sText_Trainer1WantsToBattle" or "sText_LinkTrainerWantsToBattle"
       end
+      -- pokeemerald/src/battle_message.c:2016
+      if fill.twoOpponents then return "sText_TwoTrainersWantToBattle" end
       return "sText_Trainer1WantsToBattle"
     end
     if fill.ghost then
       return fill.ghostUnveiled and "sText_TheGhostAppeared" or "sText_GhostAppearedCantId"
     elseif fill.legendary then
-      return "sText_WildPkmnAppeared2"
+      return require("src.core.game3.battle.profile").get().strings.legendaryIntro
     elseif fill.double then
       return "sText_TwoWildPkmnAppeared"
-    elseif fill.oldMan then
+    elseif fill.oldMan or fill.wally then
       return "sText_WildPkmnAppearedPause"
     end
     return "sText_WildPkmnAppeared"
   elseif id == 1 then
     if isPlayer(need(fill, "side", 0)) then
       if fill.double then
+        -- pokeemerald/src/battle_message.c:2039
+        if fill.inGamePartner then return "sText_InGamePartnerSentOutZGoN" end
         return fill.multi and "sText_LinkPartnerSentOutPkmnGoPkmn" or "sText_GoTwoPkmn"
       end
       return "sText_GoPkmn"
     end
     if fill.double then
+      -- pokeemerald/src/battle_message.c:2057
+      if fill.twoOpponents and not fill.link then return "sText_TwoTrainersSentPkmn" end
+      -- pokeemerald/src/battle_message.c:2059
+      if fill.towerLinkMulti then return "sText_TwoTrainersSentPkmn" end
       if fill.multi then return "sText_TwoLinkTrainersSentOutPkmn" end
       return fill.link and "sText_LinkTrainerSentOutTwoPkmn" or "sText_Trainer1SentOutTwoPkmn"
     end
@@ -196,10 +250,16 @@ local function special(id, fill)
       if scale == 2 then return "sText_GoForItPkmn" end
       return "sText_YourFoesWeakGetEmPkmn"
     end
+    if fill.towerLinkMulti then
+      -- pokeemerald/src/battle_message.c:2122
+      return fill.switchBattler == 1 and "sText_Trainer1SentOutPkmn2" or "sText_Trainer2SentOutPkmn"
+    end
     if fill.link then
       if fill.multi then return "sText_LinkTrainerMultiSentOutPkmn" end
       return fill.unionRoom and "sText_Trainer1SentOutPkmn2" or "sText_LinkTrainerSentOutPkmn2"
     end
+    -- pokeemerald/src/battle_message.c:2141
+    if fill.twoOpponents and fill.switchBattler == 3 then return "sText_Trainer2SentOutPkmn" end
     return "sText_Trainer1SentOutPkmn2"
   elseif id == 4 then
     local copy = {}
@@ -212,6 +272,10 @@ local function special(id, fill)
       if outcome == "lost" or outcome == "drew" then return "sText_GotAwaySafely" end
       if fill.multi then return "sText_TwoWildFled" end
       return fill.unionRoom and "sText_Trainer1Fled" or "sText_WildFled"
+    end
+    if fill.towerLinkMulti and outcome == "won" then
+      -- pokeemerald/src/battle_message.c:2190
+      return "sText_TwoInGameTrainersDefeated"
     end
     if fill.multi then
       return ({ won = "sText_TwoLinkTrainersDefeated", lost = "sText_PlayerLostToTwo",

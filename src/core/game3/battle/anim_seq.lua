@@ -222,6 +222,8 @@ local function is_miss(ev)
   return ev.id ~= nil and MISS_IDS[ev.id] == true
 end
 
+local ICON_FLUSH_BEFORE = { hit = true, hp = true, faint = true, switch_out = true, switch = true, ["end"] = true }
+
 function AnimSeq.buildSteps(events, meta)
   meta = meta or {}
   local steps = {}
@@ -232,10 +234,18 @@ function AnimSeq.buildSteps(events, meta)
   local lastMsgId = nil
   local deferredIn = nil
   local prevKind = nil
+  local pendingIcon = {}
+  local function flush_icons()
+    for j = 1, #pendingIcon do
+      steps[#steps + 1] = pendingIcon[j]
+      pendingIcon[j] = nil
+    end
+  end
   local n = #events
   for i = 1, n do
     local ev = events[i]
     local k = ev.kind
+    if #pendingIcon > 0 and ICON_FLUSH_BEFORE[k] then flush_icons() end
     if k == "msg" then
       if is_miss(ev) and not lastMove and prevKind == "msg" then
         -- pokefirered/data/battle_scripts_1.s:279
@@ -249,6 +259,7 @@ function AnimSeq.buildSteps(events, meta)
       end
       add("msg", { text = ev.text, wait = ev.wait, id = ev.id })
       lastMsgId = ev.id
+      flush_icons()
       if deferredIn then
         add("switch_in", deferredIn)
         deferredIn = nil
@@ -315,11 +326,19 @@ function AnimSeq.buildSteps(events, meta)
       else
         add("switch_in", d)
       end
+    elseif k == "status_apply" then
+      -- pokefirered/data/battle_scripts_1.s:3835
+      pendingIcon[#pendingIcon + 1] = { kind = "status_apply",
+        data = { side = ev.side, battler = ev_id(ev, "battler", "side"), status = ev.status } }
+    elseif k == "status_clear" then
+      pendingIcon[#pendingIcon + 1] = { kind = "status_clear",
+        data = { side = ev.side, battler = ev_id(ev, "battler", "side") } }
     elseif k == "end" then
       add("end", { result = ev.result, reason = ev.reason })
     end
     prevKind = k
   end
+  flush_icons()
   if deferredIn then add("switch_in", deferredIn) end
   return steps
 end
@@ -660,6 +679,9 @@ local function run_switch_in(d)
       p.displayHp = tonumber(d.hp) or tonumber(b.mon.hp) or 0
       p.displayMaxHp = tonumber(b.mon.maxHp) or 1
       p.displayLevel = tonumber(b.mon.level) or 1
+      p.displayStatus = b.status or (b.mon and (b.mon.status or b.mon.status1)) or false
+      -- pokefirered/src/battle_interface.c:1799
+      p.displayExp = require("src.core.game3.battle.experience").progress(b.mon).progressPercent or 0
     end
   end
   local SwitchSeq = require("src.core.game3.battle.switch_seq")
@@ -733,6 +755,20 @@ local function run_step(step)
     launch_done()
     return
   end
+  if kind == "status_apply" then
+    local id = ev_id(d, "battler", "side")
+    local p = Anim.present(id)
+    if p then p.displayStatus = d.status end
+    advance()
+    return
+  end
+  if kind == "status_clear" then
+    local id = ev_id(d, "battler", "side")
+    local p = Anim.present(id)
+    if p then p.displayStatus = false end
+    advance()
+    return
+  end
   if kind == "faint" then
     local id = ev_id(d, "battler", "side") or 1
     local p = Anim.present(id)
@@ -742,7 +778,11 @@ local function run_step(step)
     end
     wait_anim()
     Anim.faintMon(id, {
-      onComplete = function() if AnimSeq._waiting then advance() end end,
+      onComplete = function()
+        -- pokefirered/data/battle_scripts_1.s:2814
+        if p then p.displayStatus = false end
+        if AnimSeq._waiting then advance() end
+      end,
     })
     launch_done()
     return

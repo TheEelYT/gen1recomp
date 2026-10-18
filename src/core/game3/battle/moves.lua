@@ -8,6 +8,17 @@ local Moves = {}
 
 Moves._rom = nil -- { [id] = row }
 Moves._romLoaded = false
+Moves._linkRows = nil
+
+function Moves.romRows()
+  Moves.romReady()
+  return Moves._rom
+end
+
+-- pokeemerald/src/battle_controllers.c:397
+function Moves.setLinkRows(rows)
+  Moves._linkRows = type(rows) == "table" and rows or nil
+end
 
 Moves.BY_NUM = {}
 Moves._numByName = nil
@@ -37,8 +48,13 @@ function Moves.loadRomPack(cache)
   Moves._romLoaded = true
   local root = (Extract.CACHE_ROOT or "data/generated/gba") .. "/pokemon/battle_moves.lua"
   cache = cache or require("src.core.game3.dataset").cache()
-  local src = assert(cache:read(root), "pokemon/battle_moves.lua is not in the cache")
-  local pack = assert(load(src, "@" .. root, "t", {}))()
+  local chunk = Moves._romChunk
+  if not (chunk and Moves._romChunkCache == cache) then
+    local src = assert(cache:read(root), "pokemon/battle_moves.lua is not in the cache")
+    chunk = assert(load(src, "@" .. root, "t", {}))
+    Moves._romChunk, Moves._romChunkCache = chunk, cache
+  end
+  local pack = chunk()
   Moves._rom = assert(pack and pack.moves, "pokemon/battle_moves.lua has no moves")
   Moves._numByName = nil
   build_names()
@@ -117,7 +133,7 @@ end
 local function from_rom(numId)
   Moves.romReady()
   if not Moves._rom then return nil end
-  local row = Moves._rom[numId]
+  local row = (Moves._linkRows and Moves._linkRows[numId]) or Moves._rom[numId]
   if not row then return nil end
   local cat = Types.isPhysical(row.type) and "physical" or "special"
   if (row.power or 0) == 0 then cat = "status" end

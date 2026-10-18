@@ -2,6 +2,7 @@
 
 local Extract = require("src.import.gba.extract_island1")
 local BagChromeExtract = require("src.import.gba.bag_chrome_extract")
+local CacheBlob = require("src.import.CacheBlob")
 
 local BagChrome = {}
 
@@ -48,10 +49,10 @@ local function read_bytes(rel)
     if type(d) == "string" and #d > 0 then return d end
   end
   if love and love.filesystem and love.filesystem.read then
-    local d = love.filesystem.read(rel)
+    local d = CacheBlob.readFs(rel)
     if type(d) == "string" and #d > 0 then return d end
     local alt = "data/generated/gba/" .. (rel:gsub("^data/generated/gba/", ""))
-    d = love.filesystem.read(alt)
+    d = CacheBlob.readFs(alt)
     if type(d) == "string" and #d > 0 then return d end
   end
   local candidates = {
@@ -61,7 +62,7 @@ local function read_bytes(rel)
   for _, p in ipairs(candidates) do
     local f = io.open(p, "rb")
     if f then
-      local d = f:read("*a")
+      local d = CacheBlob.decode(p, f:read("*a"))
       f:close()
       if d and #d > 0 then return d end
     end
@@ -236,6 +237,15 @@ function BagChrome.drawDescSelected()
   if not img then return false end
   love.graphics.setColor(1, 1, 1, 1)
   love.graphics.draw(img, 0, 112)
+  return true
+end
+
+-- src/item_menu.c:720
+function BagChrome.drawSelectButton(x, y)
+  local img = named_image("select_button", 24, 16)
+  if not img then error("BagChrome: select_button.rgba is not in the cache", 0) end
+  love.graphics.setColor(1, 1, 1, 1)
+  love.graphics.draw(img, x, y)
   return true
 end
 

@@ -183,6 +183,20 @@ function Catching.tryCatch(itemId, foeBattler, st, session, rng)
   if st and (st.oldManTutorial or st.pokedude) then
     return true, 4
   end
+  -- pokeemerald/src/battle_script_commands.c:9921
+  if st and st.kinds and st.kinds.tutorial == "wally" then return true, 4 end
+  -- pokeemerald/src/battle_script_commands.c:9995
+  if st and not st.safari then
+    local ballId = ItemsData.toNumericId(itemId) or tonumber(itemId) or 4
+    local r = st.battleResults or { catchAttempts = {} }
+    st.battleResults = r
+    r.lastUsedItem = ballId
+    if ballId == 1 then
+      r.usedMasterBall = true
+    elseif (r.catchAttempts[ballId - 1] or 0) < 255 then
+      r.catchAttempts[ballId - 1] = (r.catchAttempts[ballId - 1] or 0) + 1
+    end
+  end
   local caught, shakes
   if ModRuntime.wantsHook("catch.rate") then
     local G3 = require("src.mods.Gen3Compat")
@@ -233,30 +247,7 @@ end
 
 -- pokefirered/src/new_game.c:56
 function Catching.playerSecretId(session)
-  if type(session) ~= "table" then return 0 end
-  local sec = tonumber(session.secretId or session.otSecretId)
-  local tid = tonumber(session.trainerId or session.id or session.playerId)
-  if not sec and tid then
-    local function scan(list)
-      for _, m in pairs(list or {}) do
-        local ms = (type(m) == "table") and tonumber(m.otSecretId) or nil
-        if ms and tonumber(m.otId) == tid then return ms end
-      end
-      return nil
-    end
-    sec = scan(session.party)
-    local storage = session.storage
-    for _, box in pairs((not sec) and storage and storage.boxes or {}) do
-      sec = sec or scan(type(box) == "table" and box.mons or nil)
-    end
-  end
-  if not sec then
-    local okR, Rng = pcall(require, "src.core.game3.rng")
-    sec = (okR and Rng and Rng.Random and Rng.Random()) or math.random(0, 0xFFFF)
-  end
-  sec = math.floor(sec) % 0x10000
-  session.secretId = sec
-  return sec
+  return Pokemon.playerSecretId(session)
 end
 
 -- pokefirered/src/battle_script_commands.c:9617

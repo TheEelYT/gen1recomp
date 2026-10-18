@@ -1222,7 +1222,8 @@ local function monRecord(base, id)
   local entry = national and t.dex and t.dex[national]
   if entry then
     record.dexEntry = { kind = entry.category or "", height = entry.height or 0,
-                        weight = entry.weight or 0 }
+                        weight = entry.weight or 0, heightM = entry.heightM,
+                        weightKg = entry.weightKg }
   end
   return record
 end
@@ -1346,6 +1347,8 @@ local function writeMon(target, t, num, value)
       category = value.dexEntry.kind or old.category,
       height = value.dexEntry.height or old.height,
       weight = value.dexEntry.weight or old.weight,
+      heightM = value.dexEntry.heightM or old.heightM,
+      weightKg = value.dexEntry.weightKg or old.weightKg,
     }
   end
   local sprites = sideTable(target, "spriteOverrides")
@@ -1809,6 +1812,10 @@ R.pokemon = {
     genderRatio = f.opt(f.int(0, 255)),
     -- the two wild held items, in the ROM's own order (rare then common)
     items = f.opt(f.list(f.id("items"))),
+    dexEntry = f.opt(f.rec{ kind = f.opt(f.str), text = f.opt(f.str),
+                            text2 = f.opt(f.str), heightM = f.opt(f.num),
+                            weightKg = f.opt(f.num), height = f.opt(f.int(0)),
+                            weight = f.opt(f.int(0)) }),
     spriteFront = f.path, spriteBack = f.path, picSize = f.int(1, 7),
     source = f.opt(f.str),
     cry = f.opt(f.id("cries")), trueColor = f.opt(f.bool),
@@ -1844,7 +1851,8 @@ R.pokemon = {
                                item = f.opt(f.id("items")),
                                param = f.opt(f.int(0)) }),
     dexEntry = f.opt(f.rec{ kind = f.str, height = f.int(0),
-                            weight = f.int(0) }),
+                            weight = f.int(0), heightM = f.opt(f.num),
+                            weightKg = f.opt(f.num) }),
     spriteFront = f.path, spriteBack = f.path,
     trueColor = f.opt(f.bool),
   },
@@ -1852,10 +1860,35 @@ R.pokemon = {
     .. '{ baseStats = { specialAttack = 120 } })',
 }
 
+-- macros/data.asm:23
+local GEN2_MOVE_RAW = { accuracy = "accuracyRaw", effectChance = "effectChanceRaw" }
+
+local function movesGen2Write(target, registry)
+  local tombstones = {}
+  for id in pairs(registry.ops) do
+    local value = registry:get(id)
+    if value == nil then
+      tombstones[#tombstones + 1] = id
+    else
+      local record = {}
+      for key, v in pairs(value) do record[key] = v end
+      for percentKey, rawKey in pairs(GEN2_MOVE_RAW) do
+        local percent, raw = record[percentKey], record[rawKey]
+        if percent ~= nil
+            and (raw == nil or math.floor(raw * 100 / 255 + 0.5) ~= percent) then
+          record[rawKey] = math.floor(percent * 255 / 100)
+        end
+      end
+      target[id] = record
+    end
+  end
+  for _, id in ipairs(tombstones) do target[id] = nil end
+end
+
 R.moves = {
   semantics = "record", target = "moves",
   gen2BaseAt = movesGen2BaseAt, gen2BaseIds = movesGen2BaseIds,
-  gen2ReservedIds = movesGen2ReservedIds,
+  gen2ReservedIds = movesGen2ReservedIds, gen2Write = movesGen2Write,
   fields = {
     id = f.str, name = f.str,
     index = f.opt(f.int(0, 255)),
@@ -1928,6 +1961,7 @@ R.maps = {
     width = f.int(1), height = f.int(1),
     blocks = f.list(f.int(0, 255)),
     borderBlock = f.opt(f.int(0, 255)),
+    outdoor = f.opt(f.bool),
     -- A named SGB palette, which wins over the field.palettes cascade
     -- (OverworldController.lua:506 reads map.def.palette first).  Deliberately
     -- a plain string rather than f.id("palettes"): the ROM-free fixture base

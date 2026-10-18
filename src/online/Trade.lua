@@ -349,8 +349,9 @@ local function sideFor(handle, ref, packed, record, warnings)
   end)
 end
 
--- pokefirered/include/constants/global.h:11
-local VERSION_FIRE_RED, VERSION_LEAF_GREEN = 4, 5
+local function family3()
+  return require("src.core.game3.link.family")
+end
 
 local ONLY_MON3 = "that's your only POKéMON for battle"
 
@@ -366,6 +367,7 @@ end
 
 local function nationalProxy(save)
   return {
+    version = type(save.version) == "string" and save.version or nil,
     dex = save.dex,
     national_dex_unlocked = save.national_dex_unlocked,
     store = { flags = type(save.flags) == "table" and save.flags or {},
@@ -383,20 +385,44 @@ local function isEgg3(mon)
   return require("src.core.game3.pokemon").isEgg(mon) == true
 end
 
-local function partnerInfo3(handle)
-  return {
-    version = handle.version == "leafgreen" and VERSION_LEAF_GREEN
-      or VERSION_FIRE_RED,
-    progressFlags = national3(handle.save) and 1 or 0,
-  }
+local function versionOf3(handle)
+  local Family = family3()
+  if Family.isGame3(handle.version) then return handle.version end
+  return Family.activeVersion()
 end
 
--- pokefirered/src/trade.c:2745
+-- pokeemerald/src/link.c:324
+local function partnerInfo3(handle)
+  local Family = family3()
+  local version = versionOf3(handle)
+  local player = Family.localLinkPlayer(handle.save, version)
+  player.version = Family.cartVersion(version)
+  return player
+end
+
+Trade.partnerInfo3 = partnerInfo3
+
+-- pokeemerald/src/trade.c:2453
+function Trade.crossVersionGate3(handle, partner)
+  local Family = family3()
+  partner = type(partner) == "table" and partner or {}
+  local mine = partnerInfo3(handle)
+  if Family.familyForCart(partner.version) == nil
+      or Family.familyForCart(partner.version) == mine.family then
+    return nil
+  end
+  local code = Family.gameProgressForLinkTrade(mine.family, mine, partner)
+  if code == Family.TRADE.PLAYER_NOT_READY then return "you can't trade with that game yet" end
+  if code == Family.TRADE.PARTNER_NOT_READY then return "the other game can't trade with you yet" end
+  return nil
+end
+
+-- pokeemerald/src/trade.c:2389
 local function refusal3(handle, ref, partner)
   local NTrade = require("src.core.game3.scripting.natives_trade")
   local party = handle.party or {}
   partner = type(partner) == "table" and partner or {}
-  local code = NTrade.canTradeSelectedMon(party, ref.index - 1, {
+  local code = family3().canTradeSelectedMon(versionOf3(handle), party, ref.index - 1, {
     partyCount = #party,
     nationalDex = national3(handle.save),
     partner = {
@@ -440,12 +466,15 @@ local function questLogEvent3(save, key, args)
 end
 
 -- pokefirered/src/trade_scene.c:1054
-local function sideFor3(handle, ref, incoming, partnerMail, warnings, partnerName)
+local function sideFor3(handle, ref, incoming, partnerMail, warnings, partnerName, partnerVersion, partnerRibbons)
   return withData(handle, function(data)
     local NTrade = require("src.core.game3.scripting.natives_trade")
     local Evolution = require("src.core.game3.evolution")
     local Pokemon = data.Pokemon or require("src.core.game3.pokemon")
     local save = deepCopy(handle.save)
+    if family3().isRubySapphire(versionOf3(handle)) then
+      require("src.core.game3.link.rs").mergeGiftRibbons(save, partnerRibbons)
+    end
     save.party = type(save.party) == "table" and save.party or {}
     local sent = TeamPick.monAt(handle, ref)
     local received = deepCopy(incoming)
@@ -463,12 +492,17 @@ local function sideFor3(handle, ref, incoming, partnerMail, warnings, partnerNam
     local swapped = NTrade.tradeMons(save, ref.index - 1, received)
     NTrade.clearPartnerMail()
     if not swapped then return { error = "that's not in the party" } end
+    -- pokeruby/trade.c:4137
+    local Family = family3()
+    local unlockNational = Family.isRubySapphire(versionOf3(handle))
+      and Family.nativeLinkField2(partnerVersion) == 0x8000
     -- pokefirered/src/trade_scene.c:2599
     local qlKey, qlArgs = NTrade.noteLinkTrade(save, sent, incoming, partnerName, false)
     if qlKey then questLogEvent3(save, qlKey, qlArgs) end
     local egg = isEgg3(received)
     -- pokefirered/src/trade_scene.c:1036
     if egg then save.dex = dexBefore end
+    if unlockNational then require("src.core.game3.dex").enableNational(save) end
     local shown = deepCopy(received)
     local record = save.party[ref.index]
     local species = { tonumber(record.species) }
@@ -506,15 +540,19 @@ local function sideFor3(handle, ref, incoming, partnerMail, warnings, partnerNam
 end
 
 local function plan3(from, to, refA, refB, monA, monB)
-  local why = refusal3(from, refA, partnerInfo3(to))
+  local why = Trade.crossVersionGate3(from, partnerInfo3(to))
+    or Trade.crossVersionGate3(to, partnerInfo3(from))
+    or refusal3(from, refA, partnerInfo3(to))
     or refusal3(to, refB, partnerInfo3(from))
   if why then return nil, why end
   local mailA, mailB = mailOf3(from.save, monA), mailOf3(to.save, monB)
   local warnings = {}
-  local sideB, whyB = sideFor3(to, refB, monA, mailA, warnings, from.save and from.save.name)
+  local sideB, whyB = sideFor3(to, refB, monA, mailA, warnings, from.save and from.save.name,
+    partnerInfo3(from).version, from.save and from.save.giftRibbons)
   if not sideB then return nil, tostring(whyB) end
   if sideB.error then return nil, sideB.error end
-  local sideA, whyA = sideFor3(from, refA, monB, mailB, warnings, to.save and to.save.name)
+  local sideA, whyA = sideFor3(from, refA, monB, mailB, warnings, to.save and to.save.name,
+    partnerInfo3(to).version, to.save and to.save.giftRibbons)
   if not sideA then return nil, tostring(whyA) end
   if sideA.error then return nil, sideA.error end
   sideA.role, sideB.role = "a", "b"
@@ -592,7 +630,8 @@ function Trade.planIncoming(req)
     if why then return nil, why end
     local warnings3 = {}
     local side3, why3 = sideFor3(to, ref, req.record, req.mail, warnings3,
-      req.partnerName)
+      req.partnerName, type(req.partner) == "table" and req.partner.version,
+      type(req.partner) == "table" and req.partner.giftRibbons)
     if not side3 then return nil, tostring(why3) end
     if side3.error then return nil, side3.error end
     side3.role = "a"
@@ -935,6 +974,13 @@ function Trade.pendingSentAt(savePath)
   for _, e in ipairs(readJournal(Trade.journalPath(savePath))) do
     if type(e) == "table" and type(e.sent) == "table" then out[#out + 1] = e.sent end
   end
+  local xpath = type(savePath) == "string" and savePath ~= ""
+    and (savePath:gsub("%.lua$", "")) .. "_xtrade.lua" or nil
+  for _, e in ipairs(readJournal(xpath)) do
+    if type(e) == "table" and type(e.out) == "table" and type(e.out.record) == "table" then
+      out[#out + 1] = e.out.record
+    end
+  end
   return out
 end
 
@@ -993,7 +1039,9 @@ function Trade.applyPending(item)
     if handle.generation == 3 then
       local record, unpackWhy = Protocol.unpackMon3(data, e.mon, { strict = true })
       if not record then return { error = unpackWhy or "unknown POKéMON" } end
-      side, sideWhy = sideFor3(handle, ref, record, e.mail, warnings, e.name)
+      side, sideWhy = sideFor3(handle, ref, record, e.mail, warnings, e.name,
+        type(e.partner) == "table" and e.partner.version,
+        type(e.partner) == "table" and e.partner.giftRibbons)
     else
       local record = type(e.record) == "table" and deepCopy(e.record) or nil
       side, sideWhy = sideFor(handle, ref, e.mon, record, warnings)
@@ -1314,6 +1362,7 @@ function Remote:update()
     end
   end
   if not self.phase and session.stage == "done" then self:_confirmBarrier() end
+  if session.stage == "declined" then session.stage = "cancelled" end
   if (self.link.closed or self.link.paired == false) and self:_open() then
     self:_cancel(LEFT)
   end
@@ -1338,6 +1387,7 @@ end
 function Remote:confirm(ok)
   self:_send(self.session:confirm(ok and true or false))
   if not self.phase and self.session.stage == "done" then self:_confirmBarrier() end
+  if self.session.stage == "declined" then self.session.stage = "cancelled" end
   return true
 end
 
@@ -1404,7 +1454,7 @@ local function saveGender3(save)
 end
 
 local function saveTrainerId3(save)
-  return tonumber(type(save) == "table" and save.trainerId) or 0
+  return family3().trainerId(save)
 end
 
 function Remote3:_send(msg)
@@ -1460,8 +1510,10 @@ function Remote3:start()
   local save = self.handle.save
   local game = { data = { generation = 3, gen3Inputs = inputs },
                  save = { player = { name = saveName3(save) } } }
+  local info = partnerInfo3(self.handle)
   local player = { name = saveName3(save), trainerId = saveTrainerId3(save),
-                   gender = saveGender3(save) }
+                   gender = saveGender3(save), version = versionOf3(self.handle),
+                   session = save, progressFlags = info.progressFlags }
   local hello = Game3Link.hello(game, Game3Link.LINKTYPE.TRADE, player)
   self.transport = self.opts.transport
     or require("src.core.game3.link.relay_transport").new(self.link)
@@ -1484,6 +1536,7 @@ function Remote3:_sendParty()
     gender = saveGender3(handle.save),
     version = partnerInfo3(handle).version,
     progressFlags = partnerInfo3(handle).progressFlags,
+    giftRibbons = require("src.core.game3.link.rs").giftRibbonBlock(handle.save),
   })
 end
 
@@ -1502,6 +1555,7 @@ function Remote3:_theirParty(msg)
     out[i] = mon
   end
   self._theirPacked = list
+  require("src.core.game3.link.rs").mergeGiftRibbons(self.handle.save, msg.giftRibbons)
   self.session.theirParty = out
   self.session.peerName = type(msg.name) == "string" and msg.name or self.session.peerName
   self.partner = {
@@ -1509,7 +1563,13 @@ function Remote3:_theirParty(msg)
     progressFlags = tonumber(msg.progressFlags) or 0,
     name = msg.name,
     trainerId = tonumber(msg.trainerId) or 0,
+    giftRibbons = type(msg.giftRibbons) == "table" and deepCopy(msg.giftRibbons) or nil,
   }
+  local gate = Trade.crossVersionGate3(self.handle, self.partner)
+  if gate then
+    self:_cmd(lt().LINKCMD.BOTH_CANCEL_TRADE, 0)
+    return self:_cancel(gate)
+  end
   if self.phase == "waitParty" then self.phase = "picking" end
 end
 
@@ -1556,6 +1616,14 @@ end
 function Remote3:_partnerMonValid()
   local mon = self.session.theirParty[self.session.theirPick or 0]
   if type(mon) ~= "table" then return false end
+  local Family, version = family3(), versionOf3(self.handle)
+  if Family.isRubySapphire(version) then
+    local selected = tonumber(self.session.myPick)
+    if not selected then return false end
+    return Family.canTradeSelectedMon(version, self.handle.party or {}, selected - 1, {
+      partyCount = #(self.handle.party or {}),
+    }) == require("src.core.game3.scripting.natives_trade").CAN_TRADE_MON
+  end
   local species = tonumber(mon.species) or 0
   if (species == 151 or species == 410) and mon.fatefulEncounter == false then
     return false

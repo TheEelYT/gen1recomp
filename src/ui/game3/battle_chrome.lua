@@ -2,6 +2,7 @@
 
 local Extract = require("src.import.gba.extract_island1")
 local BattleChromeExtract = require("src.import.gba.battle_chrome_extract")
+local CacheBlob = require("src.import.CacheBlob")
 
 local BattleChrome = {}
 
@@ -68,10 +69,10 @@ local function read_bytes(rel)
     if type(d) == "string" and #d > 0 then return d end
   end
   if love and love.filesystem and love.filesystem.read then
-    local d = love.filesystem.read(rel)
+    local d = CacheBlob.readFs(rel)
     if type(d) == "string" and #d > 0 then return d end
     local alt = "data/generated/gba/" .. (rel:gsub("^data/generated/gba/", ""))
-    d = love.filesystem.read(alt)
+    d = CacheBlob.readFs(alt)
     if type(d) == "string" and #d > 0 then return d end
   end
   local candidates = {
@@ -81,7 +82,7 @@ local function read_bytes(rel)
   for _, p in ipairs(candidates) do
     local f = io.open(p, "rb")
     if f then
-      local d = f:read("*a")
+      local d = CacheBlob.decode(p, f:read("*a"))
       f:close()
       if d and #d > 0 then return d end
     end
@@ -130,6 +131,7 @@ function BattleChrome.terrain(key)
     bgImage = rgba_to_image(read_bytes(root .. "/terrain_bg_" .. key .. ".rgba"), 256, 160),
     enemyPlat = rgba_to_image(read_bytes(root .. "/terrain_enemy_" .. key .. ".rgba"), 256, 160),
     playerPlat = rgba_to_image(read_bytes(root .. "/terrain_player_" .. key .. ".rgba"), 256, 160),
+    postDexImage = info.postDexFile and rgba_to_image(read_bytes(root .. "/" .. info.postDexFile), 256, 256) or nil,
     w = w,
     h = h,
   }
@@ -137,16 +139,46 @@ function BattleChrome.terrain(key)
   return entry
 end
 
+-- pokeemerald/src/battle_script_commands.c:10131
+-- pokefirered/src/battle_script_commands.c:9691
+function BattleChrome.drawPostDexBg(key)
+  local entry = BattleChrome.terrain(key)
+  if not (entry and entry.postDexImage) then
+    error("battle_chrome: missing ROM post-dex background for " .. tostring(key))
+  end
+  local qKey = "post_dex_" .. tostring(key)
+  local q = BattleChrome._quads[qKey]
+  if not q then
+    q = love.graphics.newQuad(0, 0, 240, 112, 256, 256)
+    BattleChrome._quads[qKey] = q
+  end
+  love.graphics.setColor(1, 1, 1, 1)
+  love.graphics.draw(entry.postDexImage, q, 0, 0)
+  return true
+end
+
 local TERRAIN_MT = {
   __index = function(_, key) return BattleChrome.terrain(key) end,
 }
 
+local function install_key(cache)
+  return tostring(cache) .. "|" .. battle_root()
+end
+
+function BattleChrome.ensureInstalled()
+  if BattleChrome._installKey == install_key(resolve_cache(nil)) and BattleChrome._manifest then return end
+  BattleChrome.install(nil)
+end
+
 function BattleChrome.install(cache)
   BattleChrome._cache = resolve_cache(cache)
+  BattleChrome._installKey = install_key(BattleChrome._cache)
   BattleChrome._manifest = nil
   BattleChrome._textbox = nil
   BattleChrome._playerBox = nil
   BattleChrome._enemyBox = nil
+  BattleChrome._safariBox = nil
+  BattleChrome._safariTried = false
   BattleChrome._doublesPlayerBox = nil
   BattleChrome._doublesOpponentBox = nil
   BattleChrome._doublesTried = false
@@ -159,6 +191,7 @@ function BattleChrome.install(cache)
   BattleChrome._terrains = setmetatable({}, TERRAIN_MT)
   BattleChrome._terrainInfo = {}
   BattleChrome._terrainMissing = {}
+  BattleChrome._entries = {}
   BattleChrome._quads = {}
   BattleChrome._logged = false
   local root = battle_root()
@@ -175,6 +208,7 @@ function BattleChrome.install(cache)
   BattleChrome._playerBox = rgba_to_image(pb, 128, 64)
   BattleChrome._enemyBox = rgba_to_image(eb, 128, 32)
   BattleChrome._elements = rgba_to_image(el, 320, 24)
+  BattleChrome._elementsRaw, BattleChrome._rsStatus = el, {}
   -- EXP bar tiles need healthbox palette (blue); fall back to HP sheet if missing
   BattleChrome._elementsExp = rgba_to_image(elExp, 320, 24) or BattleChrome._elements
   local pinfo = m.partySummaryBar or { w = 128, h = 8 }
@@ -186,7 +220,7 @@ function BattleChrome.install(cache)
   if pb and eb and tb and next(BattleChrome._terrainInfo) then
     log("battle chrome ready (v" .. tostring(m.format or "?") .. ")")
   else
-    log("battle chrome missing — re-run --pokemon extract")
+    log("battle chrome missing: re-run --pokemon extract")
   end
 end
 
@@ -323,6 +357,52 @@ function BattleChrome.drawTerrain(key, enemyOx, playerOx, bgOx)
   return false
 end
 
+function BattleChrome.entry(key)
+  local cache = BattleChrome._entries
+  if not cache then cache = {}; BattleChrome._entries = cache end
+  local hit = cache[key]
+  if hit ~= nil then return hit or nil end
+  local m = BattleChrome._manifest or {}
+  local info = type(m.entries) == "table" and m.entries[key] or nil
+  if not info then
+    error("battle chrome: manifest has no entry background for " .. tostring(key), 0)
+  end
+  local img = rgba_to_image(read_bytes(battle_root() .. "/" .. info.file), info.w, info.h)
+  if not img then
+    if love and love.graphics then
+      error("battle chrome: " .. tostring(info.file) .. " is not in the cache", 0)
+    end
+    cache[key] = false
+    return nil
+  end
+  local e = { image = img, w = info.w, h = info.h }
+  cache[key] = e
+  return e
+end
+
+-- pokeemerald/src/battle_bg.c:135
+function BattleChrome.drawEntry(key, scrollX, scrollY, alpha)
+  local e = BattleChrome.entry(key)
+  if not e then return false end
+  alpha = alpha or 1
+  if alpha <= 0 then return true end
+  local x = -((math.floor(scrollX or 0)) % 256)
+  local y = -(math.floor(scrollY or 0))
+  love.graphics.setColor(1, 1, 1, alpha)
+  love.graphics.draw(e.image, x, y)
+  love.graphics.draw(e.image, x + 256, y)
+  if y + e.h < 160 then
+    love.graphics.draw(e.image, x, y + 512)
+    love.graphics.draw(e.image, x + 256, y + 512)
+  end
+  if y > 0 then
+    love.graphics.draw(e.image, x, y - 512)
+    love.graphics.draw(e.image, x + 256, y - 512)
+  end
+  love.graphics.setColor(1, 1, 1, 1)
+  return true
+end
+
 --- Draw clean background wallpaper without battle platforms (e.g. for evolution scene).
 function BattleChrome.drawCleanBg(key)
   key = key or "building"
@@ -378,6 +458,133 @@ function BattleChrome.drawPanel(mode)
   end
 end
 
+function BattleChrome.layout()
+  local m = BattleChrome._manifest
+  if type(m) ~= "table" then return "frlg" end
+  if m.assetLayout == "rs" or m.layout == "rs" then return "rs" end
+  return m.layout == "rse" and "emerald" or "frlg"
+end
+
+function BattleChrome.isHoenn()
+  local l = BattleChrome.layout()
+  return l == "rs" or l == "emerald"
+end
+
+-- pokeemerald/include/constants/battle.h:347
+BattleChrome.WIN = {
+  MSG = 0, ACTION_PROMPT = 1, ACTION_MENU = 2,
+  MOVE_NAME_1 = 3, MOVE_NAME_2 = 4, MOVE_NAME_3 = 5, MOVE_NAME_4 = 6,
+  PP = 7, DUMMY = 8, PP_REMAINING = 9, MOVE_TYPE = 10, SWITCH_PROMPT = 11, YESNO = 12,
+  LEVEL_UP_BOX = 13, LEVEL_UP_BANNER = 14,
+}
+
+-- pokeemerald/src/battle_message.c:1478
+BattleChrome.RSE_TEXT = {
+  [0] = { x = 0, y = 1 },
+  [1] = { x = 1, y = 1 },
+  [2] = { x = 0, y = 1 },
+  [3] = { x = 0, y = 1, narrow = true },
+  [4] = { x = 0, y = 1, narrow = true },
+  [5] = { x = 0, y = 1, narrow = true },
+  [6] = { x = 0, y = 1, narrow = true },
+  [7] = { x = 0, y = 1, narrow = true },
+  [8] = { x = 0, y = 1 },
+  [9] = { x = 2, y = 1 },
+  [10] = { x = 0, y = 1, narrow = true },
+  [11] = { x = 0, y = 1, narrow = true },
+  [12] = { x = 0, y = 1 },
+}
+
+function BattleChrome.window(id)
+  local m = BattleChrome._manifest or BattleChrome.manifest()
+  local rows = m.windows and m.windows.normal
+  local row = rows and rows[(tonumber(id) or 0) + 1]
+  if not row then error("battle chrome: manifest has no window template " .. tostring(id)) end
+  return {
+    left = row.left, top = row.top % 20, w = row.w, h = row.h,
+    x = row.left * 8, y = (row.top % 20) * 8,
+  }
+end
+
+function BattleChrome.textOrigin(id)
+  local w = BattleChrome.window(id)
+  local t = BattleChrome.RSE_TEXT[tonumber(id) or 0] or { x = 0, y = 1 }
+  return w.x + t.x, w.y + t.y, w.w * 8, t.narrow == true
+end
+
+function BattleChrome.messageOrigin()
+  if BattleChrome.layout() ~= "emerald" then return 10, 122, 224 end
+  local x, y, w = BattleChrome.textOrigin(BattleChrome.WIN.MSG)
+  return x, y, w
+end
+
+local function c5to8(x)
+  return (x * 8 + math.floor(x / 4)) / 255
+end
+
+local function bgr555(v)
+  v = tonumber(v) or 0
+  return { c5to8(v % 32), c5to8(math.floor(v / 32) % 32), c5to8(math.floor(v / 1024) % 32), 1 }
+end
+
+local _textboxColorCache = setmetatable({}, { __mode = "k" })
+
+-- pokeemerald/src/battle_message.c:1480
+function BattleChrome.textboxColors(fg, shadow)
+  local pal = (BattleChrome._manifest or {}).textboxPal
+  if not pal then
+    local FrlgFont = require("src.ui.game3.frlg_font")
+    return FrlgFont.COLOR.WHITE
+  end
+  -- Memoized per (pal, fg, shadow); an entry is reused only while the palette
+  -- table is the same and its two raw words are unchanged.  Callers treat the
+  -- returned table as read-only (FrlgFont copies colours into its scratch).
+  local byPal = _textboxColorCache[pal]
+  if not byPal then
+    byPal = {}
+    _textboxColorCache[pal] = byPal
+  end
+  local key = fg * 64 + shadow
+  local e = byPal[key]
+  local fgV, shV = pal[fg + 1], pal[shadow + 1]
+  if not e or e.fgV ~= fgV or e.shV ~= shV then
+    e = { fgV = fgV, shV = shV,
+      colors = { fg = bgr555(fgV), shadow = bgr555(shV), bg = { 0, 0, 0, 0 } } }
+    byPal[key] = e
+  end
+  return e.colors
+end
+
+-- pokeemerald/graphics/battle_interface/textbox_map.bin
+BattleChrome.RSE_MENU_FRAMES = {
+  menu = { { 16, 15, 13, 4 } },
+  moves = { { 1, 15, 18, 4 }, { 21, 15, 8, 4 } },
+}
+
+-- pokeruby/graphics/interface/menu_map.bin
+BattleChrome.RS_MENU_FRAMES = {
+  menu = { { 18, 15, 11, 4 } },
+  moves = { { 1, 15, 20, 4 }, { 23, 15, 6, 4 } },
+}
+
+function BattleChrome.menuFrameRects(mode, layout)
+  local set = (layout == "rs" and BattleChrome.RS_MENU_FRAMES)
+    or (layout == "emerald" and BattleChrome.RSE_MENU_FRAMES) or nil
+  return set and set[mode]
+end
+
+-- pokeemerald/src/battle_bg.c:744
+-- pokeruby/src/battle_bg.c:266
+function BattleChrome.drawMenuFrames(mode)
+  if not BattleChrome.isHoenn() then return end
+  local rects = BattleChrome.menuFrameRects(mode, BattleChrome.layout())
+  if not rects then return end
+  local Chrome = require("src.ui.game3.chrome")
+  for _, r in ipairs(rects) do
+    Chrome.userFrame(Chrome._frameType or 0, r[1], r[2], r[3], r[4])
+  end
+end
+
 function BattleChrome.drawEnemyBox(x, y)
   if not BattleChrome._enemyBox then return end
   love.graphics.setColor(1, 1, 1, 1)
@@ -388,6 +595,19 @@ function BattleChrome.drawPlayerBox(x, y)
   if not BattleChrome._playerBox then return end
   love.graphics.setColor(1, 1, 1, 1)
   love.graphics.draw(BattleChrome._playerBox, x, y)
+end
+
+function BattleChrome.drawSafariBox(x, y)
+  if not BattleChrome._safariTried then
+    BattleChrome._safariTried = true
+    local info = BattleChrome.manifest().safariBox or {}
+    BattleChrome._safariBox = rgba_to_image(read_bytes(battle_root() .. "/" .. (info.file or "healthbox_safari.rgba")),
+      info.w or 128, info.h or 64)
+  end
+  if not BattleChrome._safariBox then return false end
+  love.graphics.setColor(1, 1, 1, 1)
+  love.graphics.draw(BattleChrome._safariBox, x, y)
+  return true
 end
 
 -- Element tile bases (pret B_INTERFACE_GFX_*)
@@ -435,13 +655,21 @@ end
 local function elements_tile_quad(ti, sheet)
   sheet = sheet or BattleChrome._elements
   if not sheet or not love or not love.graphics then return nil end
-  local key = (sheet == BattleChrome._elementsExp and "exp_" or "elt_") .. tostring(ti)
-  if not BattleChrome._quads[key] then
+  -- Per-sheet subtables keyed by tile index (no per-tile string keys).
+  local subKey = sheet == BattleChrome._elementsExp and "exp_tiles" or "elt_tiles"
+  local sub = BattleChrome._quads[subKey]
+  if not sub then
+    sub = {}
+    BattleChrome._quads[subKey] = sub
+  end
+  local q = sub[ti]
+  if not q then
     local tw = 40 -- 320/8
     local tx, ty = ti % tw, math.floor(ti / tw)
-    BattleChrome._quads[key] = love.graphics.newQuad(tx * 8, ty * 8, 8, 8, 320, 24)
+    q = love.graphics.newQuad(tx * 8, ty * 8, 8, 8, 320, 24)
+    sub[ti] = q
   end
-  return BattleChrome._quads[key]
+  return q
 end
 
 -- pokefirered/src/battle_interface.c:2050
@@ -496,6 +724,56 @@ function BattleChrome.drawElementTile(ti, x, y, healthboxPal)
   love.graphics.draw(sheet, q, x, y)
 end
 
+-- pokeruby/src/battle_interface.c:1669
+local RS_STATUS_VARIANT = { [0] = 21, [1] = 71, [2] = 86, [3] = 101 }
+function BattleChrome.drawRsStatusIcon(battlerId, ailment, x, y)
+  ailment = tonumber(ailment) or 0
+  if ailment < 1 or ailment > 5 or not BattleChrome._elementsRaw then return end
+  local bid = (tonumber(battlerId) or 0) % 4
+  BattleChrome._rsStatus = BattleChrome._rsStatus or {}
+  local key = bid * 8 + ailment
+  local img = BattleChrome._rsStatus[key]
+  if img == nil then
+    img = false
+    local raw = BattleChrome._elementsRaw
+    local pal = read_bytes(cache_root() .. "/rs/assets/battle_interface__gBattleInterfaceStatusIcons_DynPal.rom")
+    if pal and #pal >= 10 and love and love.image then
+      local lo, hi = pal:byte((ailment - 1) * 2 + 1, (ailment - 1) * 2 + 2)
+      local c = lo + hi * 256
+      local r = (c % 32) * 255 / 31
+      local g = (math.floor(c / 32) % 32) * 255 / 31
+      local b = (math.floor(c / 1024) % 32) * 255 / 31
+      local tile = RS_STATUS_VARIANT[bid] + (ailment - 1) * 3
+      local other = RS_STATUS_VARIANT[(bid + 1) % 4] + (ailment - 1) * 3
+      local data = love.image.newImageData(24, 8)
+      local function px(t, dx, py)
+        local tx, ty = (t % 40) * 8 + dx, math.floor(t / 40) * 8 + py
+        local o = (ty * 320 + tx) * 4
+        return raw:byte(o + 1, o + 4)
+      end
+      for i = 0, 2 do
+        for py = 0, 7 do
+          for dx = 0, 7 do
+            local r1, g1, b1, a1 = px(tile + i, dx, py)
+            local r2, g2, b2, a2 = px(other + i, dx, py)
+            if r1 ~= r2 or g1 ~= g2 or b1 ~= b2 or a1 ~= a2 then
+              data:setPixel(i * 8 + dx, py, r / 255, g / 255, b / 255, 1)
+            else
+              data:setPixel(i * 8 + dx, py, r1 / 255, g1 / 255, b1 / 255, a1 / 255)
+            end
+          end
+        end
+      end
+      img = love.graphics.newImage(data)
+      if img.setFilter then img:setFilter("nearest", "nearest") end
+    end
+    BattleChrome._rsStatus[key] = img
+  end
+  if not img then return end
+  love.graphics.setColor(1, 1, 1, 1)
+  love.graphics.draw(img, x, y)
+end
+
 --- Pret EXP bar: 8 element tiles in healthbox VRAM (TAG_HEALTHBOX_PAL → blue).
 function BattleChrome.drawExpBar(x, y, ratio)
   local sheet = BattleChrome._elementsExp or BattleChrome._elements
@@ -523,7 +801,7 @@ local PARTY_BALL_TILE = {
   caught = 70,
 }
 
-function BattleChrome.drawPartyBall(x, y, kind)
+function BattleChrome.drawPartyBall(x, y, kind, alpha)
   local ti = PARTY_BALL_TILE[kind or "ok"] or PARTY_BALL_TILE.ok
   local q = elements_tile_quad(ti)
   if not q or not BattleChrome._elements then
@@ -533,41 +811,60 @@ function BattleChrome.drawPartyBall(x, y, kind)
     end
     return
   end
-  love.graphics.setColor(1, 1, 1, 1)
+  love.graphics.setColor(1, 1, 1, alpha or 1)
   love.graphics.draw(BattleChrome._elements, q, x, y)
+  love.graphics.setColor(1, 1, 1, 1)
 end
 
 function BattleChrome.drawCaughtBall(x, y)
   BattleChrome.drawPartyBall(x, y, "caught")
 end
 
+local function party_bar_segment(i)
+  local key = "party_bar_seg_" .. i
+  local q = BattleChrome._quads[key]
+  if not q then
+    q = love.graphics.newQuad(i * 32, 0, 32, 8, BattleChrome._partyBar:getDimensions())
+    BattleChrome._quads[key] = q
+  end
+  return q
+end
+
+-- pokeemerald/src/battle_interface.c:575
+local EXIT_SEGMENTS = { 0, 1, 2, 2, 2, 3 }
+
 --- Draw party summary bar and 6 ball slots (1:1 with pokefirered CreatePartyStatusSummarySprites).
 -- Player: base (136, 96), un-flipped bar (<=====), balls at y=92 from x=160..210 (left-to-right).
 -- Opponent: base (104, 40), H-flipped bar (=====>), balls at y=36 from x=30..80 (right-aligned).
-function BattleChrome.drawPartyBar(x, y, balls, ox, isOpponent)
+function BattleChrome.drawPartyBar(x, y, balls, ox, isOpponent, opts)
   ox = tonumber(ox) or 0
   balls = balls or {}
-  if isOpponent then
-    local barX = x + ox
-    if BattleChrome._partyBar then
-      love.graphics.setColor(1, 1, 1, 1)
-      love.graphics.draw(BattleChrome._partyBar, barX, y, 0, -1, 1)
+  opts = opts or {}
+  local alpha = opts.alpha or 1
+  local ballOx = opts.ballOx
+  local hidden = opts.ballHidden or {}
+  local barX = x + ox
+  local sx = isOpponent and -1 or 1
+  if BattleChrome._partyBar then
+    love.graphics.setColor(1, 1, 1, alpha)
+    if opts.extended then
+      for n, seg in ipairs(EXIT_SEGMENTS) do
+        love.graphics.draw(BattleChrome._partyBar, party_bar_segment(seg), barX + sx * 32 * (n - 1), y, 0, sx, 1)
+      end
+    else
+      love.graphics.draw(BattleChrome._partyBar, barX, y, 0, sx, 1)
     end
-    for i = 1, 6 do
+    love.graphics.setColor(1, 1, 1, 1)
+  end
+  for i = 1, 6 do
+    if not hidden[i] then
       local kind = balls[i] or "empty"
-      local bx = (x + ox) - 24 - 10 * (6 - i)
-      BattleChrome.drawPartyBall(bx, y - 7, kind)
-    end
-  else
-    local barX = x + ox
-    if BattleChrome._partyBar then
-      love.graphics.setColor(1, 1, 1, 1)
-      love.graphics.draw(BattleChrome._partyBar, barX, y, 0, 1, 1)
-    end
-    for i = 1, 6 do
-      local kind = balls[i] or "empty"
-      local bx = (x + ox) + 24 + 10 * (i - 1)
-      BattleChrome.drawPartyBall(bx, y - 8, kind)
+      local bOx = ballOx and (ballOx[i] or 0) or ox
+      if isOpponent then
+        BattleChrome.drawPartyBall(x + bOx - 24 - 10 * (6 - i), y - 7, kind, alpha)
+      else
+        BattleChrome.drawPartyBall(x + bOx + 24 + 10 * (i - 1), y - 8, kind, alpha)
+      end
     end
   end
 end

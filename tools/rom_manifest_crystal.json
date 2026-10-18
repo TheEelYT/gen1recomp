@@ -1047,6 +1047,183 @@
       "BATTLE_BG_EFFECT_WOBBLE_PLAYER",
       "BATTLE_BG_EFFECT_WOBBLE_SCREEN"
     ],
+    "battleCommandOrder": [
+      "checkturn",
+      "checkobedience",
+      "usedmovetext",
+      "doturn",
+      "critical",
+      "damagestats",
+      "stab",
+      "damagevariation",
+      "checkhit",
+      "lowersub",
+      "moveanimnosub",
+      "raisesub",
+      "failuretext",
+      "applydamage",
+      "criticaltext",
+      "supereffectivetext",
+      "checkfaint",
+      "buildopponentrage",
+      "poisontarget",
+      "sleeptarget",
+      "draintarget",
+      "eatdream",
+      "burntarget",
+      "freezetarget",
+      "paralyzetarget",
+      "selfdestruct",
+      "mirrormove",
+      "statup",
+      "statdown",
+      "payday",
+      "conversion",
+      "resetstats",
+      "storeenergy",
+      "unleashenergy",
+      "forceswitch",
+      "endloop",
+      "flinchtarget",
+      "ohko",
+      "recoil",
+      "mist",
+      "focusenergy",
+      "confuse",
+      "confusetarget",
+      "heal",
+      "transform",
+      "screen",
+      "poison",
+      "paralyze",
+      "substitute",
+      "rechargenextturn",
+      "mimic",
+      "metronome",
+      "leechseed",
+      "splash",
+      "disable",
+      "cleartext",
+      "charge",
+      "checkcharge",
+      "traptarget",
+      "effect0x3c",
+      "rampage",
+      "checkrampage",
+      "constantdamage",
+      "counter",
+      "encore",
+      "painsplit",
+      "snore",
+      "conversion2",
+      "lockon",
+      "sketch",
+      "defrostopponent",
+      "sleeptalk",
+      "destinybond",
+      "spite",
+      "falseswipe",
+      "healbell",
+      "kingsrock",
+      "triplekick",
+      "kickcounter",
+      "thief",
+      "arenatrap",
+      "nightmare",
+      "defrost",
+      "curse",
+      "protect",
+      "spikes",
+      "foresight",
+      "perishsong",
+      "startsandstorm",
+      "endure",
+      "checkrollout",
+      "rolloutpower",
+      "effect0x5d",
+      "furycutter",
+      "attract",
+      "happinesspower",
+      "present",
+      "damagecalc",
+      "frustrationpower",
+      "safeguard",
+      "checksafeguard",
+      "getmagnitude",
+      "batonpass",
+      "pursuit",
+      "clearhazards",
+      "healmorn",
+      "healday",
+      "healnite",
+      "hiddenpower",
+      "startrain",
+      "startsun",
+      "attackup",
+      "defenseup",
+      "speedup",
+      "specialattackup",
+      "specialdefenseup",
+      "accuracyup",
+      "evasionup",
+      "attackup2",
+      "defenseup2",
+      "speedup2",
+      "specialattackup2",
+      "specialdefenseup2",
+      "accuracyup2",
+      "evasionup2",
+      "attackdown",
+      "defensedown",
+      "speeddown",
+      "specialattackdown",
+      "specialdefensedown",
+      "accuracydown",
+      "evasiondown",
+      "attackdown2",
+      "defensedown2",
+      "speeddown2",
+      "specialattackdown2",
+      "specialdefensedown2",
+      "accuracydown2",
+      "evasiondown2",
+      "statupmessage",
+      "statdownmessage",
+      "statupfailtext",
+      "statdownfailtext",
+      "effectchance",
+      "statdownanim",
+      "statupanim",
+      "switchturn",
+      "fakeout",
+      "bellydrum",
+      "psychup",
+      "rage",
+      "doubleflyingdamage",
+      "doubleundergrounddamage",
+      "mirrorcoat",
+      "checkfuturesight",
+      "futuresight",
+      "doubleminimizedamage",
+      "skipsuncharge",
+      "thunderaccuracy",
+      "teleport",
+      "beatup",
+      "ragedamage",
+      "resettypematchup",
+      "allstatsup",
+      "bidefailtext",
+      "raisesubnoanim",
+      "lowersubnoanim",
+      "beatupfailtext",
+      "clearmissdamage",
+      "movedelay",
+      "moveanim",
+      "tristatuschance",
+      "supereffectivelooptext",
+      "startloop",
+      "curl"
+    ],
     "cmdQueueOrder": [
       "CMDQUEUE_NULL",
       "CMDQUEUE_TYPE1",
@@ -14300,6 +14477,10 @@
       96,
       28885
     ],
+    "AccuracyLevelMultipliers": [
+      13,
+      20146
+    ],
     "AerodactylBackpic": [
       86,
       25982
@@ -14519,6 +14700,18 @@
     "AzumarillPokedexEntry": [
       115,
       22385
+    ],
+    "BTFemaleTrainerTexts": [
+      71,
+      29646
+    ],
+    "BTMaleTrainerTexts": [
+      71,
+      29490
+    ],
+    "BTTrainerClassGenders": [
+      71,
+      29424
     ],
     "BTTrainerClassSprites": [
       92,
@@ -14748,6 +14941,10 @@
       126,
       17488
     ],
+    "BattleTowerText": [
+      71,
+      16384
+    ],
     "BattleTowerTrainerData": [
       124,
       16384
@@ -14875,6 +15072,14 @@
     "BracedItselfText": [
       32,
       22265
+    ],
+    "BuenasPasswordChannelName": [
+      46,
+      20849
+    ],
+    "BuenasPasswordTable": [
+      46,
+      20473
     ],
     "BugCatchingContestantEventFlagTable": [
       4,
@@ -15275,6 +15480,14 @@
     "Cries": [
       58,
       20912
+    ],
+    "CriticalHitChances": [
+      13,
+      18091
+    ],
+    "CriticalHitMoves": [
+      13,
+      18083
     ],
     "CriticalHitText": [
       32,
@@ -15843,6 +16056,10 @@
     "FlaaffyPokedexEntry": [
       115,
       21944
+    ],
+    "FlailReversalPower": [
+      13,
+      22535
     ],
     "FlareonBackpic": [
       83,
@@ -17572,6 +17789,14 @@
       11,
       19282
     ],
+    "MoveEffects": [
+      9,
+      29486
+    ],
+    "MoveEffectsPointers": [
+      9,
+      29172
+    ],
     "MoveNames": [
       114,
       24361
@@ -18292,6 +18517,10 @@
       110,
       19608
     ],
+    "OutdoorSprites": [
+      5,
+      17592
+    ],
     "OverworldSprites": [
       5,
       18230
@@ -18723,6 +18952,10 @@
     "PresentFailedText": [
       32,
       22587
+    ],
+    "PresentPower": [
+      13,
+      30983
     ],
     "PrimeapeBackpic": [
       85,
@@ -19711,6 +19944,10 @@
     "Tilesets": [
       19,
       21910
+    ],
+    "TimeCapsule_CatchRateItems": [
+      10,
+      18309
     ],
     "TimeFishGroups": [
       36,
@@ -23647,6 +23884,10 @@
     "_YourMonsHPWasHealedText": [
       111,
       20537
+    ],
+    "wBT_OTTrainerClass": [
+      3,
+      53514
     ],
     "wBaseUnusedBackpic": [
       1,

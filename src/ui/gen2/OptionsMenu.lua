@@ -19,12 +19,14 @@
 -- generations.
 
 local Chrome = require("src.ui.gen2.Chrome")
+local GameVersion = require("src.core.GameVersion")
 local Logger = require("src.core.Logger")
 local Marquee = require("src.ui.Marquee")
 local Palette = require("src.render.Palette")
 local Performance = require("src.core.Performance")
 local Runtime = require("src.mods.Runtime")
 local Save = require("src.core.gen2.Save")
+local Sound = require("src.core.Sound")
 local Strings = require("src.core.Strings")
 
 local OptionsMenu = {}
@@ -62,6 +64,8 @@ local FINITE_VALUE_SOURCES = {
   Strings.source("ADAPTIVE"), Strings.source("UNAVAILABLE"),
   Strings.source("DISPLAY"), Strings.source("DISPLAY (%dHZ)"),
   Strings.source("ON"), Strings.source("4X"),
+  Strings.source("AUDIO MODE"), Strings.source("BOTH"), Strings.source("EXT ONLY"),
+  Strings.source("GAME ONLY"),
 }
 
 local function volLabel(v)
@@ -202,6 +206,22 @@ local ROWS = {
     text = function(options)
       return Strings(FILTERS[(options.musicFilter or 0) + 1])
     end },
+  { label = Strings.source("AUDIO MODE"), key = "audioMode", port = true,
+    cycle = function(options, delta)
+      local cur = options.audioMode or "both"
+      local modes = { "both", "external_only", "game_only" }
+      local idx = 1
+      for i, m in ipairs(modes) do if m == cur then idx = i break end end
+      idx = ((idx - 1 + (delta < 0 and -1 or 1)) % #modes) + 1
+      options.audioMode = modes[idx]
+      require("src.core.Music").applyOptions(options)
+    end,
+    text = function(options)
+      local cur = options.audioMode or "both"
+      if cur == "external_only" then return Strings("EXT ONLY") end
+      if cur == "game_only" then return Strings("GAME ONLY") end
+      return Strings("BOTH")
+    end },
   -- Heads the port's display group, same spot src/ui/OptionsMenu.lua's own
   -- PERFORMANCE row occupies relative to ZOOM/VOID FILL/TILT/SHADER FX below
   -- (the extras this tier scales).  Gen 1 row shape (`value`/`step`, not this
@@ -231,6 +251,15 @@ local ROWS = {
       local speed = tonumber(options.speed) or 1
       if speed == 1 then return Strings("NORMAL") end
       return Strings("%dX", speed)
+    end },
+  { label = Strings.source("ORIENTATION"), key = "orientation", port = true,
+    cycle = function(options, delta)
+      local Orientation = require("src.core.Orientation")
+      options.orientation = Orientation.cycle(options.orientation, delta)
+      Orientation.apply(options.orientation)
+    end,
+    text = function(options)
+      return Strings(require("src.core.Orientation").modeLabel(options.orientation))
     end },
   { label = Strings.source("ZOOM"), key = "zoom", port = true,
     cycle = function(options, delta, game)
@@ -500,12 +529,12 @@ local GROUPS = {
   { id = "group.speed", label = Strings.source("SPEED"),
     members = { "textSpeed", "speed" } },
   { id = "group.video", label = Strings.source("VIDEO"),
-    members = { "videoMode", "faithfulRes", "screenPos", "fpsCap", "vsync",
+    members = { "videoMode", "orientation", "faithfulRes", "screenPos", "fpsCap", "vsync",
       "logicClock" } },
   { id = "group.graphics", label = Strings.source("GRAPHICS"),
     members = { "color", "uiLetterbox", "shaderfx", "shaderfx2", "frame" } },
   { id = "group.audio", label = Strings.source("AUDIO"),
-    members = { "sound", "musicVol", "sfxVol", "musicFilter" } },
+    members = { "sound", "musicVol", "sfxVol", "musicFilter", "audioMode" } },
   { id = "group.battle", label = Strings.source("BATTLE OPTIONS"),
     members = { "battleScene", "battleStyle", "battleLayout", "battleHud",
       "battleFit", "battleBg" } },
@@ -586,6 +615,7 @@ local function buildRows()
     -- The descriptor and the save key stay, so a build that grows a printer
     -- only has to drop this test.
     local hidden = row.key == "print"
+      or (row.key == "orientation" and osName ~= "Android" and osName ~= "iOS")
       or (isNX and row.key == "videoMode")
       or (not showTouch and (row.id == "touchControls"
           or row.id == "touchLayout" or row.id == "haptics"
@@ -742,6 +772,11 @@ function OptionsMenu:cycle(row, delta)
 end
 
 function OptionsMenu:leave_()
+  local data = self.game and self.game.data
+  if not self.sub and data and GameVersion.engine() == "crystal" then
+    -- ../pokecrystal/engine/menus/options_menu.asm:69
+    Sound.play(data, "Sfx_Transaction")
+  end
   if self.onDone then self.onDone(self.options) end
   if self.game and self.game.stack and self.game.stack:top() == self then
     self.game.stack:pop()

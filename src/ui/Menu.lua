@@ -35,7 +35,12 @@ function Menu.new(game, items, opts)
   end
   self.rowStep = opts.rowStep or 2
   -- home/window.asm:56-83
-  self.noWrap = opts.noWrap or false
+  if opts.noWrap ~= nil then
+    self.noWrap = opts.noWrap
+  else
+    local GameVersion = require("src.core.GameVersion")
+    self.noWrap = GameVersion.generation(GameVersion.get()) == 1
+  end
   -- engine/movie/oak_speech/oak_speech2.asm:162 (DisplayIntroNameTextBox)
   self.title = opts.title
   self.itemY = opts.itemY
@@ -130,14 +135,34 @@ function Menu:draw()
   -- PlaceString at hlcoord 3,0 writes over the border row it was just
   -- drawn on (oak_speech2.asm:162-170)
   if self.title then
+    -- the title's lines and glyph counts, rebuilt only when it changes
+    -- (this draws every frame the menu is up)
+    local lines, glyphs = self.titleLines, self.titleGlyphs
+    if self.titleLinesFor ~= self.title or not lines then
+      local title = self.title:gsub("{DONE}%s*$", "")
+        :gsub("{PROMPT}%s*$", "")
+      lines, glyphs = {}, {}
+      for line in (title .. "\n"):gmatch("(.-)\n") do
+        lines[#lines + 1] = line
+        glyphs[#lines] = #Font.split(line)
+      end
+      self.titleLinesFor = self.title
+      self.titleLines, self.titleGlyphs = lines, glyphs
+    end
     love.graphics.setColor(1, 1, 1, 1)
-    love.graphics.rectangle("fill", (self.tx + 3) * 8, self.ty * 8,
-      #Font.split(self.title) * 8, 8)
+    for i = 1, #lines do
+      love.graphics.rectangle("fill", (self.tx + 3) * 8,
+        (self.ty + i - 1) * 8, glyphs[i] * 8, 8)
+    end
+    love.graphics.setColor(0, 0, 0, 1)
+    for i, line in ipairs(lines) do
+      Font.draw(line, (self.tx + 3) * 8, (self.ty + i - 1) * 8)
+    end
   end
+  -- The choices are black with or without a title: tile glyphs come out
+  -- black whatever the color, but TTF text (a translation's font) draws in
+  -- the current one, which is white after the box and the previous frame.
   love.graphics.setColor(0, 0, 0, 1)
-  if self.title then
-    Font.draw(self.title, (self.tx + 3) * 8, self.ty * 8)
-  end
   local visible = (self.maxVisible and math.min(self.maxVisible, #self.items))
     or #self.items
   -- Row Y: pokered's boxed menus anchor the choices to the BOTTOM interior

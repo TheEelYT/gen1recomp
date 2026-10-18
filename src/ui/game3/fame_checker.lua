@@ -6,8 +6,9 @@ local FrlgFont = require("src.ui.game3.frlg_font")
 local FameChecker = require("src.core.game3.fame_checker")
 local TextIR = require("src.core.game3.scripting.text_ir")
 local RomText = require("src.core.game3.rom_text")
+local CacheBlob = require("src.import.CacheBlob")
 
-local FameCheckerUi = {}
+local FameCheckerUi = { isMenu = true }
 
 local PERSON = FameChecker.PERSON
 local PICK = FameChecker.PICKSTATE
@@ -84,6 +85,7 @@ end
 local owSprites = lazyModule("src.core.game3.ow_sprites")
 local bagChrome = lazyModule("src.ui.game3.bag_chrome")
 local pokedexChrome = lazyModule("src.ui.game3.pokedex_chrome")
+local SE = require("src.core.game3.se_ids")
 
 local function se(id)
   pcall(function()
@@ -104,12 +106,12 @@ local function read_bytes(rel)
     if ok and type(d) == "string" and #d > 0 then return d end
   end
   if love and love.filesystem and love.filesystem.read then
-    local ok, d = pcall(love.filesystem.read, rel)
+    local ok, d = pcall(CacheBlob.readFs, rel)
     if ok and type(d) == "string" and #d > 0 then return d end
   end
   local f = io.open(rel, "rb")
   if f then
-    local d = f:read("*a")
+    local d = CacheBlob.decode(rel, f:read("*a"))
     f:close()
     if d and #d > 0 then return d end
   end
@@ -508,7 +510,7 @@ function FameCheckerUi.show(session, opts)
   FameCheckerUi.textPage = 1
   FameCheckerUi._pages = nil
   clamp_cursor()
-  se(199)
+  se(SE.SE_M_SWIFT)
   Stack.push("fame_checker", FameCheckerUi, { hideBelow = true, fullscreen = true })
   return true
 end
@@ -516,7 +518,7 @@ end
 -- pokefirered/src/fame_checker.c:1010 Task_StartToCloseFameChecker
 function FameCheckerUi.close()
   if not FameCheckerUi.open then return false end
-  se(199)
+  se(SE.SE_M_SWIFT)
   FameCheckerUi.open = false
   FameCheckerUi.mode = "top"
   FameCheckerUi.pickMode = false
@@ -543,7 +545,7 @@ end
 local function moveListCursor(movingDown)
   if not listStep(movingDown) then return end
   FameCheckerUi.iconCursor = 0
-  se(5)
+  se(SE.SE_SELECT)
 end
 
 -- pokefirered/src/fame_checker.c:861 Task_FlavorTextDisplayHandleInput
@@ -557,7 +559,7 @@ local function moveIconCursor(delta)
     if (slot + 1) % 3 == 0 then slot = slot - 2 else slot = slot + 1 end
   end
   FameCheckerUi.iconCursor = slot
-  se(187)
+  se(SE.SE_M_SWAGGER2)
   rebuild_flavor_pages()
 end
 
@@ -566,7 +568,7 @@ function FameCheckerUi.handleInput(input)
 
   if FameCheckerUi.mode == "flavor" then
     if input:wasPressed("b") then
-      se(5)
+      se(SE.SE_SELECT)
       FameCheckerUi.mode = "top"
       FameCheckerUi._pages = nil
       return
@@ -599,9 +601,9 @@ function FameCheckerUi.handleInput(input)
   end
   if input:wasPressed("start") then
     if tryExitPickMode() then
-      se(203)
+      se(SE.SE_M_LOCK_ON)
     elseif row and row.person then
-      se(203)
+      se(SE.SE_M_LOCK_ON)
       FameCheckerUi.pickMode = true
     end
     return
@@ -612,7 +614,7 @@ function FameCheckerUi.handleInput(input)
     elseif FameCheckerUi.pickMode then
       return
     elseif row and FameCheckerUi.personHasUnlockedPanels(row.person) then
-      se(5)
+      se(SE.SE_SELECT)
       FameCheckerUi.mode = "flavor"
       rebuild_flavor_pages()
     end

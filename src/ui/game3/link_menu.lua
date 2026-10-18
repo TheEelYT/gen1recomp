@@ -2,6 +2,7 @@ local Stack = require("src.ui.game3.stack")
 local Window = require("src.ui.game3.window")
 local FrlgFont = require("src.ui.game3.frlg_font")
 local Status = require("src.core.game3.link.status")
+local CacheBlob = require("src.import.CacheBlob")
 
 local LinkMenu = {}
 
@@ -53,12 +54,12 @@ local function read_bytes(rel)
     if okR and type(d) == "string" and #d > 0 then return d end
   end
   if love and love.filesystem and love.filesystem.read then
-    local okR, d = pcall(love.filesystem.read, "data/generated/gba/" .. rel)
+    local okR, d = pcall(CacheBlob.readFs, "data/generated/gba/" .. rel)
     if okR and type(d) == "string" and #d > 0 then return d end
   end
   local f = io.open("data/generated/gba/" .. rel, "rb")
   if f then
-    local d = f:read("*a")
+    local d = CacheBlob.decode("data/generated/gba/" .. rel, f:read("*a"))
     f:close()
     if d and #d > 0 then return d end
   end
@@ -121,6 +122,7 @@ function LinkMenu.loadArt()
     banks = raw and palette_banks(raw, banks) or nil,
     animFirst = tonumber(pals.anim_first) or LinkMenu.ANIM_FIRST,
     animCount = tonumber(pals.anim_count) or LinkMenu.ANIM_COUNT,
+    layout = type(manifest.layout) == "table" and manifest.layout or nil,
   }
   return LinkMenu._art
 end
@@ -264,6 +266,17 @@ end
 LinkMenu.countText = count_text
 
 -- pokefirered/src/wireless_communication_status_screen.c:264 PrintHeaderTexts
+LinkMenu.LAYOUT = { title_y = 6, label_x = 24, label_y = 10, row_step = 30, count_x = 204, total_y = 100 }
+
+function LinkMenu.layout()
+  local art = LinkMenu._art
+  local L = art and art.layout
+  if not L then return LinkMenu.LAYOUT end
+  local out = {}
+  for k, v in pairs(LinkMenu.LAYOUT) do out[k] = tonumber(L[k]) or v end
+  return out
+end
+
 function LinkMenu.draw()
   if not (LinkMenu.open and love and love.graphics) then return end
   local art = LinkMenu._art
@@ -279,14 +292,17 @@ function LinkMenu.draw()
     Window.stdFrame(LinkMenu.COUNT_TEMPLATE)
   end
 
+  local L = LinkMenu.layout()
   local title = Status.HEADER[0]
   local titleW = FrlgFont.measure and FrlgFont.measure(title) or (#title * 5)
-  Window.printPx(title, 24 + math.floor((192 - titleW) / 2), 6, LinkMenu.OPT.TITLE)
+  Window.printPx(title, 24 + math.floor((192 - titleW) / 2), L.title_y, LinkMenu.OPT.TITLE)
   for i, row in ipairs(LinkMenu.rows) do
-    local y = 32 + 30 * (i - 1) + 10
+    local y = 32 + L.row_step * (i - 1) + L.label_y
     local opt = row.total and LinkMenu.OPT.TOTAL or LinkMenu.OPT.NORMAL
-    Window.printPx(row.label, 24, y, opt)
-    Window.printPx(count_text(row.count), 204, y, opt)
+    Window.printPx(row.label, L.label_x, y, opt)
+    local countY = y
+    if row.total then countY = 32 + L.total_y end
+    Window.printPx(count_text(row.count), L.count_x, countY, opt)
   end
 end
 
@@ -329,7 +345,7 @@ Direct.modes = nil
 Direct.list = nil
 Direct._refresh = 0
 
-local function RomText() return require("src.core.game3.rom_text") end
+local function RomText() return require("src.core.game3.link.family").romText() end
 local function ListMenu() return require("src.ui.game3.list_menu") end
 local function Message() return require("src.ui.game3.message") end
 local function Choice() return require("src.ui.game3.choice") end
@@ -616,6 +632,20 @@ end
 
 -- pokefirered/src/cable_club.c:87
 local function drawPlayerCount()
+  local Profile = require("src.core.game3.profile")
+  local Policy = require("src.ui.game3.rs.trade_policy")
+  if Policy.matches(Profile.forSession().id) then
+    local man = assert(require("src.ui.game3.rse.scene_kit").manifest(Policy.SUB), "native RS cable UI missing")
+    local row = Policy.cableCount(man, Direct.count)
+    if not row then return end
+    local r, p = row.rect, row.origin
+    Window.stdFrame(Window.template(r[1] + 1, r[2] + 1, r[3] - r[1] - 1, r[4] - r[2] - 1))
+    local text = Policy.text(row.key, {stringVars = row.stringVars})
+    local opts = {font = "native_3"}
+    local width = FrlgFont.measure(text, opts)
+    FrlgFont.draw(text, p[1] * 8 + math.floor((row.width - width) / 2), p[2] * 8, opts)
+    return
+  end
   local tpl = Direct.COUNT_TEMPLATE
   Window.stdFrame(tpl)
   FrlgFont.draw(RomText().plain("gText_NumPlayerLink", { stringVars = { tostring(Direct.count) } }),

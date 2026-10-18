@@ -4,7 +4,7 @@
 package.path = package.path .. ";./?.lua;./?/init.lua;./tools/save-editor/?.lua"
   .. ";./tools/save-editor/panels/?.lua"
 
-require("tests.love_stub")
+_G.love = require("tests.love_stub")
 
 local SaveData = require("src.core.SaveData")
 local GameVersion = require("src.core.GameVersion")
@@ -67,12 +67,13 @@ do
 end
 
 -- Slot summary with string flag keys and playtime field
+local caughtSave
 do
   local save = {
     version = "firered",
     playerName = "RED",
     dex = {
-      caught = { ["BULBASAUR"] = true, ["CHARMANDER"] = true },
+      caught = { [1] = true, [4] = true },
     },
     playtime = { hours = 2, minutes = 5, seconds = 0 },
     flags = {
@@ -86,9 +87,10 @@ do
 
   local name, meta = SaveData.slotSummary(save)
   checkEq(name, "RED", "slotSummary derives playerName")
-  checkEq(meta.dexCount, 2, "slotSummary derives dex count from dex.caught")
+  checkEq(meta.dexCount, 2, "slotSummary derives dex count from numeric dex.caught")
   checkEq(meta.timeText, "2:05", "slotSummary formats playtime")
   checkEq(meta.badges, 5, "slotSummary counts badges from string flag keys")
+  caughtSave = save
 end
 
 -- --------------------------------------------------------------------------
@@ -104,11 +106,46 @@ do
   checkEq(Gen.boxCapacity({ version = "firered" }), 30, "Gen.boxCapacity returns 30 for FireRed")
 end
 
+do
+  local App = require("tools.save-editor.App")
+  local ready = Gen.game3CacheReady
+  local previousVersion = GameVersion.get()
+  Gen.game3CacheReady = function() return false end
+  local ok, err = pcall(App.load, nil, { version = "firered", slotId = "slot1", embedded = true })
+  Gen.game3CacheReady = ready
+  check(ok, "App.load with no FireRed cache does not raise: " .. tostring(err))
+  local S = App.getState()
+  check(S and S.missingCache and S.missingCache:find("No imported FireRed ROM cache", 1, true) ~= nil,
+    "App.load with no FireRed cache names the missing cache")
+  checkEq(S and S.status, S and S.missingCache, "missing-cache message is the status line")
+  checkEq(S and S.allowSave, false, "missing-cache session cannot save")
+  check(S and S.save == nil, "missing-cache session loads no save")
+  local okD, errD = pcall(App.draw)
+  check(okD, "App.draw renders the missing-cache screen: " .. tostring(errD))
+  checkEq(App.save(), false, "App.save refuses with no FireRed cache")
+  checkEq(App.reload(), false, "App.reload refuses with no FireRed cache")
+  App.unload()
+  GameVersion.set(previousVersion)
+end
+
 -- --------------------------------------------------------------------------
 -- 3. Data Binding (Gen.bindGame3Data)
 -- --------------------------------------------------------------------------
-require("tests.game3_cache").mountOrSkip("save_editor_gen3_tests")
+local Game3Cache = require("tests.game3_cache")
+local cacheRoot = Game3Cache.mount()
+if not cacheRoot then
+  print(string.format("save editor gen3 tests: %d passed, %d failed", passed, failed))
+  print("[skip] save_editor_gen3_tests ROM-dependent checks: " .. tostring(Game3Cache.reason))
+  os.exit(failed > 0 and 1 or 0)
+end
+print("[info] FireRed cache at " .. cacheRoot)
+
+caughtSave.dex.caught = { ["BULBASAUR"] = true, ["CHARMANDER"] = true }
+local _, caughtMeta = SaveData.slotSummary(caughtSave)
+checkEq(caughtMeta.dexCount, 2, "slotSummary derives dex count from dex.caught")
+
 local mockData = {}
+GameVersion.set("firered")
 Gen.bindGame3Data(mockData)
 
 do
@@ -442,6 +479,7 @@ do
   -- Add to bag
   Ops.addToBag(S, "POTION")
   checkEq(save.inventory["13"], 1, "POTION added to bag x1")
+  checkEq(S.status, "Added POTION x1 to the bag", "the Gen 3 add toast says where the item went")
   check(save.bag ~= nil and save.bag.stacks ~= nil, "save.bag updated")
 
   -- Adjust bag quantity
@@ -558,6 +596,13 @@ do
   check(pcall(Ops.pcCanMax, S), "Ops.pcCanMax handles table entries in pcItems without error")
   local okT, errT = pcall(App.draw)
   check(okT, "App.draw renders with table-typed items: " .. tostring(errT))
+  local numeric = true
+  for _, pc in ipairs({ false, true }) do
+    for _, r in ipairs(Ops.stackRows(S, pc)) do
+      if type(r.count) ~= "number" then numeric = false end
+    end
+  end
+  check(numeric, "Ops.stackRows reports numeric counts for table-typed items")
 
   App.unload()
 end
@@ -857,26 +902,5 @@ do
   end
 end
 
-do
-  local App = require("tools.save-editor.App")
-  local ready = Gen.game3CacheReady
-  Gen.game3CacheReady = function() return false end
-  local ok, err = pcall(App.load, nil, { version = "firered", slotId = "slot1", embedded = true })
-  Gen.game3CacheReady = ready
-  check(ok, "App.load with no FireRed cache does not raise: " .. tostring(err))
-  local S = App.getState()
-  check(S and S.missingCache and S.missingCache:find("No imported FireRed ROM cache", 1, true) ~= nil,
-    "App.load with no FireRed cache names the missing cache")
-  checkEq(S and S.status, S and S.missingCache, "missing-cache message is the status line")
-  checkEq(S and S.allowSave, false, "missing-cache session cannot save")
-  check(S and S.save == nil, "missing-cache session loads no save")
-  local okD, errD = pcall(App.draw)
-  check(okD, "App.draw renders the missing-cache screen: " .. tostring(errD))
-  checkEq(App.save(), false, "App.save refuses with no FireRed cache")
-  checkEq(App.reload(), false, "App.reload refuses with no FireRed cache")
-  App.unload()
-end
-
 print(string.format("save editor gen3 tests: %d passed, %d failed", passed, failed))
 if failed > 0 then os.exit(1) end
-

@@ -8,6 +8,8 @@ local SE = require("src.core.game3.se_ids")
 local ShinySeq = require("src.core.game3.battle.shiny_seq")
 local BattleText = require("src.core.game3.battle.battle_text")
 local Adapter = require("src.core.game3.battle.adapter")
+local MonAnimBattle = require("src.core.game3.battle.mon_anim_battle")
+local TrainerPic = require("src.core.game3.trainer_pic")
 
 local SwitchSeq = {}
 
@@ -31,6 +33,7 @@ function SwitchSeq.reset()
   SwitchSeq._onDone = nil
   SwitchSeq._st = nil
   SwitchSeq._waitAnimSeq = false
+  SwitchSeq._waitingMonAnim = nil
 end
 
 function SwitchSeq.busy()
@@ -151,6 +154,7 @@ end
 function SwitchSeq.switchInFill(st, battler)
   return Adapter.fill(st, {
     side = battler.side, hpScale = hp_thresholds(st, battler), buff1 = State.displayName(battler),
+    switchBattler = State.idOf(battler),
     linkScrTrainerName = st and st.linkNames and st.linkNames[State.idOf(battler)] or nil,
   })
 end
@@ -255,6 +259,8 @@ local function engine_entry_events(st, sides, opts)
     for _, side in ipairs(sides) do
       local b = st and ((type(side) == "number") and State.battler(st, side) or st[side])
       if b and b.mon and (tonumber(b.mon.hp) or 0) > 0 then
+        local sequencing = require("src.core.game3.battle.profile").rule(st, "sequencingPolicy")
+        if sequencing then sequencing.prepareSwitch(ad, b, opts.nativeSwitchKind or "replace") end
         Engine.switchInEffects(st, ad, b, { spikes = true, deferIntimidate = opts.deferIntimidate })
       end
     end
@@ -301,7 +307,7 @@ function SwitchSeq.beginPlayerSwitch(st, newSlot, opts)
     State.trackParticipant(st, st.enemy, newSlot)
     Anim.syncDisplayFromState(st)
     if SwitchSeq._pushMsg then SwitchSeq._pushMsg(switch_in_text(st, st.player)) end
-    headless_entry(st, { "player" })
+    headless_entry(st, { "player" }, { nativeSwitchKind = "switch" })
     finish()
     return false
   end
@@ -315,7 +321,7 @@ function SwitchSeq.beginPlayerSwitch(st, newSlot, opts)
     { kind = "shiny_check", data = { side = "player" } },
     { kind = "cry", data = { side = "player" } },
     { kind = "healthbox", data = { side = "player" } },
-    { kind = "entry_triggers", data = { side = "player" } },
+    { kind = "entry_triggers", data = { side = "player", nativeSwitchKind = "switch" } },
   }
 
   SwitchSeq._steps = steps
@@ -356,7 +362,7 @@ function SwitchSeq.beginSendOut(st, side, newSlot, opts)
   local steps = {}
   if side == "player" then
     steps = {
-      { kind = "swap_data", data = { side = "player", newSlot = newSlot } },
+      { kind = "swap_data", data = { side = "player", newSlot = newSlot, nativeSwitchKind = "replace" } },
       { kind = "msg_sendout", data = { side = "player" } },
       { kind = "sendout_player", data = { slot = newSlot } },
       { kind = "shiny_check", data = { side = "player" } },
@@ -366,7 +372,7 @@ function SwitchSeq.beginSendOut(st, side, newSlot, opts)
     }
   else
     steps = {
-      { kind = "swap_data", data = { side = "enemy", newSlot = newSlot } },
+      { kind = "swap_data", data = { side = "enemy", newSlot = newSlot, nativeSwitchKind = "replace" } },
       { kind = "msg_sendout", data = { side = "enemy" } },
       { kind = "sendout_enemy", data = { slot = newSlot } },
       { kind = "shiny_check", data = { side = "enemy" } },
@@ -414,7 +420,7 @@ function SwitchSeq.beginDoubleSwitch(st, id, newSlot, opts)
     if SwitchSeq._pushMsg then
       SwitchSeq._pushMsg(switch_in_text(st, nb))
     end
-    headless_entry(st, { id })
+    headless_entry(st, { id }, { nativeSwitchKind = reason })
     finish()
     return false
   end
@@ -432,7 +438,7 @@ function SwitchSeq.beginDoubleSwitch(st, id, newSlot, opts)
   steps[#steps + 1] = { kind = "shiny_check", data = { id = id } }
   steps[#steps + 1] = { kind = "cry", data = { id = id } }
   steps[#steps + 1] = { kind = "healthbox", data = { id = id } }
-  steps[#steps + 1] = { kind = "entry_triggers", data = { id = id } }
+  steps[#steps + 1] = { kind = "entry_triggers", data = { id = id, nativeSwitchKind = reason } }
   SwitchSeq._steps = steps
   SwitchSeq._i = 1
   return true
@@ -483,7 +489,7 @@ function SwitchSeq.beginShiftSwitch(st, playerSlot, enemySlot, opts)
     State.wipeVolatilesAndStages(st.player)
     st.player = State.makeBattler(st.playerParty[playerSlot], "player", { partyIndex = playerSlot, st = st, state = st })
     if SwitchSeq._pushMsg then SwitchSeq._pushMsg(switch_in_text(st, st.player)) end
-    headless_entry(st, { "player" }, { deferIntimidate = true })
+    headless_entry(st, { "player" }, { deferIntimidate = true, nativeSwitchKind = "shift_player" })
     -- pokefirered/src/battle_script_commands.c:5945
     State.resetSentPokes(st)
     st.enemy = State.makeBattler(st.foeParty[enemySlot], "enemy", { partyIndex = enemySlot, st = st })
@@ -491,7 +497,7 @@ function SwitchSeq.beginShiftSwitch(st, playerSlot, enemySlot, opts)
     State.opponentSwitchInResetSentPokes(st, st.enemy)
     Anim.syncDisplayFromState(st)
     if SwitchSeq._pushMsg then SwitchSeq._pushMsg(switch_in_text(st, st.enemy)) end
-    headless_entry(st, { "enemy" }, { deferred = { "player" } })
+    headless_entry(st, { "enemy" }, { deferred = { "player" }, nativeSwitchKind = "shift_enemy" })
     finish()
     return false
   end
@@ -505,7 +511,7 @@ function SwitchSeq.beginShiftSwitch(st, playerSlot, enemySlot, opts)
     { kind = "shiny_check", data = { side = "player" } },
     { kind = "cry", data = { side = "player" } },
     { kind = "healthbox", data = { side = "player" } },
-    { kind = "entry_triggers", data = { side = "player", deferIntimidate = true } },
+    { kind = "entry_triggers", data = { side = "player", deferIntimidate = true, nativeSwitchKind = "shift_player" } },
     -- pokefirered/data/battle_scripts_1.s:2874
     { kind = "swap_data", data = { side = "enemy", newSlot = enemySlot, reason = "shift" } },
     { kind = "msg_sendout", data = { side = "enemy" } },
@@ -513,7 +519,7 @@ function SwitchSeq.beginShiftSwitch(st, playerSlot, enemySlot, opts)
     { kind = "shiny_check", data = { side = "enemy" } },
     { kind = "cry", data = { side = "enemy" } },
     { kind = "healthbox", data = { side = "enemy" } },
-    { kind = "entry_triggers", data = { side = "enemy", deferred = { "player" } } },
+    { kind = "entry_triggers", data = { side = "enemy", deferred = { "player" }, nativeSwitchKind = "shift_enemy" } },
   }
 
   SwitchSeq._steps = steps
@@ -536,9 +542,45 @@ function SwitchSeq.beginTrainerSlideIn(st, opts)
   end
 
   local steps = {
-    { kind = "trainer_slide_in", data = { side = "enemy" } },
+    { kind = "trainer_slide_in", data = { side = "enemy", picId = opts.picId } },
   }
+  if opts.trainerB then
+    -- pokeemerald/data/battle_scripts_1.s:2929
+    if opts.loseTextA and opts.loseTextA ~= "" then
+      steps[#steps + 1] = { kind = "msg", data = { text = opts.loseTextA } }
+    end
+    steps[#steps + 1] = { kind = "trainer_slide_out", data = {} }
+    steps[#steps + 1] = { kind = "trainer_slide_in", data = { side = "enemy", picId = opts.trainerB.pic } }
+  end
   SwitchSeq._steps = steps
+  SwitchSeq._i = 1
+  return true
+end
+
+-- pokeemerald/data/battle_scripts_2.s:193
+function SwitchSeq.beginWallyThrow(st, opts)
+  opts = opts or {}
+  SwitchSeq.reset()
+  SwitchSeq._st = st
+  SwitchSeq._headless = opts.headless and true or false
+  SwitchSeq._pushMsg = opts.pushMsg
+  SwitchSeq._onDone = opts.onDone
+  local retText = withdraw_text(st, st.player)
+  local nowText = BattleText.get("STRINGID_YOUTHROWABALLNOWRIGHT", Adapter.fill(st))
+  if SwitchSeq._headless then
+    if SwitchSeq._pushMsg then
+      SwitchSeq._pushMsg(retText)
+      SwitchSeq._pushMsg(nowText)
+    end
+    finish()
+    return false
+  end
+  SwitchSeq._steps = {
+    { kind = "msg", data = { text = retText } },
+    { kind = "withdraw", data = { side = "player" } },
+    { kind = "player_trainer_slide_in", data = { backPic = opts.backPic } },
+    { kind = "msg", data = { text = nowText } },
+  }
   SwitchSeq._i = 1
   return true
 end
@@ -547,12 +589,36 @@ local function wait_busy()
   SwitchSeq._waiting = true
 end
 
+local function play_release_cry(st, d)
+  local side = step_side(d)
+  local b = step_battler(st, d)
+  local sp = b and (b.species or (b.mon and (b.mon.species or b.mon.speciesId)))
+  if sp then
+    -- pokefirered/src/pokeball.c:782
+    local IntroSeq = require("src.core.game3.battle.intro_seq")
+    Audio.playCry(sp, IntroSeq.releaseCryMode(b.mon), (side == "player") and -25 or 25)
+  end
+end
+
 local function run_step(step)
   if not step then return end
   local kind = step.kind
   local d = step.data or {}
   local s = stage()
   local st = SwitchSeq._st
+
+  if kind == "mon_anim" then
+    for _, key in ipairs(d.ids or {}) do
+      MonAnimBattle.start(key, d.kind, { st = st, noCry = d.noCry })
+    end
+    advance()
+    return
+  end
+
+  if kind == "mon_anim_wait" then
+    SwitchSeq._waitingMonAnim = d.ids
+    return
+  end
 
   if kind == "msg" then
     if SwitchSeq._pushMsg and d.text then
@@ -607,7 +673,8 @@ local function run_step(step)
     if Engine and Engine.performSwitch and battle_adapter() and step_battler(st, d) and party and party[newSlot] then
       capture_events(function(ad)
         Engine.performSwitch(st, ad, d.id ~= nil and d.id or side, newSlot,
-          { batonPass = d.batonPass, reason = d.reason or "switch", isShift = d.isShift })
+          { batonPass = d.batonPass, reason = d.reason or "switch", isShift = d.isShift,
+            nativeSwitchKind = d.nativeSwitchKind })
       end)
       Anim.syncDisplayFromState(st)
       advance()
@@ -653,7 +720,6 @@ local function run_step(step)
     local sx, sy = require("src.core.game3.battle.pokedude").sendOutOrigin(st)
     s.ball.x = sx
     s.ball.y = sy
-    pcall(function() Audio.playSe(SE.SE_BALL_THROW, { pan = -64 }) end)
     wait_busy()
     Anim.tweenStage(25, function(u, t)
       local f = t.frames or (u * 25)
@@ -664,7 +730,7 @@ local function run_step(step)
     end, function()
       s.ball.frame = 1
       s.ball.rot = 0
-      pcall(function() Audio.playSe(SE.SE_BALL_OPEN, { pan = -64 }) end)
+      pcall(function() Audio.playSe(SE.SE_BALL_OPEN) end)
       Anim.ballOpen(d.id ~= nil and d.id or "player", s.ball.x, s.ball.y)
       local p = step_present(d.id ~= nil and d or { side = "player" }) or {}
       p.visible = true
@@ -698,7 +764,7 @@ local function run_step(step)
     wait_busy()
     Anim.tweenStage(16, function() end, function()
       s.ball.frame = 1
-      pcall(function() Audio.playSe(SE.SE_BALL_OPEN, { pan = 63 }) end)
+      pcall(function() Audio.playSe(SE.SE_BALL_OPEN) end)
       Anim.ballOpen(d.id ~= nil and d.id or "enemy", s.ball.x, s.ball.y)
       local p = step_present(d.id ~= nil and d or { side = "enemy" }) or {}
       p.visible = true
@@ -722,6 +788,12 @@ local function run_step(step)
 
   if kind == "shiny_check" then
     local b = step_battler(st, d)
+    local nextStep = SwitchSeq._steps and SwitchSeq._steps[SwitchSeq._i + 1]
+    if nextStep and nextStep.kind == "cry" and not nextStep.cryPlayed then
+      -- pokeemerald/src/pokeball.c:665
+      play_release_cry(st, nextStep.data or {})
+      nextStep.cryPlayed = true
+    end
     if ShinySeq.start(b, d.id ~= nil and d.id or d.side or "enemy", function()
       advance()
     end) then
@@ -733,14 +805,7 @@ local function run_step(step)
   end
 
   if kind == "cry" then
-    local side = step_side(d)
-    local b = step_battler(st, d)
-    local sp = b and (b.species or (b.mon and (b.mon.species or b.mon.speciesId)))
-    if sp then
-      -- pokefirered/src/pokeball.c:782
-      local IntroSeq = require("src.core.game3.battle.intro_seq")
-      Audio.playCry(sp, IntroSeq.releaseCryMode(b.mon), (side == "player") and -25 or 25)
-    end
+    if not step.cryPlayed then play_release_cry(st, d) end
     SwitchSeq._waiting = true
     SwitchSeq._waitingCry = true
     return
@@ -775,7 +840,7 @@ local function run_step(step)
       end)
       sides = sorted
     end
-    local entryOpts = { deferIntimidate = d.deferIntimidate, deferred = d.deferred }
+    local entryOpts = { deferIntimidate = d.deferIntimidate, deferred = d.deferred, nativeSwitchKind = d.nativeSwitchKind }
     local evs = engine_entry_events(st, sides, entryOpts)
     if evs == nil then
       fallback_entry(st, sides, SwitchSeq._pushMsg, entryOpts)
@@ -812,9 +877,10 @@ local function run_step(step)
     end
     local Trainers = require("src.core.game3.scripting.trainers")
     local info = st and st.trainerId and Trainers.info(st.trainerId)
-    local picId = (st and st.trainerPicId) or (info and info.pic) or 0
+    local picId = d.picId or (st and st.trainerPicId) or (info and info.pic) or 0
     s.trainer.enemy.visible = true
     s.trainer.enemy.picId = picId
+    s.trainer.enemy.x, s.trainer.enemy.pic2, s.trainer.enemy.x2 = nil, nil, nil
     s.trainer.enemy.ox = 240
     wait_busy()
     Anim.tweenStage(35, function(u)
@@ -826,11 +892,48 @@ local function run_step(step)
     return
   end
 
+  if kind == "player_trainer_slide_in" then
+    -- pokeemerald/src/battle_controller_wally.c:1050
+    local tp = s.trainer.player
+    if d.backPic ~= nil then tp.gender = d.backPic end
+    tp.visible = true
+    tp.frame = TrainerPic.backIdleFrame(tp.gender)
+    tp.ox = -96
+    wait_busy()
+    Anim.tweenStage(48, function(u)
+      tp.ox = -96 * (1 - u)
+    end, function()
+      tp.ox = 0
+      advance()
+    end)
+    return
+  end
+
+  if kind == "trainer_slide_out" then
+    -- pokeemerald/src/battle_controller_opponent.c:1397
+    wait_busy()
+    Anim.tweenStage(35, function(u)
+      s.trainer.enemy.ox = 104 * u
+    end, function()
+      s.trainer.enemy.visible = false
+      s.trainer.enemy.ox = 0
+      advance()
+    end)
+    return
+  end
+
   advance()
 end
 
 function SwitchSeq.update()
   if not SwitchSeq._steps then return true end
+  if SwitchSeq._i == 1 then SwitchSeq._steps = MonAnimBattle.switchSteps(SwitchSeq._steps) end
+
+  if SwitchSeq._waitingMonAnim then
+    if MonAnimBattle.busy(SwitchSeq._waitingMonAnim) then return false end
+    SwitchSeq._waitingMonAnim = nil
+    advance()
+  end
 
   if SwitchSeq._waitAnimSeq then
     local AnimSeq = require("src.core.game3.battle.anim_seq")
@@ -867,7 +970,8 @@ function SwitchSeq.update()
 
   while SwitchSeq._steps and SwitchSeq._i <= #SwitchSeq._steps do
     run_step(SwitchSeq._steps[SwitchSeq._i])
-    if SwitchSeq._waiting or SwitchSeq._waitingCry or SwitchSeq._waitingMsg or SwitchSeq._waitAnimSeq then
+    if SwitchSeq._waiting or SwitchSeq._waitingCry or SwitchSeq._waitingMsg or SwitchSeq._waitAnimSeq
+        or SwitchSeq._waitingMonAnim then
       return false
     end
   end

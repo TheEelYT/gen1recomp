@@ -338,6 +338,8 @@ function RomExtractorGen2:extractConstants()
   self:beginStage("Game constants")
   local data = copy(self.manifest.constants)
   data.generation = 2
+  data.spriteContext = require("src.import.Gen2SpriteMetadata").read(
+    self.rom, self.symbols, data, self.edition)
   self:write("constants", data)
   self:tick("Game constants", 1, 1)
   return data
@@ -2596,16 +2598,11 @@ end
 --                         Game Boy Printer's second sheet and is not read
 --                         here, the same way PrintDiploma stays stubbed.
 --   DiplomaPalettes       gfx/diploma/diploma.pal, eight four-colour sets.
---                         _CGB_Diploma (engine/gfx/cgb_layouts.asm) loads all
---                         eight and then WipeAttrmap zeroes the attrmap, so
---                         set 0 is the one the whole screen actually draws
---                         through; the rest are written out because the block
---                         is one table.
---
--- Tolerated rather than required, like credits: a manifest built before these
--- three symbols were listed still imports, it just leaves src/ui/gen2/
--- Diploma.lua on its placeholder frame.
+--   bgPalette             gfx/sgb/predef.pal:28 PREDEFPAL_DIPLOMA
+--                         engine/gfx/cgb_layouts.asm:495
 local DIPLOMA_TILES = 112
+-- constants/scgb_constants.asm:71
+local PREDEFPAL_DIPLOMA = 27
 local DIPLOMA_SHEET_TILES = 16 -- tiles per row of the sheet
 local DIPLOMA_SCREEN_W, DIPLOMA_SCREEN_H = 20, 18
 local DIPLOMA_PALETTE_SETS = 8
@@ -2650,6 +2647,7 @@ function RomExtractorGen2:extractDiploma()
     end
     data.palettes = palettes
   end
+  data.bgPalette = self:predefPal(PREDEFPAL_DIPLOMA)
   self:tick("Diploma", 3, 3)
 
   self:write("diploma", data)
@@ -3095,6 +3093,78 @@ local function romAddrOk(bank, address)
   return address >= 0x4000 and address < 0x8000
 end
 
+-- pokecrystal/data/radio/buenas_passwords.asm:1
+function RomExtractorGen2:readBuenaPasswordData()
+  if self.edition ~= "crystal" then return nil end
+  local tableAt = self:symbol("BuenasPasswordTable")
+  local nameAt = self:symbol("BuenasPasswordChannelName")
+  local charmap = self.manifest.charmap or {}
+  local constants = self.manifest.constants or {}
+  local kinds = { "mon", "item", "move", "string" }
+  local orders = { constants.speciesOrder, constants.itemOrder,
+    constants.moveOrder }
+  local function range(bank, address, count)
+    assert(type(bank) == "number" and bank % 1 == 0 and bank >= 0
+      and bank <= 0x7f, "invalid Buena ROM bank")
+    local first, last = bank == 0 and 0 or 0x4000,
+      bank == 0 and 0x4000 or 0x8000
+    assert(type(address) == "number" and address % 1 == 0
+      and address >= first and address + count <= last,
+      "invalid Buena ROM pointer")
+  end
+  local function readString(bank, address, limit)
+    local chars = {}
+    for offset = 0, limit - 1 do
+      range(bank, address + offset, 1)
+      local byte = self.rom:byte(bank, address + offset)
+      if byte == 0x50 then
+        assert(#chars > 0, "empty Buena ROM string")
+        return table.concat(chars), offset + 1
+      end
+      local char = charmap[tostring(byte)]
+      assert(type(char) == "string", "invalid Buena ROM character")
+      chars[#chars + 1] = char
+    end
+    error("unterminated Buena ROM string")
+  end
+  local stationName = readString(nameAt.bank, nameAt.address, 32)
+  local categories = {}
+  -- pokecrystal/constants/radio_constants.asm:120
+  range(tableAt.bank, tableAt.address, 11 * 2)
+  for category = 0, 10 do
+    local address = self.rom:word(tableAt.bank,
+      tableAt.address + category * 2)
+    range(tableAt.bank, address, 2)
+    local kind = self.rom:byte(tableAt.bank, address)
+    local width = self.rom:byte(tableAt.bank, address + 1)
+    assert(kinds[kind + 1], "invalid Buena password type")
+    assert(width > 0 and width <= 18, "invalid Buena password width")
+    local words = {}
+    address = address + 2
+    -- pokecrystal/constants/radio_constants.asm:121
+    for option = 1, 3 do
+      if kind == 3 then
+        local word, length = readString(tableAt.bank, address, 32)
+        words[option] = word
+        address = address + length
+      else
+        range(tableAt.bank, address, 1)
+        local id = self.rom:byte(tableAt.bank, address)
+        local word = orders[kind + 1] and orders[kind + 1][id]
+        assert(id > 0 and type(word) == "string"
+          and not word:match("^UNUSED") and word ~= "NO_ITEM",
+          "invalid Buena password identifier")
+        words[option] = word
+        address = address + 1
+      end
+    end
+    categories[#categories + 1] = {
+      kind = kinds[kind + 1], width = width, words = words,
+    }
+  end
+  return { stationName = stationName, categories = categories }
+end
+
 -- The side tables a script command NAMES rather than carries: the phone book,
 -- the in-game trades, the elevator's floor labels, and the five decoration
 -- descriptions.  Each row's script pointers come back with the rest so
@@ -3107,6 +3177,7 @@ function RomExtractorGen2:readEventTables()
   local consts = self.manifest.constants
   local charmap = self.manifest.charmap or {}
   local out = {}
+  out.buenaPassword = self:readBuenaPasswordData()
 
   local function name(list, index, fallback)
     if type(list) ~= "table" then return fallback end
@@ -4438,6 +4509,14 @@ function RomExtractorGen2:extractItems()
       entry.name = entry.name or entry.tmLabel
     end
   end
+  -- data/items/catch_rate_items.asm:5
+  local capsule = self:symbol("TimeCapsule_CatchRateItems")
+  out.timeCapsule = {}
+  for row = 0, 255 do
+    local from = self.rom:byte(capsule.bank, capsule.address + row * 2)
+    if from == 0 then break end
+    out.timeCapsule[from] = order[self.rom:byte(capsule.bank, capsule.address + row * 2 + 1)]
+  end
   self:write("items", out)
   self:tick("Items", #order, #order)
   return out
@@ -4602,6 +4681,56 @@ function RomExtractorGen2:extractMoves()
       category = (value < specialBoundary) and "physical" or "special",
     }
   end
+  -- data/battle/critical_hit_chances.asm:1
+  local rules = { criticalChances = {}, accuracyMultipliers = {},
+    highCriticalMoves = {}, moveScripts = {}, flailPower = {}, presentPower = {} }
+  local critical = self:symbol("CriticalHitChances")
+  for stage = 0, 6 do
+    rules.criticalChances[stage] = self.rom:byte(critical.bank, critical.address + stage)
+  end
+  -- data/battle/accuracy_multipliers.asm:4
+  local accuracy = self:symbol("AccuracyLevelMultipliers")
+  for stage = -6, 6 do
+    local address = accuracy.address + (stage + 6) * 2
+    rules.accuracyMultipliers[stage] = {
+      self.rom:byte(accuracy.bank, address), self.rom:byte(accuracy.bank, address + 1) }
+  end
+  -- data/moves/critical_hit_moves.asm:1
+  local highCritical = self:symbol("CriticalHitMoves")
+  for index = 0, #order do
+    local move = self.rom:byte(highCritical.bank, highCritical.address + index)
+    if move == 255 then break end
+    rules.highCriticalMoves[assert(order[move])] = true
+  end
+  -- data/moves/flail_reversal_power.asm:1
+  local flail = self:symbol("FlailReversalPower")
+  for index = 0, 5 do
+    rules.flailPower[#rules.flailPower + 1] = {
+      self.rom:byte(flail.bank, flail.address + index * 2),
+      self.rom:byte(flail.bank, flail.address + index * 2 + 1) }
+  end
+  -- data/moves/present_power.asm:1
+  local present = self:symbol("PresentPower")
+  for index = 0, 3 do
+    local threshold = self.rom:byte(present.bank, present.address + index * 2)
+    if threshold == 255 then break end
+    rules.presentPower[#rules.presentPower + 1] = { threshold,
+      self.rom:byte(present.bank, present.address + index * 2 + 1) }
+  end
+  -- data/moves/effects_pointers.asm:1
+  local pointers = self:symbol("MoveEffectsPointers")
+  local scripts = self:symbol("MoveEffects")
+  local commands = assert(consts.battleCommandOrder)
+  for index, effect in ipairs(effects) do
+    local address = self.rom:word(pointers.bank, pointers.address + (index - 1) * 2)
+    local script = {}
+    for offset2 = 0, 255 do
+      local command = self.rom:byte(scripts.bank, address + offset2)
+      if command >= 254 then break end
+      script[#script + 1] = assert(commands[command], "unknown battle command")
+    end
+    rules.moveScripts[effect] = script
+  end
   self:write("type_chart", {
     generation = 2,
     source = "ROM:TypeMatchups + TypeNames",
@@ -4609,6 +4738,7 @@ function RomExtractorGen2:extractMoves()
     types = records,
     matchups = matchups,
     foresightMatchups = foresight,
+    battleRules = rules,
   })
   self:tick("Moves", #order, #order)
   return out
@@ -5065,6 +5195,78 @@ function RomExtractorGen2:btSampleCeiling(label)
   error("battle tower sample ceiling not found at " .. label)
 end
 
+-- ../pokecrystal/engine/events/battle_tower/trainer_text.asm:29-34, :41-46
+local function btTextRolls(raw)
+  local rolls = {}
+  for index = 1, #raw - 4 do
+    if raw[index] == 0xe6 and raw[index + 2] == 0xfe
+        and raw[index + 4] == 0x38 then
+      rolls[#rolls + 1] = { mask = raw[index + 1], count = raw[index + 3] }
+    end
+  end
+  return rolls
+end
+
+-- ../pokecrystal/engine/events/battle_tower/trainer_text.asm:90-230
+function RomExtractorGen2:readBattleTowerTextSet(label, roll, charmap)
+  local sym = self:symbol(label)
+  local tables = {}
+  for slot = 0, 2 do
+    tables[slot + 1] = self.rom:word(sym.bank, sym.address + slot * 2)
+  end
+  local count = math.floor((tables[2] - tables[1]) / 2)
+  local lists = {}
+  for slot = 1, 3 do
+    local rows = {}
+    for index = 0, count - 1 do
+      local struct = self.rom:word(sym.bank, tables[slot] + index * 2)
+      -- ../pokecrystal/macros/scripts/text.asm:156-160 text_far
+      assert(self.rom:byte(sym.bank, struct) == 0x16,
+        ("battle tower text %s[%d][%d] is not text_far"):format(label, slot, index))
+      local address = self.rom:word(sym.bank, struct + 1)
+      local bank = self.rom:byte(sym.bank, struct + 3)
+      rows[index + 1] = self:decodeGen2Text(bank, address, charmap)
+    end
+    lists[slot] = rows
+  end
+  return {
+    mask = roll.mask,
+    count = roll.count,
+    intro = lists[1],
+    playerLost = lists[2],
+    playerWon = lists[3],
+  }
+end
+
+-- ../pokecrystal/engine/events/battle_tower/trainer_text.asm:1-84
+function RomExtractorGen2:readBattleTowerText(charmap)
+  for _, name in ipairs({ "BattleTowerText", "BTTrainerClassGenders",
+      "BTMaleTrainerTexts", "BTFemaleTrainerTexts", "wBT_OTTrainerClass" }) do
+    if not self.symbols[name] then return nil end
+  end
+  local code = self:symbol("BattleTowerText")
+  local raw = self.rom:bytes(code.bank, code.address, 0x40)
+  -- trainer_text.asm:10-19 `ld hl, nn`
+  local source
+  for index = 1, #raw - 2 do
+    if raw[index] == 0x21 then
+      source = raw[index + 1] + raw[index + 2] * 0x100
+      break
+    end
+  end
+  assert(source, "battle tower text gender source not found")
+  local rolls = btTextRolls(raw)
+  assert(#rolls == 2, "battle tower text rolls not found")
+  local genders = self:symbol("BTTrainerClassGenders")
+  return {
+    genderByName = source ~= self:symbol("wBT_OTTrainerClass").address,
+    classGenders = self.rom:bytes(genders.bank, genders.address, 256),
+    male = self:readBattleTowerTextSet("BTMaleTrainerTexts", rolls[1], charmap),
+    female = self:readBattleTowerTextSet("BTFemaleTrainerTexts", rolls[2],
+      charmap),
+  }
+end
+
 -- One `party_struct` (../pokecrystal/macros/ram.asm party_struct, laid out by
 -- ../pokecrystal/constants/pokemon_data_constants.asm:75-113).  Every word in
 -- it is big-endian, which is what `bigdw` / `bigdt` in parties.asm emit.
@@ -5147,6 +5349,8 @@ function RomExtractorGen2:readBattleTowerRoster(consts, charmap)
     trainers[index + 1] = {
       index = index,
       name = self.rom:decodeText(raw, charmap, 0x50),
+      -- ../pokecrystal/engine/events/battle_tower/trainer_text.asm:18
+      nameRaw = raw,
       class = classId,
       classId = classOrder[classId + 1],
     }
@@ -5189,6 +5393,7 @@ function RomExtractorGen2:readBattleTowerRoster(consts, charmap)
     trainers = trainers,
     groups = groups,
     classSprites = sprites,
+    text = self:readBattleTowerText(charmap),
   }
 end
 

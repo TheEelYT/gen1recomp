@@ -6,6 +6,7 @@
 -- move one); toss discards after a YES/NO confirm.  Follows the
 -- BoxMenu/BagMenu list idioms.
 
+local Bag = require("src.inventory.Bag")
 local ChoiceBox = require("src.ui.ChoiceBox")
 local ListMenu = require("src.ui.ListMenu")
 local Menu = require("src.ui.Menu")
@@ -13,28 +14,29 @@ local Sound = require("src.core.Sound")
 local Strings = require("src.core.Strings")
 local TextBox = require("src.render.TextBox")
 local romText = require("src.core.RomText")
+local Font = require("src.render.Font")
+local Theme = require("src.ui.Theme")
 
-local PlayerPC = {}
+local PlayerPC = { isMenu = true }
 
 local function itemName(game, id)
   local def = game.data.items[id]
   return def and def.name or id
 end
 
-local function buildItems(game, store, order)
+local function buildItems(game, rows)
   local items = {}
-  local ids = order
-  if not ids then
-    ids = {}
-    for id in pairs(store) do table.insert(ids, id) end
-    table.sort(ids)
-  end
-  for _, id in ipairs(ids) do
-    if store[id] then
+  for _, row in ipairs(rows) do
+    local id = row.id
+    if row.count ~= nil then
+      local def = game.data.items[id]
+      local keyItem = (def and def.keyItem) or id:find("^HM_") ~= nil
       table.insert(items, {
         value = id,
         label = itemName(game, id),
-        count = store[id],
+        count = not keyItem and row.count or nil,
+        slot = row.slot,
+        stack = row.count,
       })
     end
   end
@@ -58,33 +60,76 @@ end
 -- cb(qty) runs only on confirm.
 local function askQuantity(game, list, count, id, cb)
   local def = game.data.items[id]
+  list.pcQtyBox = nil
   if (def and def.keyItem) or id:find("^HM_") then
     cb(1)
     return
   end
+  local prompt = list.footer
   list.footer = Strings("How many?")
   local QuantityBox = require("src.ui.QuantityBox")
-  game.stack:push(QuantityBox.new(game, {
+  local box
+  box = QuantityBox.new(game, {
     max = count,
     onDone = function(qty)
-      if qty then cb(qty) else list.footer = nil end
+      if qty then
+        -- engine/menus/players_pc.asm:136-137
+        list.pcQtyBox = box
+        cb(qty)
+      else
+        list.footer = prompt
+      end
     end,
-  }))
+  })
+  game.stack:push(box)
 end
 
--- refresh the chosen row's count from `store` (or drop the row)
-local function refreshRow(list, store, id)
-  for i, it in ipairs(list.items) do
-    if it.value == id then
-      if store[id] then
-        it.count = store[id]
-      else
-        table.remove(list.items, i)
-      end
-      break
+local function refreshRows(list, items)
+  if #items < #list.items then
+    list.index, list.scroll = 1, 0 -- engine/items/inventory.asm:131
+  end
+  list.items = items
+  list.index = math.max(1, math.min(list.index, #list.items))
+end
+
+local function pcList(game, items, opts)
+  local list = ListMenu.new(game, nil, items, opts)
+  list.pcPrompt = list.footer
+  list.pcCompletionBlink = 0
+  local draw = list.draw
+  list.draw = function(self)
+    draw(self)
+    if self.pcCompletion and self.pcQtyBox then self.pcQtyBox:draw() end
+    if self.pcCompletion
+       and self.pcCompletionBlink % 60 < 30 then
+      Font.drawCode(Theme.moreArrow, 144, 128)
     end
   end
-  list.index = math.max(1, math.min(list.index, #list.items))
+  local update = list.update
+  list.update = function(self, dt)
+    if self.pcCompletion then
+      self.pcCompletionBlink = (self.pcCompletionBlink + 1) % 60
+      local input = game.input
+      if input:wasPressed("a") or input:wasPressed("b") then
+        Sound.playPress(game.data)
+        self.pcCompletion = nil
+        self.pcQtyBox = nil
+        local after = self.pcAfter
+        self.pcAfter = nil
+        if after then after() end
+        self.footer = self.pcPrompt
+      end
+      return
+    end
+    update(self, dt)
+  end
+  function list:showCompletion(text, after)
+    self.footer = text
+    self.pcCompletion = true
+    self.pcCompletionBlink = 0
+    self.pcAfter = after
+  end
+  return list
 end
 
 local function withdraw(game)
@@ -95,7 +140,7 @@ local function withdraw(game)
       "There is nothing\nstored."), nil, { noSound = true }))
     return
   end
-  game.stack:push(ListMenu.new(game, nil, buildItems(game, pc), {
+  game.stack:push(pcList(game, buildItems(game, Bag.pcRows(game.save, game.data)), {
     kind = "pc_item_withdraw",
     messageBox = true,
     -- players_pc.asm:151-152 WhatToWithdrawText, printed before the list
@@ -104,35 +149,31 @@ local function withdraw(game)
     noSound = true, -- PlayerPCMenu holds BIT_NO_MENU_BUTTON_SOUND (#570)
     onChoose = function(item, list)
       if leftOnCancel(item, list) then return end
-      askQuantity(game, list, pc[item.value] or 1, item.value, function(qty)
-        local Bag = require("src.inventory.Bag")
+      list.hollowIndex = list.index -- home/list_menu.asm:91
+      askQuantity(game, list, item.stack or pc[item.value] or 1, item.value, function(qty)
         if not Bag.add(game.save, item.value, qty, game.data) then
           list.footer = Strings("You can't carry\nany more items.")
           return
         end
-        pc[item.value] = pc[item.value] - qty
-        if pc[item.value] <= 0 then pc[item.value] = nil end
-        refreshRow(list, pc, item.value)
+        Bag.pcRemove(game.save, item.value, qty, game.data, item.slot)
         Sound.play(game.data, "Withdraw_Deposit")
-        list.footer = Strings("Withdrew\n%s.", itemName(game, item.value))
+        list:showCompletion(romText(game.data, "_WithdrewItemText",
+          "Withdrew\n%s.{PROMPT}", itemName(game, item.value)),
+          function() refreshRows(list, buildItems(game, Bag.pcRows(game.save, game.data))) end) -- engine/menus/players_pc.asm:191
       end)
     end,
   }))
 end
 
 -- wNumBoxItems capacity: 50 stacks (PC_ITEM_CAPACITY)
-local function pcFull(game, pc, id)
-  if pc[id] then return false end -- growing an existing stack is fine
+local function storeInPC(game, pc, id, qty)
   local cap = game.data.field.pcItemCap or 50
-  local stacks = 0
-  for _ in pairs(pc) do stacks = stacks + 1 end
-  return stacks >= cap
+  return Bag.pcAdd(game.save, id, qty, game.data, cap)
 end
 
 local function deposit(game)
   local pc = game.save.pcItems
   local inv = game.save.inventory
-  local Bag = require("src.inventory.Bag")
   -- engine/menus/players_pc.asm:99 wListPointer = wNumBagItems, so deposit order == bag order
   local order = Bag.order(game.save, game.data)
   -- players_pc.asm:90-95: an empty bag never reaches the list
@@ -141,7 +182,7 @@ local function deposit(game)
       "You have nothing\nto deposit."), nil, { noSound = true }))
     return
   end
-  game.stack:push(ListMenu.new(game, nil, buildItems(game, inv, order), {
+  game.stack:push(pcList(game, buildItems(game, Bag.rows(game.save, game.data)), {
     kind = "pc_item_deposit",
     messageBox = true,
     -- players_pc.asm:97-98 WhatToDepositText, printed before the list
@@ -150,16 +191,19 @@ local function deposit(game)
     noSound = true, -- PlayerPCMenu holds BIT_NO_MENU_BUTTON_SOUND (#570)
     onChoose = function(item, list)
       if leftOnCancel(item, list) then return end
-      askQuantity(game, list, inv[item.value] or 1, item.value, function(qty)
-        if pcFull(game, pc, item.value) then
+      list.hollowIndex = list.index -- home/list_menu.asm:91
+      askQuantity(game, list, item.stack or inv[item.value] or 1, item.value, function(qty)
+        if not storeInPC(game, pc, item.value, qty) then
           list.footer = Strings("No room left to\nstore items.")
           return
         end
-        require("src.inventory.Bag").remove(game.save, item.value, qty)
-        pc[item.value] = (pc[item.value] or 0) + qty
-        refreshRow(list, inv, item.value)
+        Bag.remove(game.save, item.value, qty, game.data, item.slot)
         Sound.play(game.data, "Withdraw_Deposit")
-        list.footer = Strings("%s was\nstored via PC.", itemName(game, item.value))
+        list:showCompletion(romText(game.data, "_ItemWasStoredText",
+          "%s was\nstored via PC.{PROMPT}", itemName(game, item.value)),
+          function()
+            refreshRows(list, buildItems(game, Bag.rows(game.save, game.data)))
+          end) -- engine/menus/players_pc.asm:137
       end)
     end,
   }))
@@ -173,7 +217,7 @@ local function toss(game)
       "There is nothing\nstored."), nil, { noSound = true }))
     return
   end
-  game.stack:push(ListMenu.new(game, nil, buildItems(game, pc), {
+  game.stack:push(pcList(game, buildItems(game, Bag.pcRows(game.save, game.data)), {
     kind = "pc_item_toss",
     messageBox = true,
     -- players_pc.asm:205-206 WhatToTossText, printed before the list
@@ -182,6 +226,7 @@ local function toss(game)
     noSound = true, -- PlayerPCMenu holds BIT_NO_MENU_BUTTON_SOUND (#570)
     onChoose = function(item, list)
       if leftOnCancel(item, list) then return end
+      list.hollowIndex = list.index -- home/list_menu.asm:91
       local def = game.data.items[item.value]
       if (def and def.keyItem) or item.value:find("^HM_") then
         list.footer = Strings("That's too impor-\ntant to toss!")
@@ -189,16 +234,16 @@ local function toss(game)
       end
       local QuantityBox = require("src.ui.QuantityBox")
       game.stack:push(QuantityBox.new(game, {
-        max = pc[item.value] or 1,
+        max = item.stack or pc[item.value] or 1,
         onDone = function(qty)
           if not qty then return end
           list.footer = Strings("Toss %s?", itemName(game, item.value))
           game.stack:push(ChoiceBox.new(game, function(yes)
             if yes then
-              pc[item.value] = pc[item.value] - qty
-              if pc[item.value] <= 0 then pc[item.value] = nil end
-              refreshRow(list, pc, item.value)
-              list.footer = Strings("Threw away %s.", itemName(game, item.value))
+              Bag.pcRemove(game.save, item.value, qty, game.data, item.slot)
+              list:showCompletion(romText(game.data, "_ThrewAwayItemText",
+                "Threw away\n%s.{PROMPT}", itemName(game, item.value)),
+                function() refreshRows(list, buildItems(game, Bag.pcRows(game.save, game.data))) end) -- engine/menus/players_pc.asm:240
             else
               list.footer = nil
             end
@@ -217,7 +262,7 @@ function PlayerPC.new(game, opts)
   local logOff = function()
     if opts and opts.direct then Sound.play(game.data, "Turn_Off_PC") end
   end
-  return Menu.new(game, {
+  local rows = {
     -- keepOpen so B in the item lists returns here instead of dropping the
     -- whole PC session (players_pc.asm re-shows the PC menu); same pattern
     -- as BoxMenu's rows
@@ -225,9 +270,41 @@ function PlayerPC.new(game, opts)
     { label = Strings("DEPOSIT ITEM"), keepOpen = true, onSelect = function() deposit(game) end },
     { label = Strings("TOSS ITEM"), keepOpen = true, onSelect = function() toss(game) end },
     { label = Strings("LOG OFF"), onSelect = logOff },
-    -- silent PC session (BIT_NO_MENU_BUTTON_SOUND); players_pc.asm
-    -- PlayersPCMenu TextBoxBorder (0,0) b=8 c=14 → 16x10
-  }, { tx = 0, ty = 0, tw = 16, th = 10, noSound = true, onCancel = logOff })
+  }
+  -- silent PC session (BIT_NO_MENU_BUTTON_SOUND); players_pc.asm
+  -- PlayersPCMenu TextBoxBorder (0,0) b=8 c=14 → 16x10
+  local menu = Menu.new(game, rows, { tx = 0, ty = 0, tw = 16, th = 10,
+       noSound = true, onCancel = logOff })
+  local prompt = TextBox.strip(romText(game.data, "_WhatDoYouWantText",
+    "What do you want\nto do?"))
+  for _, row in ipairs(rows) do
+    local onSelect = row.onSelect
+    if row.keepOpen and onSelect then
+      row.onSelect = function()
+        menu.hollowIndex = menu.index -- engine/menus/players_pc.asm:55
+        onSelect()
+      end
+    end
+  end
+  local baseUpdate = menu.update
+  function menu:update(dt)
+    if self.game.stack:top() == self then self.hollowIndex = nil end
+    return baseUpdate(self, dt)
+  end
+  local baseDraw = menu.draw
+  function menu:draw()
+    baseDraw(self)
+    Font.drawBox(0, 12, 20, 6) -- engine/menus/players_pc.asm:50
+    love.graphics.setColor(0, 0, 0, 1)
+    local y = 112
+    for line in (prompt .. "\n"):gmatch("([^\n]*)\n") do
+      Font.draw(line, 8, y)
+      y = y + 16
+    end
+    love.graphics.setColor(1, 1, 1, 1)
+  end
+  menu.isMenu = true
+  return menu
 end
 
 return PlayerPC

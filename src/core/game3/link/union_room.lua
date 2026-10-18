@@ -1,31 +1,23 @@
-local RomText = require("src.core.game3.rom_text")
+local RomText = require("src.core.game3.link.family").romText()
 
 local Union = {}
 
--- pokefirered/include/constants/union_room.h:21
-Union.ACTIVITY = {
-  NONE = 0,
-  BATTLE_SINGLE = 1,
-  BATTLE_DOUBLE = 2,
-  BATTLE_MULTI = 3,
-  TRADE = 4,
-  CHAT = 5,
-  CARD = 8,
-  POKEMON_JUMP = 9,
-  BERRY_CRUSH = 10,
-  BERRY_PICK = 11,
-  SEARCH = 12,
-  SPIN_TRADE = 13,
-  ITEM_TRADE = 14,
-  RECORD_CORNER = 15,
-  BERRY_BLENDER = 16,
-  ACCEPT = 17,
-  DECLINE = 18,
-  NPCTALK = 19,
-  PLYRTALK = 20,
-  WONDER_CARD = 21,
-  WONDER_NEWS = 22,
-}
+local Family = require("src.core.game3.link.family")
+
+local activityRows = {}
+
+-- pokeemerald/include/constants/union_room.h:20
+Union.ACTIVITY = setmetatable({}, {
+  __index = function(_, k)
+    local version = Family.activeVersion()
+    local row = activityRows[version]
+    if not row then
+      row = Family.activity(version)
+      activityRows[version] = row
+    end
+    return row[k]
+  end,
+})
 
 -- pokefirered/include/constants/union_room.h:49
 Union.IN_UNION_ROOM = 0x40
@@ -38,24 +30,42 @@ Union.LINK_GROUP = {
   POKEMON_JUMP = 4,
   BERRY_CRUSH = 5,
   BERRY_PICKING = 6,
-  WONDER_CARD = 7,
-  WONDER_NEWS = 8,
   UNION_ROOM_RESUME = 9,
   UNION_ROOM_INIT = 10,
+  -- pokeemerald/include/constants/union_room.h:70
+  RECORD_CORNER = 12,
+  BERRY_BLENDER = 13,
+  COOL_CONTEST = 15,
+  BEAUTY_CONTEST = 16,
+  CUTE_CONTEST = 17,
+  SMART_CONTEST = 18,
+  TOUGH_CONTEST = 19,
+  BATTLE_TOWER = 20,
+  BATTLE_TOWER_OPEN = 21,
 }
 
--- pokefirered/src/data/union_room.h:43
-Union.GROUP_ACTIVITY = {
-  [0] = { activity = Union.ACTIVITY.BATTLE_SINGLE, min = 0, max = 2 },
-  [1] = { activity = Union.ACTIVITY.BATTLE_DOUBLE, min = 0, max = 2 },
-  [2] = { activity = Union.ACTIVITY.BATTLE_MULTI, min = 0, max = 4 },
-  [3] = { activity = Union.ACTIVITY.TRADE, min = 0, max = 2 },
-  [4] = { activity = Union.ACTIVITY.POKEMON_JUMP, min = 2, max = 5 },
-  [5] = { activity = Union.ACTIVITY.BERRY_CRUSH, min = 2, max = 5 },
-  [6] = { activity = Union.ACTIVITY.BERRY_PICK, min = 3, max = 5 },
-  [7] = { activity = Union.ACTIVITY.SPIN_TRADE, min = 3, max = 5 },
-  [8] = { activity = Union.ACTIVITY.ITEM_TRADE, min = 3, max = 5 },
-}
+Union.Family = Family
+
+local groupRows = {}
+
+-- pokeemerald/src/data/union_room.h:641
+Union.GROUP_ACTIVITY = setmetatable({}, {
+  __index = function(_, group)
+    local version = Family.activeVersion()
+    local key = version .. "|" .. tostring(group)
+    local row = groupRows[key]
+    if row == nil then
+      local g = Family.groupActivity(version, group)
+      row = g and { activity = g.activity, min = g.min, max = g.max, name = g.name } or false
+      groupRows[key] = row
+    end
+    return row or nil
+  end,
+})
+
+function Union.activities(version)
+  return Family.activity(version)
+end
 
 -- pokefirered/src/data/union_room.h:175
 Union.INVITE_ITEMS = {
@@ -65,15 +75,20 @@ Union.INVITE_ITEMS = {
   { key = "EXIT", activity = Union.ACTIVITY.NONE, union = true },
 }
 
--- pokefirered/src/data/union_room.h:1 sLinkGroupActivityNameTexts
-Union.ACTIVITY_NAMES = RomText.lazy({
-  [1] = "sLinkGroupActivityNameTexts[1]",
-  [2] = "sLinkGroupActivityNameTexts[2]",
-  [3] = "sLinkGroupActivityNameTexts[3]",
-  [4] = "sLinkGroupActivityNameTexts[4]",
-  [5] = "sLinkGroupActivityNameTexts[5]",
-  [8] = "sLinkGroupActivityNameTexts[8]",
-  [12] = "sLinkGroupActivityNameTexts[12]",
+Union.ACTIVITY_NAME_IDS = {
+  -- pokefirered/src/data/union_room.h:1
+  frlg = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 21, 22 },
+  -- pokeemerald/src/data/union_room.h:592
+  rse = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 16, 21, 22, 23, 24, 25, 26, 27, 28 },
+}
+Union.ACTIVITY_NAMES = setmetatable({}, {
+  __index = function(_, raw)
+    raw = tonumber(raw)
+    for _, id in ipairs(Union.ACTIVITY_NAME_IDS[Family.of()] or {}) do
+      if id == raw then return RomText.plain(RomText.key("sLinkGroupActivityNameTexts", id)) end
+    end
+    return nil
+  end,
 })
 
 Union.AVATARS_FILE = "data/generated/gba/union_room/avatars.lua"
@@ -103,9 +118,21 @@ end
 
 -- pokefirered/include/constants/union_room.h:82
 Union.INTERACT_ATTENDANT = 9
-Union.INTERACT_START_MENU = 10
+Union.INTERACT_START_MENU_BY_FAMILY = {
+  frlg = 10,
+  -- pokeemerald/include/constants/union_room.h:100
+  rse = 11,
+}
 
-Union.MAP = "FR_UNION_ROOM"
+setmetatable(Union, {
+  __index = function(_, k)
+    if k == "MAP" then return Family.mapId(nil, "unionRoom") end
+    if k == "INTERACT_START_MENU" then
+      return rawget(Union, "INTERACT_START_MENU_BY_FAMILY")[Family.of()]
+    end
+    return nil
+  end,
+})
 
 Union.MSG = {
   HELLO = "game3_union_hello",
@@ -114,17 +141,11 @@ Union.MSG = {
 Union.AWAIT_ROOM_SECONDS = 20
 Union.CARD_WAIT_SECONDS = 3
 
-Union.WIRE_NAMES = {
-  [Union.ACTIVITY.BATTLE_SINGLE] = "battle_single",
-  [Union.ACTIVITY.BATTLE_DOUBLE] = "battle_double",
-  [Union.ACTIVITY.BATTLE_MULTI] = "battle_multi",
-  [Union.ACTIVITY.TRADE] = "trade",
-  [Union.ACTIVITY.CHAT] = "chat",
-  [Union.ACTIVITY.CARD] = "card",
-  [Union.ACTIVITY.POKEMON_JUMP] = "minigame_jump",
-  [Union.ACTIVITY.BERRY_CRUSH] = "minigame_crush",
-  [Union.ACTIVITY.BERRY_PICK] = "minigame_pick",
-}
+Union.WIRE_NAMES = setmetatable({}, {
+  __index = function(_, activity)
+    return Family.wireForActivity(nil, activity)
+  end,
+})
 
 Union.state = "off"
 Union.players = {}
@@ -194,8 +215,14 @@ end
 
 Union.plazaMap = plazaMap
 
+function Union.isRs()
+  return Family.isRubySapphire(Family.activeVersion())
+end
+
 function Union.isUnionMap(id)
   if type(id) ~= "string" then return false end
+  if Union.isRs() then return id == plazaMap().MAP_ID end
+  if not Family.hasWireless() then return false end
   return id == Union.MAP or id == plazaMap().MAP_ID
 end
 
@@ -247,6 +274,28 @@ function Union.graphicsIdFor(gender, trainerId)
   local ids = Union.avatarData().gfx_ids
   local row = tonumber(gender) == 1 and ids.female or ids.male
   return row[((tonumber(trainerId) or 0) % 8) + 1]
+end
+
+function Union.gfxFor(p)
+  if Union.isRs() then
+    -- pokeruby/src/overworld.c:2726
+    return (Family.linkPlayerGfx(nil, p.game, p.gender))
+  end
+  return Union.graphicsIdFor(p.gender, p.trainerId)
+end
+
+function Union.foreignEntry(p)
+  local f = Union.foreignAvatar(p)
+  return require("src.online.union.Avatars").resolve(f, f.host)
+end
+
+function Union.isForeign(p)
+  return type(p) == "table" and (p.sourceGen == 1 or p.sourceGen == 2)
+end
+
+function Union.foreignAvatar(p)
+  return { game = p.game, gen = p.sourceGen, gender = p.gender, style = p.style,
+           trainerId = p.trainerId, name = p.name, id = p.id, host = { version = Family.activeVersion() } }
 end
 
 -- pokefirered/src/union_room_player_avatar.c:448
@@ -340,7 +389,13 @@ function Union.showAvatar(slot, p)
     v.y2 = -Union.FLY_HEIGHT
   end
   v.waiting = nil
-  v.gfx = Union.graphicsIdFor(p.gender, p.trainerId)
+  if Union.isForeign(p) then
+    v.foreign = Union.foreignAvatar(p)
+    v.gfx = nil
+  else
+    v.foreign = nil
+    v.gfx = Union.gfxFor(p)
+  end
   v.x, v.y = x, y
   if Union._talkSlot ~= slot then v.dir = Union.cellFacing(slot, p) end
   Union._vobjDirty = true
@@ -376,10 +431,113 @@ function Union.retryWaitingAvatars()
   Union._avatarWaiting = waiting
 end
 
+Union.WANDER = true
+Union.WANDER_NEAR_PLAYER = 2
+
+local function wanderMod()
+  return require("src.core.game3.link.plaza_wander")
+end
+
+local STATUS_KIND = { chatting = "chat", trading = "trade", battling = "battle" }
+
+function Union.memberStatusKind(p)
+  if type(p) ~= "table" then return nil end
+  local kind = STATUS_KIND[p.status]
+  if kind or p.status ~= nil then return kind end
+  local raw = math.floor(tonumber(p.activity) or 0) % Union.IN_UNION_ROOM
+  local A = Union.ACTIVITY
+  if raw == A.CHAT or raw == A.CARD then return "chat" end
+  if raw == A.TRADE or raw == A.SPIN_TRADE then return "trade" end
+  if raw == A.BATTLE_SINGLE or raw == A.BATTLE_DOUBLE or raw == A.BATTLE_MULTI then return "battle" end
+  return nil
+end
+
+function Union.memberIdle(p)
+  if type(p) ~= "table" or p.gone then return false end
+  if p.status ~= nil and p.status ~= "idle" then return false end
+  return idleActivity(p.activity)
+end
+
+local ENTER_OPTS = { surfing = false, elevation = 3 }
+
+function Union.wanderWalkable(x, y, fromX, fromY, dir)
+  local Coll = package.loaded["src.core.game3.collision"]
+  if not (Coll and Coll._mapId == plazaMap().MAP_ID and Coll.canEnter) then return false end
+  if Coll.inBounds and not Coll.inBounds(x, y) then return false end
+  if Coll.isWater and Coll.isWater(x, y) then return false end
+  ENTER_OPTS.fromX, ENTER_OPTS.fromY, ENTER_OPTS.dir = fromX, fromY, dir
+  local ok = Coll.canEnter(link().game(), x, y, ENTER_OPTS)
+  return ok == true
+end
+
+local function wanderCellFree(x, y, fromX, fromY, dir)
+  if playerOn(x, y) then return false end
+  local Obj = objects()
+  if Obj and Obj.blocks and Obj.blocks(x, y) then return false end
+  return Union.wanderWalkable(x, y, fromX or x, fromY or y, dir)
+end
+
+local function playerNear(x, y)
+  local P = playerMod()
+  if not P then return false end
+  local near = Union.WANDER_NEAR_PLAYER
+  local px, py = tonumber(P.cellX), tonumber(P.cellY)
+  if px and py and math.abs(px - x) <= near and math.abs(py - y) <= near then return true end
+  if not P.moving then return false end
+  px, py = tonumber(P.targetX), tonumber(P.targetY)
+  return px ~= nil and py ~= nil and math.abs(px - x) <= near and math.abs(py - y) <= near
+end
+
+local WANDER_ENV = { free = wanderCellFree }
+
+function Union.tickWander()
+  local dirty = false
+  local onPlaza = Union.WANDER and link().currentMap() == plazaMap().MAP_ID
+  for slot = 1, Union.capacity() do
+    local v = Union.vobj(slot)
+    local p = Union.players[slot]
+    if v and v.visible then
+      local w = v.wander
+      if not w or w.homeX ~= v.x or w.homeY ~= v.y then
+        w = wanderMod().new(slot * 7919 + (tonumber(p and p.trainerId) or 0) + 1, v.x, v.y)
+        v.wander = w
+      end
+      if v.anim == nil then
+        WANDER_ENV.frozen = Union._talkSlot == slot or Union.partnerId == slot
+        WANDER_ENV.canWander = onPlaza and Union.memberIdle(p) and not playerNear(v.x, v.y)
+        if wanderMod().tick(w, WANDER_ENV) then dirty = true end
+      end
+    elseif v then
+      v.wander = nil
+    end
+  end
+  return dirty
+end
+
+function Union.avatarCell(slot)
+  local v = Union.vobj(slot)
+  if not v then return nil end
+  local w = v.wander
+  if w then return w.x, w.y, w.moving end
+  return v.x, v.y, false
+end
+
+function Union.slotAtCell(x, y)
+  for slot = 1, Union.capacity() do
+    local v = Union.vobj(slot)
+    if v and v.visible then
+      local cx, cy, moving = Union.avatarCell(slot)
+      if cx == x and cy == y and not moving then return slot end
+    end
+  end
+  return nil
+end
+
 -- pokefirered/src/event_object_movement.c:9354
 function Union.animateVobjs()
   local dirty = Union._vobjDirty
   local vobjs = Union._vobjs
+  if Union.tickWander() then dirty = true end
   for _, v in pairs(vobjs) do
     if v.anim == "in" then
       v.y2 = math.min(0, v.y2 + Union.FLY_STEP)
@@ -412,9 +570,23 @@ function Union.animateVobjs()
     if v.visible then
       local rec = VirtualObjects.get(id) or VirtualObjects.spawn(id, v.gfx, v.x, v.y, 3, v.dir)
       if rec then
+        local w = v.wander
         rec.graphicsId = v.gfx
+        rec.foreign = v.foreign
         rec.x, rec.y = v.x, v.y
         rec.direction = v.dir
+        rec.prevX, rec.prevY, rec.px, rec.py, rec.moving = nil, nil, nil, nil, nil
+        if w then
+          rec.x, rec.y = w.x, w.y
+          if w.facing and Union._talkSlot ~= v.slot then rec.direction = Union.FACE_DIR[w.facing] or v.dir end
+          if w.moving then
+            rec.prevX, rec.prevY, rec.px, rec.py, rec.moving = w.prevX, w.prevY, w.px, w.py, true
+            rec.targetX, rec.targetY = w.x, w.y
+          else
+            rec.targetX, rec.targetY = nil, nil
+          end
+          rec.animClock, rec.stepFrames, rec.stepFlip = w.animClock, wanderMod().STEP_FRAMES, w.stepFlip
+        end
         rec.y2 = v.y2
         rec.solid = v.anim ~= "out"
       end
@@ -450,12 +622,16 @@ function Union.tryInteractWithMember()
   local d = P and FACING_DELTA[P.facing or "down"]
   if not d then return nil end
   local fx, fy = (tonumber(P.cellX) or 0) + d[1], (tonumber(P.cellY) or 0) + d[2]
-  local slot = plazaMap().slotAt(fx, fy)
+  local slot = Union.slotAtCell(fx, fy)
   if not slot then return nil end
   local p = Union.players[slot]
   local v = Union.vobj(slot)
   if not (v and v.visible and v.anim == nil and p and not p.gone) then return nil end
-  v.dir = Union.avatarData().opposite_facing[(Union.FACE_DIR[P.facing] or 1) + 1]
+  if Union.isRs() then
+    v.dir = Union.FACE_DIR[wanderMod().OPPOSITE[P.facing or "down"]] or Union.DIR.SOUTH
+  else
+    v.dir = Union.avatarData().opposite_facing[(Union.FACE_DIR[P.facing] or 1) + 1]
+  end
   Union._talkSlot = slot
   Union._vobjDirty = true
   return slot, 0
@@ -573,6 +749,7 @@ function Union.run(ctx, adapters)
   Union._plazaInstance, Union._plazaRev = nil, nil
   Union._offlineSince, Union._offlineWiped = nil, nil
   Union._upgradeShown = nil
+  Union._serverOutdated = nil
   Union.flow = nil
   Union.memberIds = {}
   Union.partnerId = nil
@@ -582,10 +759,15 @@ function Union.run(ctx, adapters)
   Union.invite = nil
   Union.incoming = nil
   Union._await = nil
+  Union._xg = nil
+  Union._xgSession = nil
   Union.state = "init"
   local L = link()
   Union.relay = true
-  L.clientCall("joinPlaza", "union", L.liveProfile(), L.avatar(), plazaMap().CAP)
+  Union.hookJoinErrors()
+  local Participant = require("src.online.union.Participant")
+  L.clientCall("joinPlaza", "union", L.liveProfile(), Participant.wireAvatar(L.avatar()), plazaMap().CAP,
+    { xgen = require("src.online.Protocol2").XGEN, caps = Union.caps() })
   L.setStatus("idle")
   Union._refresh = 0
   Union._synced = false
@@ -594,9 +776,40 @@ function Union.run(ctx, adapters)
   return false
 end
 
+function Union.caps()
+  local L = link()
+  local game = L.game()
+  local memo = Union._capsMemo
+  if memo and memo.game == game and memo.version == L.version() then return memo.caps end
+  local Caps = require("src.online.union.Caps")
+  local ok, caps = pcall(Caps.compute, { version = L.version(), game = game })
+  if not ok or type(caps) ~= "table" then caps = Caps.compute({ version = L.version(), gameplayMods = true }) end
+  Union._capsMemo = { game = game, version = L.version(), caps = caps }
+  return caps
+end
+
+Union.JOIN_ERRORS = { bad_profile = true, bad_avatar = true, bad_caps = true }
+
+function Union.hookJoinErrors()
+  if Union._onJoinError then return end
+  Union._onJoinError = function(e)
+    if type(e) ~= "table" or e.scope ~= "join" or not Union.JOIN_ERRORS[e.reason] then return end
+    if Union.state ~= "off" then Union._serverOutdated = e.reason end
+  end
+  link().clientCall("on", "error", Union._onJoinError)
+end
+
+function Union.unhookJoinErrors()
+  if not Union._onJoinError then return end
+  link().clientCall("off", "error", Union._onJoinError)
+  Union._onJoinError = nil
+end
+
 function Union.stop(reason)
   if Union.state == "off" then return false end
   local L = link()
+  if Union._xgSession then Union.endXg(Union._xgSession, "left") end
+  Union.unhookJoinErrors()
   if Union.incoming then L.clientCall("replyInvite", Union.incoming.id, false) end
   L.clientCall("leavePlaza", "union")
   L.setStatus("busy")
@@ -660,6 +873,13 @@ function Union.cancelActivity()
   return true
 end
 
+local function pressedB()
+  local game = link().game()
+  local input = game and game.input
+  if not (input and input.wasPressed) then return false end
+  return input:wasPressed("b") and true or false
+end
+
 local function pressedA()
   local game = link().game()
   local input = game and game.input
@@ -678,9 +898,17 @@ function Union.update(dt)
 end
 
 -- pokefirered/src/union_room.c:1832 WarpForCableClubActivity
-Union.COLOSSEUM_2P = { map = "FR_BATTLE_COLOSSEUM_2P", x = 6, y = 8 }
-Union.COLOSSEUM_4P = { map = "FR_BATTLE_COLOSSEUM_4P", x = 5, y = 8 }
-Union.TRADE_CENTER = { map = "FR_TRADE_CENTER", x = 5, y = 8 }
+local DEST_MT = {
+  __index = function(t, k)
+    if k == "map" then return Family.mapId(nil, rawget(t, "key")) end
+    return nil
+  end,
+}
+Union.COLOSSEUM_2P = setmetatable({ key = "colosseum2P", x = 6, y = 8 }, DEST_MT)
+Union.COLOSSEUM_4P = setmetatable({ key = "colosseum4P", x = 5, y = 8 }, DEST_MT)
+Union.TRADE_CENTER = setmetatable({ key = "tradeCenter", x = 5, y = 8 }, DEST_MT)
+-- pokeemerald/src/union_room.c:1705
+Union.RECORD_CORNER = setmetatable({ key = "recordCorner", x = 8, y = 9 }, DEST_MT)
 
 function Union.warpForCableClubActivity(dest, linkService, opts)
   opts = opts or {}
@@ -688,10 +916,10 @@ function Union.warpForCableClubActivity(dest, linkService, opts)
   local ctx, adapters = L.vmCtx()
   L.setVar(ctx, L.VAR_0x8004, linkService)
   L.setVar(ctx, L.VAR_CABLE_CLUB_STATE, linkService)
-  if linkService ~= L.USING.TRADE_CENTER then
+  if linkService ~= L.USING.TRADE_CENTER and linkService ~= L.USING.RECORD_CORNER then
     -- pokefirered/src/union_room.c:1901
-    L.callSpecial(ctx, adapters, 0x00)
-    L.callSpecial(ctx, adapters, 0x27)
+    L.callSpecialNamed(ctx, adapters, "HealPlayerParty")
+    L.callSpecialNamed(ctx, adapters, "SavePlayerParty")
     L.loadPlayerBag()
   end
   local s = L.session()
@@ -1084,6 +1312,11 @@ function Union.boardPick(entry)
     Union.stayStep(RomText.ascii("gText_UR_AskTrainerToMakeTrade", ctx)),
     Union.yesNoStep(function(yes)
       if not yes then return Union.toMain() end
+      if p and (tonumber(p.sourceGen) or 3) ~= 3 then
+        for i, item in ipairs(Union.XG_ITEMS) do
+          if item.wire == "xg_trade" then return Union.chooseXg(i) end
+        end
+      end
       Union.boardOffer(entry)
     end),
   }, "trade_prompt")
@@ -1233,6 +1466,7 @@ function Union.answerRequest(accept)
     Union.beginAwaitRoom(nil)
   else
     Union.activity = nil
+    if shown and Union._xg then return Union.printAndExit(Union.xgText("you_declined")) end
     if shown then
       -- pokefirered/src/union_room.c:887
       local key = (raw == Union.ACTIVITY.CHAT or raw == Union.ACTIVITY.CARD)
@@ -1332,7 +1566,19 @@ end
 function Union.linkGroupFlow(ctx, adapters, role)
   local L = link()
   local group = L.getVar(ctx, L.VAR_0x8004)
-  local spec = Union.GROUP_ACTIVITY[group] or Union.GROUP_ACTIVITY[0]
+  -- pokeemerald/src/union_room.c:397
+  if Family.of() == "rse" and Family.hasWireless() and group == Union.LINK_GROUP.BATTLE_TOWER then
+    local okU, Util = pcall(require, "src.core.game3.rse.frontier.util")
+    local okD, D = pcall(require, "src.core.game3.rse.frontier.trainers")
+    local f = okU and Util.frontier and Util.frontier(L.session()) or nil
+    if okD and type(f) == "table" and D.LVL and f.lvlMode == D.LVL.OPEN then
+      group = group + 1
+      L.setVar(ctx, L.VAR_0x8004, group)
+    end
+  end
+  local spec = Union.GROUP_ACTIVITY[group]
+  if not spec and not Family.hasWireless() then return false, linkupResult(ctx, L.LINKUP.FAILED) end
+  spec = spec or Union.GROUP_ACTIVITY[0]
   Union.activity = spec.activity
   linkupResult(ctx, L.LINKUP.ONGOING)
   if L.adapterConnected() then
@@ -1396,6 +1642,8 @@ function Union.activityForInvite(wire, detail)
   if wire == "battle_double" then return A.BATTLE_DOUBLE end
   if wire == "chat" then return A.CHAT + U end
   if wire == "card" then return A.CARD end
+  if wire == "xg_battle" then return A.BATTLE_SINGLE + U end
+  if wire == "xg_trade" then return A.TRADE + U end
   if wire == "trade" then
     if type(detail) == "table" and type(detail.board) == "table" then return A.TRADE + U end
     return A.TRADE
@@ -1440,7 +1688,7 @@ Union.GROUP_WIRE_ACTIVITY = {
 
 function Union.memberActivity(m)
   local g = type(m.group) == "table" and m.group or nil
-  local act = g and Union.GROUP_WIRE_ACTIVITY[g.activity] or nil
+  local act = g and (Union.GROUP_WIRE_ACTIVITY[g.activity] or Family.activityForWire(nil, g.activity)) or nil
   if not act then act = Union.STATUS_ACTIVITY[m.status] end
   if not act then act = Union.ACTIVITY.NONE end
   return act + Union.IN_UNION_ROOM
@@ -1448,13 +1696,20 @@ end
 
 local function avatarRow(m)
   local av = type(m.avatar) == "table" and m.avatar or {}
+  local part = require("src.online.union.Participant").fromMember(m)
   return {
     id = m.id,
     name = av.name or m.name,
     gender = tonumber(av.gender) or 0,
     trainerId = tonumber(av.trainerId) or 0,
+    game = part and part.game or av.version,
+    sourceGen = part and part.gen or 3,
+    legacy = part == nil or part.legacy,
+    style = part and part.style or nil,
   }
 end
+
+Union.avatarRow = avatarRow
 
 local NO_MEMBERS = {}
 
@@ -1480,6 +1735,10 @@ function Union.syncPlaza()
   for i = 1, #members do
     local m = members[i]
     local slot = type(m) == "table" and tonumber(m.slot) or nil
+    if slot and m.id ~= nil and (m.id == me or slot == mySlot) then
+      local av = type(m.avatar) == "table" and m.avatar or nil
+      if not (av and av.gen ~= nil) and not Union._serverOutdated then Union._serverOutdated = "legacy_shard" end
+    end
     if slot and slot >= 1 and slot <= cap and m.id ~= nil and m.id ~= me and slot ~= mySlot then
       local p = Union.players[slot]
       if p and p.id ~= m.id then
@@ -1529,12 +1788,17 @@ end
 function Union.checkUpgrade()
   if Union._upgradeShown or Union.state ~= "main" or Union.flow then return end
   local up = link().clientCall("upgradeRequired")
-  if not up then return end
+  local text
+  if up then
+    text = require("src.online.Protocol2").upgradeText(up)
+  elseif Union._serverOutdated then
+    text = Union.xgText("server_outdated")
+  else
+    return
+  end
   Union._upgradeShown = true
   local M = message()
-  if M and M.show then
-    Union.printAndExit(require("src.online.Protocol2").upgradeText(up))
-  end
+  if M and M.show then Union.printAndExit(text) end
 end
 
 -- pokefirered/src/union_room.c:3106
@@ -1546,13 +1810,19 @@ function Union.pollIncoming()
     if id ~= nil and not Union._answered[id] then
       Union._answered[id] = true
       local activity = Union.activityForInvite(inv.activity, inv.detail)
+      local xg = require("src.online.Protocol2").XG_ACTIVITIES[inv.activity or ""] and inv.activity or nil
+      if Union.isRs() and not xg then activity = nil end
       if Union.state == "main" and not Union.incoming and activity then
         local from = type(inv.from) == "table" and inv.from or {}
         Union.incoming = inv
         Union._lastIncoming = inv
         Union.activity = activity
+        Union._xg = xg
         Union._requestName = type(from.avatar) == "table" and from.avatar.name or from.name
         Union.partnerId = Union.slotForId(from.id)
+        if xg and not Union.partnerId then
+          Union._partner = avatarRow({ id = from.id, name = from.name, slot = 1, avatar = from.avatar })
+        end
         playSe("SE_DING_DONG")
         Union.state = "player_contacted_you"
       else
@@ -1564,6 +1834,7 @@ end
 
 function Union.relayTick(_dt)
   local L = link()
+  if not package.loaded["src.ui.game3.link_tags"] then pcall(require, "src.ui.game3.link_tags") end
   if not L.online() then
     Union.plazaOffline()
     Union.animateAll()
@@ -1573,6 +1844,7 @@ function Union.relayTick(_dt)
   Union._offlineSince, Union._offlineWiped = nil, nil
   Union.syncPlaza()
   Union.animateAll()
+  if Union._serverOutdated and not Union._upgradeShown then Union.checkUpgrade() end
   Union.pollIncoming()
   if Union.state == "main" and L.link then
     Union.noteLeftRoom()
@@ -1688,6 +1960,7 @@ end
 function Union.toMain()
   Union.flow = nil
   Union.activity = nil
+  Union._xg = nil
   Union.state = "main"
   if Union._talkSlot then Union.updateMemberFacing(Union._talkSlot) end
   Union.releaseScript()
@@ -1832,6 +2105,8 @@ end
 -- pokefirered/src/union_room.c:2805
 function Union.talkTo(slot)
   local p = Union.players[slot]
+  if p and not p.gone and Union.usesXg(p) then return Union.xgTalk(slot) end
+  if Union.isRs() then return Union.printAndExit(Union.xgText("busy", p), slot) end
   if not p or p.gone then
     return Union.printAndExit(RomText.ascii("gText_UR_TrainerAppearsBusy"), slot)
   end
@@ -1853,6 +2128,296 @@ function Union.talkTo(slot)
   end
   return Union.printAndExit(Union.reactionText(p.activity, g, p.name), slot)
 end
+
+Union.XG_ITEMS = {
+  { key = "XG_BATTLE", wire = "xg_battle", activity = "BATTLE_SINGLE" },
+  { key = "XG_TRADE", wire = "xg_trade", activity = "TRADE" },
+  { key = "EXIT" },
+}
+
+function Union.gameName(version)
+  local info = require("src.core.GameVersion").VERSIONS[version or ""]
+  return info and tostring(info.label or version):upper() or ""
+end
+
+local function nameList(versions)
+  local names = {}
+  for _, v in ipairs(versions or {}) do names[#names + 1] = Union.gameName(v) end
+  local Strings = require("src.core.Strings")
+  if #names <= 1 then return names[1] or "" end
+  return Strings("%s or %s", table.concat(names, ", ", 1, #names - 1), names[#names])
+end
+
+function Union.xgText(key, p, extra)
+  local Strings = require("src.core.Strings")
+  p = type(p) == "table" and p or {}
+  local name, game = tostring(p.name or ""), Union.gameName(p.game)
+  if key == "talk" then return Strings("%s from POKéMON %s is here.\nWhat would you like to do?", name, game) end
+  if key == "standin" then
+    return Strings("Import POKéMON %s to see how %s really looks.", nameList(extra), name)
+  end
+  if key == "wait_battle" then return Strings("Waiting for %s to answer\nthe battle request...", name) end
+  if key == "wait_trade" then return Strings("Waiting for %s to answer\nthe trade request...", name) end
+  if key == "declined_battle" then return Strings("%s turned down the battle.", name) end
+  if key == "declined_trade" then return Strings("%s turned down the trade.", name) end
+  if key == "busy" then return Strings("%s seems to be busy right now.", name) end
+  if key == "link_lost" then return Strings("The link with %s was lost.", name) end
+  if key == "ask_battle" then return Strings("%s from POKéMON %s wants to battle!\nWill you accept?", name, game) end
+  if key == "ask_trade" then return Strings("%s from POKéMON %s wants to trade!\nWill you accept?", name, game) end
+  if key == "you_declined" then return Strings("You turned down the request.") end
+  if key == "preparing_battle" then return Strings("Getting ready to battle %s...", name) end
+  if key == "preparing_trade" then return Strings("Getting ready to trade with %s...", name) end
+  if key == "unavailable" then
+    return Strings("Battles and trades between different games aren't open yet. The request was canceled.")
+  end
+  if key == "peer_canceled" then return Strings("%s canceled the request.", name) end
+  if key == "canceled" then return Strings("The request was canceled.") end
+  if key == "blocked" then return Strings("Your games can't link up for this. The request was canceled.") end
+  if key == "server_outdated" then
+    return Strings("The UNION ROOM server needs an update before trainers from other games can join you.")
+  end
+  if key == "goodbye" then return Strings("See you around!") end
+  if key == "label_battle" then return Strings("BATTLE") end
+  if key == "label_trade" then return Strings("TRADE") end
+  if key == "label_exit" then return Strings("EXIT") end
+  return ""
+end
+
+function Union.xgItems()
+  local s = screen()
+  local out = {}
+  for i, item in ipairs(Union.XG_ITEMS) do
+    local label
+    if item.wire == "xg_trade" then
+      label = Union.xgText("label_trade")
+    elseif not Union.isRs() and s and s.labelFor then
+      label = s.labelFor({ key = item.wire and "BATTLE" or "EXIT" })
+    else
+      label = Union.xgText(item.wire and "label_battle" or "label_exit")
+    end
+    out[i] = { key = item.key, wire = item.wire, activity = item.activity, label = label }
+  end
+  return out
+end
+
+function Union.usesXg(p)
+  if type(p) ~= "table" then return false end
+  if Union.isRs() then return true end
+  return Union.isForeign(p) or Family.isRubySapphire(p.game)
+end
+
+function Union.xgTalk(slot)
+  local p = Union.players[slot]
+  Union.partnerId = slot
+  Union._partner = p
+  if not Union.memberIdle(p) then return Union.printAndExit(Union.xgText("busy", p), slot) end
+  local steps = {}
+  if Union.isForeign(p) then
+    local entry = Union.foreignEntry(p)
+    if entry.standin or entry.hostStandin then steps[#steps + 1] = Union.sayStep(Union.xgText("standin", p, entry.need)) end
+  end
+  steps[#steps + 1] = Union.stayStep(Union.xgText("talk", p))
+  steps[#steps + 1] = Union.doStep(function()
+    local s = screen()
+    if not s then return Union.toMain() end
+    Union.state = "handle_do_something_prompt_input"
+    s.showActivities(Union.xgItems(), {
+      partner = p,
+      onChoose = function(index) Union.chooseXg(index) end,
+      onCancel = function() Union.chooseXg(#Union.XG_ITEMS) end,
+    })
+  end)
+  return Union.runFlow(steps, "do_something_prompt")
+end
+
+function Union.chooseXg(index)
+  local item = Union.XG_ITEMS[tonumber(index) or 0]
+  local p = Union.partnerRow() or {}
+  local M = message()
+  if not (item and item.wire) then
+    Union.activity = nil
+    Union.partnerId = nil
+    if Union.isRs() then return Union.printAndExit(Union.xgText("goodbye", p)) end
+    -- pokefirered/src/union_room.c:2916
+    local text = RomText.ascii(RomText.key("gTexts_UR_IfYouWantToDoSomething", tonumber(p.gender) == 1 and 1 or 0))
+    return Union.printAndExit(text)
+  end
+  local L = link()
+  Union.activity = Union.ACTIVITY[item.activity] + Union.IN_UNION_ROOM
+  Union._xg = item.wire
+  Union._role = "child"
+  Union.invite = p.id ~= nil and L.clientCall("invite", p.id, item.wire, {}, L.liveProfile()) or nil
+  if not Union.invite then return Union.printAndExit(Union.xgText("busy", p)) end
+  Union.state = "send_activity_request"
+  if M and M.show then
+    M.show(Union.xgText(item.wire == "xg_trade" and "wait_trade" or "wait_battle", p), { stay = true })
+  end
+  return true
+end
+
+function Union.xgMode()
+  return require("src.online.Protocol2").XG_ACTIVITIES[Union._xg or ""]
+end
+
+Union.xgScreens = { battle = nil, trade = nil }
+
+local XgActivity = {}
+XgActivity.__index = XgActivity
+Union.XgActivity = XgActivity
+
+local function xgPeer(roomInfo, mySeat, partner)
+  for _, row in ipairs(type(roomInfo.players) == "table" and roomInfo.players or {}) do
+    if type(row) == "table" and row.seat ~= nil and row.seat ~= mySeat then
+      local av = type(row.avatar) == "table" and row.avatar or {}
+      return { id = row.id, name = av.name or row.name or "?", gen = row.gen, game = av.version, seat = row.seat }
+    end
+  end
+  partner = type(partner) == "table" and partner or {}
+  return { id = partner.id, name = partner.name or "?", gen = partner.sourceGen, game = partner.game }
+end
+
+function XgActivity:release()
+  if Union._xgSession == self then Union._xgSession = nil end
+  Union.noteLeftRoom(self.roomId)
+  link().setStatus("idle")
+end
+
+function XgActivity:finish(why, text)
+  if self.done or self.state == "done" then return end
+  local Flow = require("src.ui.union.Flow")
+  if why == "go" and not self.launched then
+    self.state = "battle"
+    if Flow.launch(self, 3) then return end
+    why, text = "error", require("src.ui.g3u.Launch").resultText(3, "error")
+  end
+  self.why = why
+  self.state = "done"
+  Flow.leaveRoom(self)
+  self:release()
+  local M = message()
+  if M and M.isOpen and M.isOpen() then M.close() end
+  Union.partnerId = nil
+  self.done = true
+  if text and M and M.show then return Union.printAndExit(text) end
+  Union.toMain()
+end
+
+function XgActivity:cancel(why)
+  local prep = self.prep
+  if prep then
+    if prep:open() then prep:cancel(why or "cancel") end
+    prep:leave()
+  end
+  self:finish(why or "cancel", Union.xgText("canceled", self.peer))
+end
+
+function XgActivity:abort(why)
+  if self.done then return end
+  local prep = self.prep
+  if prep and prep:open() then
+    prep:cancel(why or "left")
+    prep:leave()
+  end
+  self.state = "done"
+  self.why = why or "left"
+  self.done = true
+  self:release()
+end
+
+function XgActivity:handle(e)
+  if e.kind == "closed" then
+    local mine = e.seat ~= nil and e.seat == self.prep:seat()
+    if mine then return self:finish("closed", Union.xgText("canceled", self.peer)) or true end
+    playSe("SE_FAILURE")
+    self:finish("peer", Union.xgText("peer_canceled", self.peer))
+    return true
+  end
+  if e.kind == "blocked" then
+    self.prep:cancel("blocked")
+    self.prep:leave()
+    self:finish("blocked", Union.xgText("blocked", self.peer))
+    return true
+  end
+  return false
+end
+
+function XgActivity:tick(dt)
+  if self.done or self.state == "done" or self.state == "screen" or self.state == "battle" then return end
+  local prep = self.prep
+  if not prep then return self:finish("gone", Union.xgText("link_lost", self.peer)) end
+  for _, e in ipairs(prep:poll()) do
+    if self:handle(e) then return end
+  end
+  local screen = Union.xgScreens[self.mode]
+  if not screen then
+    self.t = (self.t or 0) + (tonumber(dt) or 0)
+    if self.t >= Union.XG_NOTICE_SECONDS then
+      if prep:open() then prep:cancel("unavailable") end
+      prep:leave()
+      return self:finish("unavailable", Union.xgText("unavailable", self.peer))
+    end
+    return
+  end
+  if prep.state == "prep" and self.state == "preparing" then
+    self.state = "screen"
+    local M = message()
+    if M and M.isOpen and M.isOpen() then M.close() end
+    screen(self)
+    return
+  end
+  if pressedB() then self:cancel("cancel") end
+end
+
+Union.XG_NOTICE_SECONDS = 1
+
+function Union.beginXg(roomInfo, mode)
+  local L = link()
+  if not Union.xgInstalled then
+    Union.xgInstalled = true
+    require("src.ui.union.Flow").install({ screens = Union.xgScreens })
+  end
+  Union._await = nil
+  roomInfo = type(roomInfo) == "table" and roomInfo or {}
+  mode = mode or roomInfo.mode or (type(roomInfo.xg) == "table" and roomInfo.xg.mode) or "battle"
+  mode = mode == "trade" and "trade" or "battle"
+  local client = L.client()
+  local prep
+  if client and roomInfo.room ~= nil then
+    local Room = require("src.online.union.Room")
+    prep = require("src.online.union.Prep").new(Room.adapter(client, roomInfo.room), { mode = mode })
+  end
+  local mySeat = client and client.seat and client.seat() or nil
+  local act = setmetatable({
+    game = L.game(), room = roomInfo, roomId = roomInfo.room, mode = mode, prep = prep,
+    peer = xgPeer(roomInfo, mySeat, Union.partnerRow()), state = "preparing", done = false, why = nil,
+    role = Union._role, wire = Union._xg,
+  }, XgActivity)
+  Union._xgSession = act
+  Union.state = "xg_prep"
+  local M = message()
+  if M and M.show then
+    M.show(Union.xgText(mode == "trade" and "preparing_trade" or "preparing_battle", act.peer), { stay = true })
+  end
+  return act
+end
+
+function Union.endXg(act, why)
+  act = act or Union._xgSession
+  if not act then return false end
+  act:abort(why)
+  return true
+end
+
+function Union.xgFail(key)
+  local p = Union.partnerRow() or {}
+  Union._await = nil
+  Union.invite = nil
+  local M = message()
+  if M and M.isOpen and M.isOpen() then M.close() end
+  if M and M.show then return Union.printAndExit(Union.xgText(key, p)) end
+  Union.state = "print_and_exit"
+end
+
 
 -- pokefirered/src/union_room.c:3027
 function Union.joinChat(slot)
@@ -1900,6 +2465,15 @@ end
 
 function Union.pollMain(ctx)
   local L = link()
+  if Union.isRs() then
+    local Hud = package.loaded["src.ui.game3.hud"]
+    if Hud and Hud.busy and Hud.busy() then return end
+    if not pressedA() then return end
+    local slot = Union.tryInteractWithMember()
+    if not slot then return end
+    playSe("SE_SELECT")
+    return Union.talkTo(slot)
+  end
   Union.armScriptWait(ctx)
   local result = Union._scriptResult or L.getVar(ctx, L.VAR_RESULT)
   Union._scriptResult = nil
@@ -1949,6 +2523,13 @@ function Union.contactedYou()
   local raw = math.floor(tonumber(Union.activity) or 0) % Union.IN_UNION_ROOM
   Union.state = "handle_activity_request"
   Union._asked = true
+  if Union._xg then
+    local p = Union.partnerRow() or { name = name }
+    return Union.runFlow(stepsOf(
+      Union.stayStep(Union.xgText(Union._xg == "xg_trade" and "ask_trade" or "ask_battle", p)),
+      Union.yesNoStep(function(yes) Union.answerRequest(yes) end)
+    ), "handle_activity_request")
+  end
   local named = Union.namedRequest(name)
   local steps
   if named then
@@ -2030,6 +2611,8 @@ function Union.relayUpdate(dt, ctx)
     Union.startActivity()
   elseif st == "in_activity" then
     Union.pollInActivity()
+  elseif st == "xg_prep" then
+    if Union._xgSession then Union._xgSession:tick(dt) else Union.toMain() end
   elseif st == "print_and_exit" then
     local Mo = message()
     if not (Mo and Mo.isOpen and Mo.isOpen()) then Union.toMain() end
@@ -2100,6 +2683,13 @@ function Union.pollInvite()
   local M = message()
   local text
   local p = Union.partnerRow()
+  if Union._xg then
+    Union._joining = nil
+    Union.lastResult = (not dropped and h.why == "declined") and "declined" or "busy"
+    if dropped then return Union.xgFail("link_lost") end
+    if h.why == "declined" then return Union.xgFail(Union._xg == "xg_trade" and "declined_trade" or "declined_battle") end
+    return Union.xgFail("busy")
+  end
   if dropped then
     Union._joining = nil
     Union.lastResult = "busy"
@@ -2149,6 +2739,13 @@ function Union.pollAwaitRoom(dt)
   local room = L.clientCall("room")
   local id = type(room) == "table" and room.room or nil
   local stale = id ~= nil and Union._leftRooms and Union._leftRooms[id]
+  if Union._xg then
+    if room and not stale and room.intent == "xg" and (a.room == nil or id == a.room) then
+      return Union.beginXg(room, Union.xgMode())
+    end
+    if not L.online() or a.t >= Union.AWAIT_ROOM_SECONDS then return Union.xgFail("busy") end
+    return
+  end
   if room and not stale and (a.room == nil or id == a.room) and Union.matchStarted(room) then
     local M = message()
     if M and M.isOpen and M.isOpen() then M.close() end
@@ -2244,11 +2841,30 @@ function Union.directDest(group)
 end
 
 -- pokefirered/src/union_room.c:1975
--- pokefirered/data/maps/BattleColosseum_2P/map.json coord_events
-Union.COLOSSEUM_SEATS = {
-  [0] = { x = 3, y = 5, script = "BattleColosseum_2P_EventScript_PlayerSpot0" },
-  [1] = { x = 10, y = 5, script = "BattleColosseum_2P_EventScript_PlayerSpot1" },
+Union.COLOSSEUM_SEATS_BY_FAMILY = {
+  -- pokefirered/data/maps/BattleColosseum_2P/map.json coord_events
+  frlg = {
+    [0] = { x = 3, y = 5, script = "BattleColosseum_2P_EventScript_PlayerSpot0" },
+    [1] = { x = 10, y = 5, script = "BattleColosseum_2P_EventScript_PlayerSpot1" },
+  },
+  -- pokeemerald/data/maps/BattleColosseum_2P/map.json coord_events
+  rse = {
+    [0] = { x = 3, y = 5, script = "EventScript_BattleColosseum_2P_PlayerSpot0" },
+    [1] = { x = 10, y = 5, script = "EventScript_BattleColosseum_2P_PlayerSpot1" },
+  },
 }
+Union.COLOSSEUM_SEATS = setmetatable({}, {
+  __index = function(_, seat)
+    if Family.isRubySapphire(Family.activeVersion()) then
+      return ({
+        [0] = { x = 3, y = 5, script = "SingleBattleColosseum_EventScript_1A436F" },
+        [1] = { x = 10, y = 5, script = "SingleBattleColosseum_EventScript_1A4379" },
+      })[seat]
+    end
+    local rows = Union.COLOSSEUM_SEATS_BY_FAMILY[Family.of()] or Union.COLOSSEUM_SEATS_BY_FAMILY.frlg
+    return rows[seat]
+  end,
+})
 Union.PARTNER_LOCAL_ID = 30
 
 local function seatPath(fromX, fromY, toX, toY, lead)
@@ -2281,7 +2897,7 @@ function Union.walkToSeats()
   if Objects and type(Objects._defs) == "table" and Objects.addObject then
     Objects._defs[#Objects._defs + 1] = {
       localId = Union.PARTNER_LOCAL_ID, x = px, y = py, facing = "up",
-      graphicsId = Union.graphicsIdFor(g3.gender, g3.trainerId),
+      graphicsId = (Family.linkPlayerGfx(nil, g3.version, g3.gender)),
     }
     if Objects.addObject(Union.PARTNER_LOCAL_ID) then
       Movement.start(ctx, Union.PARTNER_LOCAL_ID, seatPath(px, py, theirs.x, theirs.y, 2), adapters)
@@ -2365,9 +2981,30 @@ function Union.waitForMatch(ctx, adapters, spec)
     L.setStatus("busy")
     return finish(L.LINKUP.FAILED)
   end
+  local refused = nil
   local function poll()
     if done then return true end
-    if Union.matchStarted(L.clientCall("room")) then
+    if refused then
+      if refused.closed then
+        L.setStatus("busy")
+        return finish(L.LINKUP.FAILED)
+      end
+      return false
+    end
+    local room = L.clientCall("room")
+    if Union.matchStarted(room) then
+      local text = spec.refuse and spec.refuse(room)
+      if text then
+        spec.cancel()
+        refused = {}
+        if D then D.close() end
+        if M and M.show then
+          M.show(text, { done = function() refused.closed = true end })
+        else
+          refused.closed = true
+        end
+        return false
+      end
       finish(nil)
       spec.onMatch()
       return true
@@ -2402,8 +3039,18 @@ function Union.askedToJoinText(wire, name)
   return RomText.ascii(key, { stringVars = { name or "" } })
 end
 
-function Union.directModes(ctx, _row, done)
+Union.JOIN_OR_LEAD_LIST = {
+  frlg = 63,
+  -- pokeemerald/include/constants/script_menu.h:92
+  rse = 81,
+}
+
+function Union.directModes(ctx, row, done)
   local L = link()
+  local listId = type(row) == "table" and tonumber(row.listId or row[3]) or nil
+  if listId and listId ~= (Union.JOIN_OR_LEAD_LIST[Family.of()] or Union.MULTICHOICE_JOIN_OR_LEAD) then
+    return false
+  end
   local group = tonumber(L.getVar(ctx, L.VAR_0x8004)) or -1
   if group < Union.LINK_GROUP.SINGLE_BATTLE or group > Union.LINK_GROUP.TRADE then return false end
   if not L.adapterConnected() then return false end
@@ -2474,6 +3121,28 @@ function Union.directModes(ctx, _row, done)
   return true
 end
 
+-- pokeemerald/src/union_room.c:1266 IsTryingToTradeAcrossVersionTooSoon
+function Union.tradeReadyWith(partner)
+  if type(partner) ~= "table" or not Family.isGame3(partner.version) then return Family.UR_TRADE.READY end
+  local s = link().session() or {}
+  return Family.tradeAcrossVersionTooSoon(Family.of(), {
+    trading = true,
+    partnerVersion = Family.cartVersion(partner.version),
+    specialSaveWarpFlags = s.specialSaveWarpFlags,
+    partnerCanLinkNationally = partner.canLinkNationally == true,
+  })
+end
+
+function Union.roomPartnerAvatar(room)
+  local me = myId()
+  for _, p in ipairs(type(room) == "table" and type(room.players) == "table" and room.players or {}) do
+    if type(p) == "table" and p.id ~= me and type(p.avatar) == "table" then return p.avatar end
+  end
+  return nil
+end
+
+Union.GROUP_JOIN_TICKS = 600
+
 function Union.directRows(wire)
   local out = {}
   for _, e in ipairs(link().clientCall("directEntries", wire) or {}) do
@@ -2481,10 +3150,17 @@ function Union.directRows(wire)
       local av = type(e.avatar) == "table" and e.avatar or {}
       if e.kind == "room" and e.room ~= nil then
         out[#out + 1] = { key = "r:" .. tostring(e.room), kind = "room", room = e.room, id = e.host,
-          name = av.name or e.name, trainerId = av.trainerId, gender = av.gender, locked = e.locked == true }
+          name = av.name or e.name, trainerId = av.trainerId, gender = av.gender, locked = e.locked == true,
+          version = av.version, canLinkNationally = av.canLinkNationally == true }
       elseif e.kind == "player" and e.id ~= nil and wire ~= "battle_multi" then
         out[#out + 1] = { key = "p:" .. tostring(e.id), kind = "player", id = e.id,
-          name = av.name or e.name, trainerId = av.trainerId, gender = av.gender }
+          name = av.name or e.name, trainerId = av.trainerId, gender = av.gender, version = av.version,
+          canLinkNationally = av.canLinkNationally == true }
+      elseif e.kind == "group" and e.leader ~= nil
+          and (tonumber(e.joined) or 0) < (tonumber(e.max) or 2) then
+        out[#out + 1] = { key = "g:" .. tostring(e.leader), kind = "group", id = e.leader, leader = e.leader,
+          name = av.name or e.name, trainerId = av.trainerId, gender = av.gender,
+          version = av.version or e.version, canLinkNationally = av.canLinkNationally == true }
       end
     end
   end
@@ -2504,7 +3180,7 @@ function Union.chooseDirect(ctx, adapters, group, _direct)
   local st = { phase = "list", done = false }
   Union._choose = st
   natives().yieldHost(ctx, adapters, function() end)
-  L.clientCall("directList", wire, profile)
+  L.clientCall("directList", wire, profile, L.avatar())
   L.setStatus("idle")
   -- pokefirered/src/union_room.c:1169
   local prompt = RomText.ascii(RomText.key("gTexts_UR_ChooseTrainer", group))
@@ -2520,7 +3196,14 @@ function Union.chooseDirect(ctx, adapters, group, _direct)
     if Union._choose == st then Union._choose = nil end
     return true
   end
+  local notice
   local function success()
+    local ready = wire == "trade" and Union.tradeReadyWith(Union.roomPartnerAvatar(L.clientCall("room")))
+      or Family.UR_TRADE.READY
+    if ready ~= Family.UR_TRADE.READY then
+      L.clientCall("leaveRoom")
+      return notice(RomText.ascii(RomText.key("gTexts_UR_CantTransmitToTrainer", ready - 1)))
+    end
     finish(nil)
     if not L.openRelay({ linkType = linkType }) then
       linkupResult(ctx, L.LINKUP.CONNECTION_ERROR)
@@ -2539,7 +3222,7 @@ function Union.chooseDirect(ctx, adapters, group, _direct)
     end
     showPrompt()
   end
-  local function notice(text)
+  notice = function(text)
     st.phase = "notice"
     if D then D.setNotice(true) end
     if M then M.show(text, { done = function() if not st.done then backToList() end end }) end
@@ -2568,10 +3251,22 @@ function Union.chooseDirect(ctx, adapters, group, _direct)
     if st.phase ~= "list" or type(row) ~= "table" then return end
     -- pokefirered/src/union_room.c:1222
     playSe("SE_POKENAV_ON")
+    if wire == "trade" then
+      -- pokeemerald/src/union_room.c:1051
+      local ready = Union.tradeReadyWith(row)
+      if ready ~= Family.UR_TRADE.READY then
+        return notice(RomText.ascii(RomText.key("gTexts_UR_CantTransmitToTrainer", ready - 1)))
+      end
+    end
     if row.kind == "player" then
       st.phase, st.row = "inviting", row
       if D then D.setFrozen(true) end
       st.handle = L.clientCall("invite", row.id, wire, { ruleset = ruleset }, profile)
+      if M then M.show(Union.askedToJoinText(wire, row.name), { stay = true }) end
+    elseif row.kind == "group" then
+      st.phase, st.row, st.sawGroup, st.waited = "grouping", row, false, 0
+      if D then D.setFrozen(true) end
+      L.clientCall("joinGroup", row.leader, profile, L.avatar())
       if M then M.show(Union.askedToJoinText(wire, row.name), { stay = true }) end
     elseif row.locked then
       askPin(row)
@@ -2597,6 +3292,15 @@ function Union.chooseDirect(ctx, adapters, group, _direct)
       elseif h.state == "closed" and h.why ~= "accepted" and h.why ~= "crossed" then
         local row = st.row or {}
         notice(h.why == "declined" and Union.rejectText(Union.GROUP_ACTIVITY[group].activity, row.gender) or busy)
+      end
+    elseif st.phase == "grouping" then
+      local g = L.clientCall("group")
+      st.waited = st.waited + 1
+      if type(g) == "table" and g.leader == st.row.leader then
+        st.sawGroup = true
+      elseif st.sawGroup or st.waited > Union.GROUP_JOIN_TICKS then
+        L.clientCall("leaveGroup")
+        notice(st.sawGroup and Union.rejectText(Union.GROUP_ACTIVITY[group].activity, st.row.gender) or busy)
       end
     elseif st.phase == "joining" then
       local p = st.pending
@@ -2681,7 +3385,17 @@ function Union.directFlow(ctx, adapters, group, role)
   L.setStatus("idle")
   local _, _, linkType = Union.directDest(group)
   return Union.waitForMatch(ctx, adapters, {
-    cancel = function() L.clientCall("leaveDirect") end,
+    cancel = function()
+      L.clientCall("leaveDirect")
+      if type(L.clientCall("group")) == "table" then L.clientCall("leaveGroup") end
+    end,
+    refuse = function(room)
+      if wire ~= "trade" then return nil end
+      local ready = Union.tradeReadyWith(Union.roomPartnerAvatar(room))
+      if ready == Family.UR_TRADE.READY then return nil end
+      L.clientCall("leaveRoom")
+      return RomText.ascii(RomText.key("gTexts_UR_CantTransmitToTrainer", ready - 1))
+    end,
     onMatch = function()
       if not L.openRelay({ linkType = linkType }) then
         linkupResult(ctx, L.LINKUP.CONNECTION_ERROR)
@@ -2749,6 +3463,92 @@ function Union.finishMinigameLinkup(ctx, group)
     return true
   end)
   return L.LINKUP.SUCCESS
+end
+
+Union.LINK_GROUP_PROVIDERS = {
+  "src.core.game3.scripting.natives_contest",
+  "src.core.game3.scripting.natives_tower_rse",
+}
+-- pokeemerald/src/cable_club.c:482
+Union.LINK_READY_TICKS = 600
+
+function Union.linkGroupSpec(wire)
+  local RseGroups = require("src.core.game3.link.rse_groups")
+  local spec = RseGroups.get(wire)
+  if spec then return spec end
+  for _, name in ipairs(Union.LINK_GROUP_PROVIDERS) do
+    if not package.loaded[name] then pcall(require, name) end
+  end
+  return RseGroups.get(wire)
+end
+
+function Union.linkTypeOf(spec)
+  local v = type(spec) == "table" and spec.linkType or nil
+  if type(v) == "string" then return require("src.link.Game3Link").LINKTYPE[v] end
+  return tonumber(v)
+end
+
+-- pokeemerald/src/union_room.c:1600 WarpForCableClubActivity
+function Union.armLinkRoom(ctx, dest, service)
+  local started, finished = false, false
+  natives().awaitState(ctx, function()
+    if not started then
+      started = true
+      Union.warpForCableClubActivity(dest, service, {
+        cableClubWarp = true,
+        onDone = function() finished = true end,
+      })
+    end
+    return finished
+  end)
+end
+
+-- pokeemerald/src/union_room.c:1750 Task_RunScriptAndFadeToActivity
+function Union.finishLinkGroup(ctx, adapters, group, wire, role, spec)
+  local L = link()
+  local linkType = Union.linkTypeOf(spec)
+  if not (linkType and L.openRelay({ linkType = linkType })) then
+    L.clientCall("leaveRoom")
+    linkupResult(ctx, L.LINKUP.CONNECTION_ERROR)
+    return true
+  end
+  L.setStatus("busy")
+  local ticks = 0
+  ctx.nativePoll = function()
+    ticks = ticks + 1
+    local lk = L.link
+    if not (lk and lk:isOpen()) then
+      linkupResult(ctx, L.LINKUP.CONNECTION_ERROR)
+      return true
+    end
+    if not lk:isReady() then
+      if ticks <= Union.LINK_READY_TICKS then return false end
+      L.closeLink("linkup_timeout")
+      linkupResult(ctx, L.LINKUP.CONNECTION_ERROR)
+      return true
+    end
+    lk.linkType = linkType
+    linkupResult(ctx, L.LINKUP.SUCCESS)
+    if type(spec.dest) == "table" then
+      Union.armLinkRoom(ctx, spec.dest, tonumber(spec.service) or L.USING[spec.service or ""])
+    end
+    if type(spec.onLinked) == "function" then
+      local players = type(lk.players) == "function" and lk:players() or {}
+      local ok, err = pcall(spec.onLinked, ctx, adapters, lk, {
+        group = group, wire = wire, role = role, players = players, seat = tonumber(lk.seat),
+      })
+      if not ok and adapters and adapters.log then adapters.log("[game3/link] " .. wire .. " onLinked: " .. tostring(err)) end
+    end
+    return true
+  end
+  return false
+end
+
+function Union.finishGroupLinkup(ctx, adapters, group, wire, role)
+  local spec = Union.linkGroupSpec(wire)
+  if spec then return Union.finishLinkGroup(ctx, adapters, group, wire, role, spec) end
+  Union.finishMinigameLinkup(ctx, group)
+  return true
 end
 
 function Union.lobbyScreen()
@@ -2829,10 +3629,33 @@ function Union.groupLead(ctx, adapters, group, wire)
     if Union.matchStarted(L.clientCall("room")) then
       if s.isOpen() then s.close() end
       done = true
-      Union.finishMinigameLinkup(ctx, group)
-      return true
+      return Union.finishGroupLinkup(ctx, adapters, group, wire, "leader")
     end
     if not L.online() then return finish(L.LINKUP.CONNECTION_ERROR) end
+    if phase == "list" and (tonumber(spec.min) or 0) == 0 and M then
+      local g = L.clientCall("group")
+      local members = type(g) == "table" and type(g.members) == "table" and g.members or {}
+      if #members >= (tonumber(spec.max) or 2) then
+        -- pokefirered/src/union_room.c:602
+        local last = members[#members]
+        local av = type(last) == "table" and type(last.avatar) == "table" and last.avatar or {}
+        if s.isOpen() then s.close() end
+        M.show(RomText.ascii("gText_UR_AnOKWasSentToPlayer", { stringVars = { av.name or (last and last.name) or "" } }),
+          { stay = true })
+        phase, waited = "ok_sent", 0
+        return false
+      end
+    end
+    if phase == "ok_sent" then
+      waited = waited + 1
+      -- pokefirered/src/union_room.c:658
+      if waited > 120 then
+        if M.isOpen and M.isOpen() then M.close() end
+        L.clientCall("startGroup")
+        phase, waited = "starting", 0
+      end
+      return false
+    end
     if phase == "list" then
       local g = L.clientCall("group")
       local pending = type(g) == "table" and type(g.pending) == "table" and g.pending[1] or nil
@@ -2934,8 +3757,7 @@ function Union.groupJoin(ctx, adapters, group, wire)
       local g = L.clientCall("group")
       if type(g) == "table" then Union._groupMembers = g.members end
       finish(nil)
-      Union.finishMinigameLinkup(ctx, group)
-      return true
+      return Union.finishGroupLinkup(ctx, adapters, group, wire, "group")
     end
     if not L.online() then return finish(L.LINKUP.CONNECTION_ERROR) end
     if phase == "waiting" then
@@ -2971,6 +3793,18 @@ function Union.relayGroupFlow(ctx, adapters, group, role)
   if role == "leader" then return Union.groupLead(ctx, adapters, group, wire) end
   return Union.groupJoin(ctx, adapters, group, wire)
 end
+
+local RseGroups = require("src.core.game3.link.rse_groups")
+-- pokeemerald/src/union_room.c:1705
+RseGroups.register("record_corner", {
+  linkType = "RECORD_MIX_BEFORE",
+  dest = Union.RECORD_CORNER,
+  service = "RECORD_CORNER",
+})
+-- pokeemerald/data/scripts/berry_blender.inc:694
+RseGroups.register("berry_blender", {
+  linkType = "BERRY_BLENDER_SETUP",
+})
 
 function Union.reset()
   Union.stop("reset")
@@ -3012,6 +3846,10 @@ function Union.reset()
   Union._held = nil
   Union._scriptResult = nil
   Union._leftRooms = nil
+  Union._xg = nil
+  Union._xgSession = nil
+  Union._serverOutdated = nil
+  Union._capsMemo = nil
   local Screen = package.loaded["src.ui.game3.union_room"]
   if Screen and Screen.reset then Screen.reset() end
   local LinkMenu = package.loaded["src.ui.game3.link_menu"]

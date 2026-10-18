@@ -1,6 +1,6 @@
 """REQUIRED_SYMBOLS delta between pokegold.sym and pokecrystal.sym.
 
-make_gold_manifest.REQUIRED_SYMBOLS names 341 symbols by hand.  25 of them do
+make_gold_manifest.REQUIRED_SYMBOLS names the Gold symbols by hand.  25 of them do
 not exist in pokecrystal.sym: Crystal renamed the credits mons, split the
 trainer-card / Pokegear / pack-pals blocks by player gender, split the two
 FontsExtra tiles apart, and replaced the whole Gold/Silver intro movie and
@@ -69,6 +69,10 @@ ADD_SYMBOLS = frozenset({
     "AnimateFountainTile",
     "ForestTreeLeftAnimation", "ForestTreeRightAnimation",
     "ForestTreeLeftAnimation2", "ForestTreeRightAnimation2",
+    "BattleTowerInsidePalette", "HousePalette", "IcePathPalette",
+    "MansionPalette1", "MansionPalette2", "PokeComPalette", "RadioTowerPalette",
+    # data/radio/buenas_passwords.asm:1; engine/pokegear/radio.asm:1713
+    "BuenasPasswordTable", "BuenasPasswordChannelName",
     # engine/overworld/wildmons.asm:493-524 -- Raikou and Entei only.
     "InitRoamMons",
     # data/events/unown_walls.asm:7,15 -- the four Ruins of Alph wall words
@@ -87,6 +91,11 @@ ADD_SYMBOLS = frozenset({
     # of the cart rather than written down.
     "LoadOpponentTrainerAndPokemon.resample",
     "LoadRandomBattleTowerMon.resample",
+    # engine/events/battle_tower/trainer_text.asm:1,88,90,176
+    "BattleTowerText", "BTTrainerClassGenders",
+    "BTMaleTrainerTexts", "BTFemaleTrainerTexts",
+    # ram/wram.asm wBT_OTTrainerClass, trainer_text.asm:11
+    "wBT_OTTrainerClass",
     # data/wild/treemons_asleep.asm:3,17,25
     "AsleepTreeMonsNite", "AsleepTreeMonsDay", "AsleepTreeMonsMorn",
 })

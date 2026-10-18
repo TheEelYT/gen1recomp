@@ -3,7 +3,8 @@ local Q=require('src.core.game3.quest_log')
 local R={}
 function R.location(game,session)
   local def=game and game.data and game.data.maps and game.data.maps[session.map]
-  local info=require("src.import.gba.map_sections_extract").getInfo(def and def.regionMapSectionId,session.map,0)
+  local ok,info=pcall(require("src.import.gba.map_sections_extract").getInfo,def and def.regionMapSectionId,session.map,0)
+  if not ok then info=nil end
   if info and info.name and info.name~="???" then return info.name end
   return tostring(session.map or ''):gsub('^FR_',''):gsub('_',' ')
 end
@@ -23,22 +24,30 @@ function R.capture(game,session)
     local gid=Space and Space.resolveObjectGraphicsId and o.def and Space.resolveObjectGraphicsId(o.def)
     f.actors[#f.actors+1]={id=o.localId or 1000+(tonumber(o.virtualId) or 0),x=o.px or o.cellX*16,y=o.py or o.cellY*16,
       graphicsId=gid or o.graphicsId or (o.def and (o.def.graphicsId or o.def.graphics)),
-      facing=o.facing,walkPhase=O.walkPhase(o),stepFlip=o.stepFlip,frame=o.customFrame,bow=(o.bowFrames or 0)>0}
+      facing=o.facing,walkPhase=O.walkPhase(o),stepFlip=o.stepFlip,frame=o.customFrame,bow=(o.bowFrames or 0)>8 and (o.bowFrames or 0)<=40}
   end
-  return f
+  return Q.trimActors(f)
 end
-function R.tiles(game,session,frame)
+function R.fillTiles(game,session,frame,out)
   local Map=require('src.core.game3.map')
   local def=game and game.data and game.data.maps and game.data.maps[session.map]
-  if not def or not def.midLayout then return {} end
-  local out={};local cx=math.floor(frame.x/16);local cy=math.floor(frame.y/16)
+  if not def or not def.midLayout then return out end
+  local cx=math.floor(frame.x/16);local cy=math.floor(frame.y/16)
   for y=cy-6,cy+6 do for x=cx-8,cx+8 do
     local mid,pair=Map.worldMidAt(x,y,def)
-    out[x..','..y]={mid,pair}
+    local key=x..','..y
+    local t=out[key]
+    if type(t)~='table' or t[1]~=mid or t[2]~=pair then
+      out[key]={mid,pair}
+    end
   end end
   return out
 end
+function R.tiles(game,session,frame)
+  return R.fillTiles(game,session,frame,{})
+end
 function R.event(session,key,args)
+  if not require('src.core.game3.field_modules').enabled('questLog',session) then return end
   local Runtime=package.loaded['src.core.game3.runtime']
   -- Ignore simulations/tests and sessions that aren't the active game.
   if not session or not Runtime or type(Runtime.isActive) ~= "function" or not Runtime.isActive() or (Runtime.getSession and Runtime.getSession() ~= session) then return end
@@ -73,7 +82,9 @@ function R.update(game)
   session._questTick=(session._questTick or 0)+1
   if session._questTick%6~=0 then return end
   local f=R.capture(game,session)
-  Q.sample(session,f,6);Q.addTiles(session,R.tiles(game,session,f))
+  Q.sample(session,f,6)
+  local scene=Q.tileScene(session)
+  if scene then R.fillTiles(game,session,f,scene.tiles) end
 end
 function R.battle(session,st)
   if not st or (st.result~='win' and st.result~='catch') then return end

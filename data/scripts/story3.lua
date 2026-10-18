@@ -14,7 +14,7 @@ local M = {}
 -- refusedText is the .ThatsSoDisappointingText tail on NO; followText is
 -- the second half of the received chain (scripts/VermilionOldRodHouse.asm:45)
 local function rodGiver(askText, receivedText, afterText, rodItem, flag,
-                        refusedText, followText)
+                        refusedText, followText, noRoomText)
   local rows = {
     { "face_player" },
     { "check_flag", flag },
@@ -23,7 +23,8 @@ local function rodGiver(askText, receivedText, afterText, rodItem, flag,
     { "jump_if_false", "refused" },
     -- give-then-print like the three rod-house scripts (GiveItem fills
     -- wStringBuffer; the received texts read OLD/GOOD/SUPER ROD from it)
-    { "give_item", rodItem, 1, false },
+    -- scripts/VermilionOldRodHouse.asm:44
+    { "give_item", rodItem, 1, false, noRoomText, "Get_Item1" },
     { "set_flag", flag },
     { "show_text", receivedText },
   }
@@ -45,7 +46,8 @@ M.VERMILION_OLD_ROD_HOUSE = {
       "_VermilionOldRodHouseFishingGuruHowAreTheFishBitingText",
       "OLD_ROD", "EVENT_GOT_OLD_ROD",
       "_VermilionOldRodHouseFishingGuruThatsSoDisappointingText",
-      "_VermilionOldRodHouseFishingGuruFishingIsAWayOfLifeText"),
+      "_VermilionOldRodHouseFishingGuruFishingIsAWayOfLifeText",
+      "_VermilionOldRodHouseFishingGuruNoRoomText"),
   },
 }
 
@@ -56,7 +58,8 @@ M.FUCHSIA_GOOD_ROD_HOUSE = {
       "_FuchsiaGoodRodHouseFishingGuruReceivedGoodRodText",
       "_FuchsiaGoodRodHouseFishingGuruHowAreTheFishText",
       "GOOD_ROD", "EVENT_GOT_GOOD_ROD",
-      "_FuchsiaGoodRodHouseFishingGuruThatsSoDisappointingText"),
+      "_FuchsiaGoodRodHouseFishingGuruThatsSoDisappointingText", nil,
+      "_FuchsiaGoodRodHouseFishingGuruNoRoomText"),
   },
 }
 
@@ -68,7 +71,8 @@ M.ROUTE_12_SUPER_ROD_HOUSE = {
       "_Route12SuperRodHouseFishingGuruTryFishingText",
       "SUPER_ROD", "EVENT_GOT_SUPER_ROD",
       "_Route12SuperRodHouseFishingGuruThatsDisappointingText",
-      "_Route12SuperRodHouseFishingGuruFishingWayOfLifeText"),
+      "_Route12SuperRodHouseFishingGuruFishingWayOfLifeText",
+      "_Route12SuperRodHouseFishingGuruNoRoomText"),
   },
 }
 
@@ -247,6 +251,7 @@ end
 local function elevatorFloors(elevatorMapId, game)
   local floors = {}
   for mapId, def in pairs(game.data.maps) do
+    local found
     for i, w in ipairs(def.warps) do
       if w.destMap == elevatorMapId then
         -- short floor token pokered actually prints, e.g.
@@ -255,11 +260,11 @@ local function elevatorFloors(elevatorMapId, game)
         -- warpIdx: this floor's warp back into the elevator IS the
         -- warp the car's rewritten exit lands on (the reciprocal
         -- pair), matching wElevatorWarpMaps' (warp id, map id)
-        table.insert(floors,
-          { map = mapId, x = w.x, y = w.y, token = token, warpIdx = i })
-        break
+        -- scripts/RocketHideoutElevator.asm:51
+        found = { map = mapId, x = w.x, y = w.y, token = token, warpIdx = i }
       end
     end
+    if found then table.insert(floors, found) end
   end
   -- numeric floor order (SilphCoElevatorFloors' FLOOR_1F..FLOOR_11F),
   -- not lexicographic -- otherwise 10F/11F sort before 2F..9F
@@ -270,7 +275,8 @@ local function elevatorFloors(elevatorMapId, game)
   return floors
 end
 
-local function elevatorSeedExit(ow, floors, fromMapId)
+local function elevatorSeedExit(ow, floors, fromMapId, fromWarpIdx,
+                                floorWarps, elevatorMapId)
   -- Seed a walk-out destination on entry (before the panel is ever
   -- read): entry floor when known, else the first listed floor (1F).
   -- Choosing a floor rewrites it again; B-cancel / no-key leave
@@ -282,6 +288,13 @@ local function elevatorSeedExit(ow, floors, fromMapId)
     for _, f in ipairs(floors) do
       if f.map == fromMapId then exitFloor = f break end
     end
+  end
+  -- scripts/RocketHideoutElevator.asm:17
+  local fromWarp = fromWarpIdx and exitFloor and exitFloor.map == fromMapId
+    and floorWarps and floorWarps[fromWarpIdx]
+  if fromWarp and fromWarp.destMap == elevatorMapId then
+    exitFloor = { map = exitFloor.map, x = fromWarp.x, y = fromWarp.y,
+                  token = exitFloor.token, warpIdx = fromWarpIdx }
   end
   elevatorSetExit(ow, exitFloor)
   return exitFloor
@@ -356,8 +369,10 @@ local function elevator(elevatorMapId, panelText, keyGate, preFrames)
     -- B-cancel can still walk out onto a real map.  Silph's ROM car warps
     -- default to UNUSED_MAP_ED, which is not in Data.maps -- Warp.resolve
     -- asserted and hard-crashed (#123).
-    onEnter = function(game, ow, fromMapId)
-      elevatorSeedExit(ow, elevatorFloors(elevatorMapId, game), fromMapId)
+    onEnter = function(game, ow, fromMapId, fromWarpIdx)
+      local fromDef = fromMapId and game.data.maps[fromMapId]
+      elevatorSeedExit(ow, elevatorFloors(elevatorMapId, game), fromMapId,
+        fromWarpIdx, fromDef and fromDef.warps, elevatorMapId)
     end,
     talk = { [panelText] = panel },
   }
@@ -475,6 +490,8 @@ M.ROCKET_HIDEOUT_B4F = {
       local hope = t._RocketHideoutB4FGiovanniHopeWeMeetAgainText
                    or "I hope we meet\nagain..."
       game.stack:push(TextBox.new(game, impressed, function()
+        -- home/text_script.asm:112-120
+        if npc.origFacing then npc.facing = npc.origFacing end
         local battle = BattleState.newTrainer(game, "OPP_GIOVANNI", 1)
         -- SaveEndBattleTextPointers (scripts/RocketHideoutB4F.asm:99-120):
         -- PrintEndBattleText prints it on the battle screen (#1817)
@@ -503,8 +520,12 @@ M.ROCKET_HIDEOUT_B4F = {
             end))
           end))
         end
-        ow:pushBattle(battle)
-      end))
+        -- engine/battle/battle_transitions.asm:11-46
+        ow:pushBattle(battle, npc)
+      end, TextBox.soundOpts(game, function()
+        -- scripts/RocketHideoutB4F.asm:113; home/trainers.asm:339
+        ow:playTrainerMusic("OPP_GIOVANNI")
+      end)))
     end,
   },
 }

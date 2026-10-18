@@ -32,7 +32,18 @@ local function displayName(b)
 end
 
 local HEAL_AMOUNT = { POTION = 20, SUPER_POTION = 50, HYPER_POTION = 200 }
-local X_STAT = { X_ATTACK = "attack", X_DEFEND = "defense", X_SPEED = "speed" }
+local X_STAT = {
+  X_ATTACK = "attack", X_DEFEND = "defense", X_SPEED = "speed",
+  X_SPECIAL = "special",
+}
+local RESTORING_SFX = {
+  FULL_HEAL = true, GUARD_SPEC = true, X_ACCURACY = true, DIRE_HIT = true,
+}
+
+-- engine/battle/trainer_ai.asm:459
+function TrainerAI.playsRestoringSfx(item)
+  return RESTORING_SFX[item] == true
+end
 
 -- Strings.source, not Strings: harvested at require time so the catalog
 -- generator can see the literal, same pattern as MoveEffects.lua's
@@ -40,7 +51,7 @@ local X_STAT = { X_ATTACK = "attack", X_DEFEND = "defense", X_SPEED = "speed" }
 -- the harvester can't discover.
 local STAT_LABEL = {
   attack = Strings.source("ATTACK"), defense = Strings.source("DEFENSE"),
-  speed = Strings.source("SPEED"),
+  speed = Strings.source("SPEED"), special = Strings.source("SPECIAL"),
 }
 
 -- The trainer's ai_classes record from the merged registry; the direct
@@ -121,17 +132,24 @@ function TrainerAI.useItem(battle, item)
   local msgs = { romText(battle.data, "_AIBattleUseItemText",
     "%s\nused %s!", trainerName, itemName, enemy.name) }
   if item == "FULL_HEAL" then
+    Status.keepPenaltyOnCure(battle, enemy)
     enemy.mon.status = nil
     enemy.toxicCounter = nil
   elseif item == "FULL_RESTORE" then
     enemy.mon.hp = enemy.mon.stats.hp
+    Status.keepPenaltyOnCure(battle, enemy)
     enemy.mon.status = nil
     enemy.toxicCounter = nil
   elseif HEAL_AMOUNT[item] then
     enemy.mon.hp = math.min(enemy.mon.stats.hp, enemy.mon.hp + HEAL_AMOUNT[item])
   elseif X_STAT[item] then
     local stat = X_STAT[item]
-    enemy.stages[stat] = math.min(6, (enemy.stages[stat] or 0) + 1)
+    if (enemy.stages[stat] or 0) >= 6 or require("src.battle.Damage").statAtCap(battle, enemy, stat) then
+      -- engine/battle/effects.asm:372-373
+      table.insert(msgs, romText(battle.data, "_NothingHappenedText", "Nothing happened!"))
+      return msgs
+    end
+    enemy.stages[stat] = (enemy.stages[stat] or 0) + 1
     -- trainer_ai.asm:719 -> effects.asm:414-415
     Status.afterStatChange(battle, enemy, stat, battle.player)
     enemy.hazeStatReset = nil
@@ -139,8 +157,8 @@ function TrainerAI.useItem(battle, item)
     table.insert(msgs, { anim = "XSTATITEM_DUPLICATE_ANIM" })
     table.insert(msgs, Strings("%s's\n%s rose!", displayName(enemy), Strings(STAT_LABEL[stat])))
   elseif item == "GUARD_SPEC" then
+    -- engine/battle/trainer_ai.asm:645
     enemy.mist = true
-    table.insert(msgs, Strings("%s's\nprotected against\nstat changes!", displayName(enemy)))
   end
   return msgs
 end

@@ -8,22 +8,34 @@ local GameVersion = require("src.core.GameVersion")
 
 local CacheContract = {}
 
--- engine/battle/animations.asm:2418
-CacheContract.FORMAT = "rom-cache-v12-gen1:"
+-- engine/battle/animations.asm:2418, engine/battle/core.asm:2051
+-- engine/movie/title.asm:97
+CacheContract.FORMAT = "rom-cache-v15-gen1:"
 CacheContract.VERSION_FORMAT = {
   -- v11: Gen 2 maps carry their object list's ROM address, which a .sav
   -- export re-anchoring a save onto another map writes back into
   -- wCurMapObjectEventsPointer. A v10 cache has no address to write, and
   -- such an export is refused until the ROM re-imports.
-  gold = "rom-cache-v12:",
-  silver = "rom-cache-v12:",
-  crystal = "rom-cache-v12-crystal4:",
+  -- gfx/sgb/predef.pal:28
+  -- data/items/catch_rate_items.asm:5
+  -- data/battle/accuracy_multipliers.asm:4, data/moves/effects_pointers.asm:1
+  gold = "rom-cache-v16:",
+  silver = "rom-cache-v16:",
+  crystal = "rom-cache-v16-crystal8:",
   -- engine/overworld/map_sprites.asm:181, engine/battle/animations.asm:2600
-  -- data/pikachu/pikachu_pic_animation.asm:340
-  yellow = "rom-cache-v12-yellow2:",
+  -- data/pikachu/pikachu_pic_animation.asm:340, engine/movie/title.asm:76
+  -- engine/pikachu/pikachu_pic_animation.asm:412, engine/battle/core.asm:2135-2138
+  -- engine/battle/read_trainer_party.asm:87
+  -- engine/events/diploma2.asm:6
+  -- engine/events/hidden_events/vermilion_gym_trash2.asm:70
+  yellow = "rom-cache-v12-yellow7:",
   -- v8: M4A tracks retain reachable patterns and explicit entry offsets.
-  firered = "rom-cache-v17-firered:",
-  leafgreen = "rom-cache-v2-leafgreen:",
+  firered = "rom-cache-v25-firered:",
+  leafgreen = "rom-cache-v10-leafgreen:",
+  emerald = "rom-cache-v5-emerald:",
+  -- pokeruby/src/string_util.c:408
+  ruby = "rom-cache-v7-ruby:",
+  sapphire = "rom-cache-v7-sapphire:",
 }
 CacheContract.MARKER_PATH = "rom-cache.complete"
 
@@ -43,6 +55,8 @@ CacheContract.REQUIRED_FILES = {
   -- engine/items/town_map.asm:296, 150
   "assets/generated/townmap/nest.png",
   "assets/generated/townmap/up_arrow.png",
+  -- engine/pokemon/status_screen.asm:236
+  "assets/generated/fonts/bold_p.png",
 }
 
 CacheContract.VERSION_REQUIRED_FILES = {
@@ -77,41 +91,50 @@ CacheContract.VERSION_REQUIRED_FILES = {
     "assets/generated/pikachu/pikapic_26.png",
     "assets/generated/pikachu/pikapic_27.png",
     "assets/generated/pikachu/pikapic_28.png",
-    "assets/generated/pikachu/gfx_e4841.png",
-    "assets/generated/pikachu/gfx_e4ce0.png",
-    "assets/generated/pikachu/gfx_e4e70.png",
-    "assets/generated/pikachu/gfx_e50af.png",
-    "assets/generated/pikachu/gfx_e52fe.png",
-    "assets/generated/pikachu/gfx_e5541.png",
-    "assets/generated/pikachu/gfx_e5794.png",
-    "assets/generated/pikachu/gfx_e59ed.png",
-    "assets/generated/pikachu/gfx_e5c4d.png",
-    "assets/generated/pikachu/gfx_e5e90.png",
-    "assets/generated/pikachu/gfx_e6020.png",
-    "assets/generated/pikachu/gfx_e61b0.png",
-    "assets/generated/pikachu/gfx_e63f7.png",
-    "assets/generated/pikachu/gfx_e6646.png",
-    "assets/generated/pikachu/gfx_e682f.png",
-    "assets/generated/pikachu/gfx_e69bf.png",
-    "assets/generated/pikachu/gfx_e6b4f.png",
-    "assets/generated/pikachu/gfx_e6cdf.png",
-    "assets/generated/pikachu/gfx_e6e6f.png",
-    "assets/generated/pikachu/gfx_e6fff.png",
-    "assets/generated/pikachu/gfx_e718f.png",
-    "assets/generated/pikachu/gfx_e731f.png",
-    "assets/generated/pikachu/gfx_e74af.png",
-    "assets/generated/pikachu/gfx_e763f.png",
-    "assets/generated/pikachu/gfx_e7863.png",
-    "assets/generated/pikachu/gfx_e79f3.png",
-    "assets/generated/pikachu/gfx_e7b83.png",
-    "assets/generated/pikachu/gfx_e7d13.png",
-    "assets/generated/pikachu/gfx_f0b64.png",
-    "assets/generated/pikachu/gfx_f0d82.png",
+    "assets/generated/pikachu/pikapic_1_14.png",
+    "assets/generated/pikachu/pikapic_2_15.png",
+    "assets/generated/pikachu/pikapic_3_16.png",
+    "assets/generated/pikachu/pikapic_4_17.png",
+    "assets/generated/pikachu/pikapic_5_18.png",
+    "assets/generated/pikachu/pikapic_6_19.png",
+    "assets/generated/pikachu/pikapic_7_20.png",
+    "assets/generated/pikachu/pikapic_8_21.png",
+    "assets/generated/pikachu/pikapic_9_22.png",
+    "assets/generated/pikachu/pikapic_10_23.png",
+    "assets/generated/pikachu/pikapic_10_24.png",
+    "assets/generated/pikachu/pikapic_11_25.png",
+    "assets/generated/pikachu/pikapic_12_26.png",
+    "assets/generated/pikachu/pikapic_13_27.png",
+    "assets/generated/pikachu/pikapic_14_28.png",
+    "assets/generated/pikachu/pikapic_15_29.png",
+    "assets/generated/pikachu/pikapic_16_30.png",
+    "assets/generated/pikachu/pikapic_17_31.png",
+    "assets/generated/pikachu/pikapic_18_32.png",
+    "assets/generated/pikachu/pikapic_19_33.png",
+    "assets/generated/pikachu/pikapic_20_34.png",
+    "assets/generated/pikachu/pikapic_21_9.png",
+    "assets/generated/pikachu/pikapic_21_10.png",
+    "assets/generated/pikachu/pikapic_21_11.png",
+    "assets/generated/pikachu/pikapic_21_12.png",
+    "assets/generated/pikachu/pikapic_22_36.png",
+    "assets/generated/pikachu/pikapic_23_37.png",
+    "assets/generated/pikachu/pikapic_24_38.png",
+    "assets/generated/pikachu/pikapic_25_9.png",
+    "assets/generated/pikachu/pikapic_25_10.png",
+    "assets/generated/pikachu/pikapic_26_9.png",
+    "assets/generated/pikachu/pikapic_26_10.png",
+    "assets/generated/pikachu/pikapic_26_11.png",
+    "assets/generated/pikachu/pikapic_27_9.png",
+    "assets/generated/pikachu/pikapic_28_9.png",
     "assets/generated/minigame/surf_1a.png",
     "assets/generated/minigame/surf_1b.png",
     "assets/generated/minigame/surf_1c.png",
     "assets/generated/minigame/title_bg.png",
     "assets/generated/minigame/intro_pika_0.png",
+    "assets/generated/minigame/hiscore_tiles.png",
+    "assets/generated/diploma/yellow_tiles.png",
+    "assets/generated/printer/hp.png",
+    "assets/generated/printer/lv.png",
   },
 }
 
@@ -131,6 +154,8 @@ CacheContract.VERSION_REQUIRED_FILES_OVERRIDE = {
     "data/generated/tilesets.lua",
     "data/generated/audio.lua",
     "data/generated/marts.lua",
+    -- engine/gfx/cgb_layouts.asm:495
+    "data/generated/diploma.lua",
     "assets/generated/fonts/font.png",
     "assets/generated/fonts/frames.png",
     "assets/generated/title/pokemon_logo.png",
@@ -170,6 +195,7 @@ CacheContract.VERSION_REQUIRED_FILES_OVERRIDE = {
     "data/generated/scripts.lua",
     "data/generated/text.lua",
     "data/generated/rom_text.lua",
+    "data/generated/events.lua",
     "data/generated/pokemon.lua",
     "data/generated/encounters.lua",
     "data/generated/tilesets.lua",
@@ -179,6 +205,8 @@ CacheContract.VERSION_REQUIRED_FILES_OVERRIDE = {
     "data/generated/oak_speech.lua",
     "data/generated/title.lua",
     "data/generated/intro.lua",
+    -- engine/gfx/cgb_layouts.asm:517
+    "data/generated/diploma.lua",
     "assets/generated/fonts/font.png",
     "assets/generated/fonts/frames.png",
     -- ../pokecrystal/gfx/font.asm:60
@@ -243,6 +271,7 @@ CacheContract.VERSION_REQUIRED_FILES_OVERRIDE = {
     "data/generated/gba/intro/nidoran_f.png",
     "data/generated/gba/naming/manifest.lua",
     "data/generated/gba/ow/manifest.lua",
+    "data/generated/gba/ow/palette_manifest.lua",
     "data/generated/gba/ow/0.rgba",
     "data/generated/gba/ow/7.rgba",
     "data/generated/gba/pokemon/manifest.lua",
@@ -277,6 +306,7 @@ CacheContract.VERSION_REQUIRED_FILES_OVERRIDE = {
     "data/generated/gba/pokemon/learnsets.lua",
     "data/generated/gba/pokemon/move_names.lua",
     "data/generated/gba/pokemon/battle_moves.lua",
+    "data/generated/gba/pokemon/battle_anims/pack.lua",
     "data/generated/gba/pokemon/battle/manifest.lua",
     "data/generated/gba/pokemon/battle/healthbox_player.rgba",
     "data/generated/gba/pokemon/battle/healthbox_doubles_player.rgba",
@@ -312,6 +342,7 @@ CacheContract.VERSION_REQUIRED_FILES_OVERRIDE = {
     "data/generated/gba/items/bag/list_blank_female.rgba",
     "data/generated/gba/items/bag/desc_sel.rgba",
     "data/generated/gba/items/bag/red_arrow.rgba",
+    "data/generated/gba/items/bag/select_button.rgba",
     -- src/item_menu.c:569, src/item_menu_icons.c:150
     "data/generated/gba/items/bag/bg_itempc.rgba",
     "data/generated/gba/items/bag/bg_itempc_female.rgba",
@@ -340,6 +371,11 @@ CacheContract.VERSION_REQUIRED_FILES_OVERRIDE = {
     "data/generated/gba/pokemon/summary/progress_moves_info_select.rgba",
     "data/generated/gba/pokemon/summary/markings.rgba",
     "data/generated/gba/pokemon/storage/manifest.lua",
+    -- src/pokemon_storage_system_menu.c:659-660
+    "data/generated/gba/pokemon/storage/choose_box_center.png",
+    "data/generated/gba/pokemon/storage/choose_box_sides.png",
+    -- src/roamer.c:36
+    "data/generated/gba/roamer/locations.lua",
     "data/generated/gba/pokedex/manifest.lua",
     "data/generated/gba/chrome/manifest.lua",
     "data/generated/gba/chrome/menu_message_rgba.rgba",
@@ -375,6 +411,7 @@ CacheContract.VERSION_REQUIRED_FILES_OVERRIDE = {
     "data/generated/gba/trainers.lua",
     "data/generated/gba/trainers/back_0.rgba",
     "data/generated/gba/trainers/back_1.rgba",
+    "data/generated/gba/trainers/back_anims.lua",
     "data/generated/gba/trainer_card/manifest.lua",
     "data/generated/gba/trainer_card/bg.rgba",
     "data/generated/gba/field_effects/tall_grass.rgba",
@@ -525,6 +562,7 @@ CacheContract.VERSION_REQUIRED_FILES_OVERRIDE = {
     -- src/data/field_effects/field_effect_objects.h:288, src/itemfinder.c:39
     "data/generated/gba/field_effects/ground_impact_dust.rgba",
     "data/generated/gba/field_effects/itemfinder_arrow_star.rgba",
+    "data/generated/gba/field_effects/arrow.rgba",
     -- src/field_effect.c:73, :77
     "data/generated/gba/field_effects/field_move_streaks_outdoors.rgba",
     "data/generated/gba/field_effects/field_move_streaks_indoors.rgba",
@@ -683,6 +721,28 @@ CacheContract.VERSION_REQUIRED_FILES_OVERRIDE = {
     "data/generated/gba/pokemon_jump/vine4_pal2.rgba",
   },
 }
+do
+  local frlg = CacheContract.VERSION_REQUIRED_FILES_OVERRIDE.firered
+  for _, path in ipairs(require("src.import.gba.battle_anim_extract").FRLG_REQUIRED) do
+    frlg[#frlg + 1] = "data/generated/gba/" .. path
+  end
+  -- src/trainer_card.c:155, :293
+  local hoenn = "data/generated/gba/rse/trainer_card/"
+  frlg[#frlg + 1] = hoenn .. "manifest.lua"
+  frlg[#frlg + 1] = hoenn .. "badges.png"
+  frlg[#frlg + 1] = hoenn .. "star.png"
+  for stars = 0, 4 do
+    for _, side in ipairs({ "screen", "front", "back" }) do
+      frlg[#frlg + 1] = string.format("%s%s_%d.png", hoenn, side, stars)
+      frlg[#frlg + 1] = string.format("%s%s_%d_female.png", hoenn, side, stars)
+    end
+  end
+  -- pokefirered/src/battle_script_commands.c:9693
+  local terrainKeys = require("src.import.gba.battle_chrome_extract").TERRAIN_KEYS
+  for id = 0, 19 do
+    frlg[#frlg + 1] = "data/generated/gba/pokemon/battle/terrain_" .. terrainKeys[id] .. "_post_dex.rgba"
+  end
+end
 CacheContract.VERSION_REQUIRED_FILES_OVERRIDE.leafgreen = {}
 for i, path in ipairs(CacheContract.VERSION_REQUIRED_FILES_OVERRIDE.firered) do
   CacheContract.VERSION_REQUIRED_FILES_OVERRIDE.leafgreen[i] = path
@@ -718,6 +778,53 @@ local function copy(values)
   return out
 end
 
+CacheContract.PLAN_CORE_FILES = {
+  "data/generated/gba/meta.json",
+  "data/generated/gba/maps.json",
+  "data/generated/gba/audio/meta.json",
+  "data/generated/gba/intro/meta.json",
+  "data/generated/maps.lua",
+  "data/generated/intro.lua",
+  "data/generated/audio.lua",
+}
+
+local composed = {}
+
+function CacheContract.planFilesFor(version)
+  if composed[version] then return composed[version] end
+  local Plans = require("src.import.gba.plans.registry")
+  local CachePaths = require("src.core.game3.cache_paths")
+  local files, seen = {}, {}
+  local function add(path)
+    if not seen[path] then
+      seen[path] = true
+      files[#files + 1] = path
+    end
+  end
+  for _, path in ipairs(CacheContract.PLAN_CORE_FILES) do add(path) end
+  for _, path in ipairs(Plans.required(Plans.of(version), CachePaths.CACHE_ROOT)) do add(path) end
+  if version == "emerald" then
+    local cfg = require("src.import.gba.games.emerald").BATTLE_UI
+    local keys = require("src.import.gba.battle_chrome_extract").TERRAIN_KEYS
+    -- pokeemerald/src/battle_script_commands.c:10133
+    local function postDex(key)
+      add(CachePaths.CACHE_ROOT .. "/pokemon/battle/terrain_" .. key .. "_post_dex.rgba")
+    end
+    for id = 0, cfg.terrain_count - 1 do postDex(keys[id]) end
+    for _, scene in ipairs(cfg.scenes) do postDex(scene.key) end
+  end
+  composed[version] = files
+  return files
+end
+
+local function planComposed(version)
+  return CacheContract.VERSION_REQUIRED_FILES_OVERRIDE[version] == nil
+    and CacheContract.VERSION_FORMAT[version] ~= nil
+    and GameVersion.VERSIONS[version] ~= nil
+    and GameVersion.generation(version) == 3
+    and GameVersion.layout(version) ~= nil
+end
+
 function CacheContract.requiredFilesFor(version)
   local override = CacheContract.VERSION_REQUIRED_FILES_OVERRIDE[version]
 
@@ -739,7 +846,13 @@ function CacheContract.requiredFilesFor(version)
     return override, true
   end
 
+  if planComposed(version) then return CacheContract.planFilesFor(version), true end
   return CacheContract.REQUIRED_FILES, false
+end
+
+function CacheContract.presenceFilesFor(version)
+  if planComposed(version) then return CacheContract.PLAN_CORE_FILES end
+  return (CacheContract.requiredFilesFor(version))
 end
 
 -- A detached, version-specific inventory for read-only consumers. Semantic
@@ -805,7 +918,34 @@ local function withVersionPrefix(version, fs, action)
   return true, first, second
 end
 
-function CacheContract.allRequiredFilesExist(version, fs)
+local function nativeRs(version)
+  return version == "ruby" or version == "sapphire"
+end
+
+local function nativeMeta(fs)
+  local raw = fs.read and fs.read("data/generated/gba/meta.json")
+  if type(raw) ~= "string" then return nil end
+  local ok, meta = pcall(require("src.link.Json").decode, raw)
+  if ok and type(meta) == "table" then return meta end
+end
+
+local function nativeDataReady(version, fs, sha1)
+  if not nativeRs(version) then return true end
+  local path = "data/generated/gba/meta.json"
+  if sha1 ~= nil and type(sha1) ~= "string" then return false, path end
+  local meta = nativeMeta(fs)
+  local V = require("src.import.gba.versions").forGame(version)
+  if not meta or meta.version ~= version or meta.cache_version ~= V.CACHE_VERSION
+      or meta.native_version ~= V.NATIVE_VERSION
+      or type(meta.romSha1) ~= "string" then return false, path end
+  if meta.md5 ~= nil and (type(meta.md5) ~= "string"
+      or meta.md5:lower() ~= meta.romSha1:lower()) then return false, path end
+  local expected = type(sha1) == "string" and sha1:lower() or meta.romSha1:lower()
+  if meta.romSha1:lower() ~= expected then return false, path end
+  return require("src.import.gba.rs.cache_readiness").check(version, fs, expected)
+end
+
+function CacheContract.allRequiredFilesExist(version, fs, sha1)
   fs = fs or require("src.import.CacheFs")
   local ok, complete, missing = withVersionPrefix(version, fs, function()
     local required, isOverride = CacheContract.requiredFilesFor(version)
@@ -818,7 +958,8 @@ function CacheContract.allRequiredFilesExist(version, fs)
         if not fs.exists(path) then missingPath = path; break end
       end
     end
-    return missingPath == nil, missingPath
+    if missingPath then return false, missingPath end
+    return nativeDataReady(version, fs, sha1)
   end)
   if not ok then return false, complete end
   return complete, missing
@@ -840,7 +981,9 @@ end
 function CacheContract.cacheVersionCurrent(version, fs)
   if GameVersion.generation(version) ~= 3 then return true end
   fs = fs or require("src.import.CacheFs")
-  local okV, Versions = pcall(require, "src.import.gba.versions")
+  local okV, Versions = pcall(function()
+    return require("src.import.gba.versions").forGame(version)
+  end)
   if not okV or not Versions or not Versions.CACHE_VERSION then return true end
   local ok, raw = withVersionPrefix(version, fs, function()
     return fs.read("data/generated/gba/meta.json")
@@ -856,12 +999,20 @@ function CacheContract.isReady(version, fs)
   local marker, readError = CacheContract.readMarker(version, fs)
   if readError or not CacheContract.markerMatches(version, marker) then return false end
   if not CacheContract.cacheVersionCurrent(version, fs) then return false end
-  return CacheContract.allRequiredFilesExist(version, fs)
+  local sha1 = nativeRs(version) and marker:match(":([%x]+)$") or nil
+  return CacheContract.allRequiredFilesExist(version, fs, sha1)
 end
 
 function CacheContract.publish(version, fs, sha1)
   fs = fs or require("src.import.CacheFs")
-  local complete, missing = CacheContract.allRequiredFilesExist(version, fs)
+  if nativeRs(version) then
+    if sha1 == nil then
+      local ok, meta = withVersionPrefix(version, fs, function() return nativeMeta(fs) end)
+      sha1 = ok and meta and meta.romSha1 or nil
+    end
+    if type(sha1) == "string" then sha1 = sha1:lower() end
+  end
+  local complete, missing = CacheContract.allRequiredFilesExist(version, fs, sha1)
   if not complete then
     -- A caller may be retrying over a partially replaced cache.  Do not
     -- leave its old marker advertising readiness after this failed check.
@@ -890,8 +1041,17 @@ function CacheContract.sourceTreeHasData(version)
     return false
   end
   local prefix = version == "red" and "" or GameVersion.cachePrefix(version)
-  local required, isOverride = CacheContract.requiredFilesFor(version)
   local source = love.filesystem.getSource()
+  if planComposed(version) then
+    for _, path in ipairs(CacheContract.presenceFilesFor(version)) do
+      local fullPath = prefix .. path
+      if love.filesystem.getInfo(fullPath, "file") == nil
+          or love.filesystem.getRealDirectory(fullPath) ~= source then
+        return false
+      end
+    end
+  end
+  local required, isOverride = CacheContract.requiredFilesFor(version)
   for _, path in ipairs(required) do
     local fullPath = prefix .. path
     if love.filesystem.getInfo(fullPath, "file") == nil
@@ -907,6 +1067,20 @@ function CacheContract.sourceTreeHasData(version)
         return false
       end
     end
+  end
+  if nativeRs(version) then
+    local exact = {
+      read = function(path)
+        local full = prefix .. path
+        if love.filesystem.getRealDirectory(full) == source then return require("src.import.CacheBlob").readFs(full) end
+      end,
+      exists = function(path)
+        local full = prefix .. path
+        return love.filesystem.getInfo(full, "file") ~= nil
+          and love.filesystem.getRealDirectory(full) == source
+      end,
+    }
+    return nativeDataReady(version, exact)
   end
   return true
 end
@@ -942,6 +1116,23 @@ local function sourceReady(version, fs, semantic)
   if not complete then return nil end
   local first = prefix .. CacheContract.requiredFiles(version, semantic)[1]
   if fs.getRealDirectory(first) ~= fs.getSource() then return nil end
+  if nativeRs(version) then
+    local source = fs.getSource()
+    for _, path in ipairs(CacheContract.requiredFiles(version, semantic)) do
+      if fs.getRealDirectory(prefix .. path) ~= source then return nil end
+    end
+    local relative = {
+      read = function(path)
+        local full = prefix .. path
+        if fs.getRealDirectory(full) == source then return readAt(fs, full) end
+      end,
+      exists = function(path)
+        local full = prefix .. path
+        return isFileAt(fs, full) and fs.getRealDirectory(full) == source
+      end,
+    }
+    if not nativeDataReady(version, relative) then return nil end
+  end
   return { kind = "source", prefix = prefix }
 end
 
@@ -962,6 +1153,14 @@ function CacheContract.inspect(version, fs, opts)
   local complete, missing = hasExactFiles(version, fs, prefix, opts.semantic)
   if not complete then
     return nil, "not_imported", "required cache file is missing: " .. tostring(missing)
+  end
+  if nativeRs(version) then
+    local relative = {
+      read = function(path) return readAt(fs, prefix .. path) end,
+      exists = function(path) return isFileAt(fs, prefix .. path) end,
+    }
+    local ready, invalid = nativeDataReady(version, relative, marker:match(":([%x]+)$"))
+    if not ready then return nil, "not_imported", "native cache data is missing or stale: " .. tostring(invalid) end
   end
   return { kind = "cache", prefix = prefix, marker = marker }
 end

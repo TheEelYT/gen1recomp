@@ -542,7 +542,9 @@ function Player.bakeSlot(slot, opts)
   local total = 0
   local idle = 0
   local stopOnGoto = opts.stopOnGoto == true
+  local loopBody = stopOnGoto and opts.loopBody == true
   local sawGoto = false
+  local loopStart, closed
   while total < maxN do
     local n = math.min(chunk, maxN - total)
     local pcs
@@ -565,7 +567,17 @@ function Player.bakeSlot(slot, opts)
       R[#R + 1] = outR[i] or 0
     end
     total = total + n
-    if stopOnGoto and sawGoto and total > chunk then
+    if loopBody then
+      if sawGoto then
+        sawGoto = false
+        if loopStart == nil then
+          loopStart = total
+        else
+          closed = true
+          break
+        end
+      end
+    elseif stopOnGoto and sawGoto and total > chunk then
       break
     end
     local any = false
@@ -578,13 +590,15 @@ function Player.bakeSlot(slot, opts)
     else
       idle = 0
     end
+    local warm = package.loaded["src.core.game3.warm"]
+    if warm then warm.yield() end
   end
   if #L == 0 then
     L[1] = 0
     R[1] = 0
   end
   if opts.raw or not (love and love.sound and love.sound.newSoundData) then
-    return L, R
+    return L, R, closed and loopStart or nil
   end
   local ch = opts.mono and 1 or 2
   local sd = love.sound.newSoundData(#L, rate, 16, ch)

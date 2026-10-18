@@ -2,6 +2,10 @@ local bit = require("bit")
 local band, rshift, lshift, bor = bit.band, bit.rshift, bit.lshift, bit.bor
 local floor = math.floor
 
+local function fallback_prefix()
+  return require("src.core.game3.battle.profile").get().animCacheFallback or nil
+end
+
 local AnimPal = {}
 
 local _lastSentPal = {}
@@ -13,9 +17,17 @@ AnimPal.loaded = {}
 AnimPal.idxOf = setmetatable({}, { __mode = "k" })
 AnimPal._pack = nil
 
+-- Normalised tags by raw tag (strings and numbers only); tags come from a
+-- fixed set, and norm runs for every sprite drawn.
+local _normCache = {}
 local function norm(tag)
   if tag == nil then return nil end
-  return (tostring(tag):upper():gsub("^ANIM_TAG_", ""))
+  local hit = _normCache[tag]
+  if hit then return hit end
+  local out = (tostring(tag):upper():gsub("^ANIM_TAG_", ""))
+  local t = type(tag)
+  if t == "string" or t == "number" then _normCache[tag] = out end
+  return out
 end
 AnimPal.norm = norm
 
@@ -346,7 +358,7 @@ function AnimPal.readPackFile(file)
   local ok, Dataset = pcall(require, "src.core.game3.dataset")
   local cache = ok and Dataset.cache and Dataset.cache() or nil
   local rel = "data/generated/gba/pokemon/battle_anims/" .. tostring(file)
-  return cache and cache.read and (cache:read(rel) or cache:read("firered/" .. rel))
+  return cache and cache.read and (cache:read(rel) or (fallback_prefix() and cache:read(fallback_prefix() .. rel)))
 end
 
 function AnimPal.hydrateIndex(info, tag, rgbaImg, reader)

@@ -13,7 +13,22 @@ local RomText = require("src.core.game3.rom_text")
 
 local Healthbox = {}
 
--- pret InitBattlerHealthboxCoords (singles) — sprite CENTER of left half
+local Profile
+local _rsRow, _rsLayout
+-- Resolved per profile row (forSession follows game switches); the layout is
+-- re-derived only when the row table changes.
+local function rs_layout()
+  Profile = Profile or require("src.core.game3.profile")
+  local row = Profile.forSession()
+  if row ~= _rsRow then
+    _rsRow = row
+    local ui = row.ui
+    _rsLayout = ui and ui.healthbox and ui.healthbox.layout == "rs" and ui.healthbox or nil
+  end
+  return _rsLayout
+end
+
+-- pret InitBattlerHealthboxCoords (singles): sprite CENTER of left half
 Healthbox.ENEMY_CENTER = { x = 44, y = 30 }
 Healthbox.PLAYER_CENTER = { x = 158, y = 88 }
 
@@ -30,6 +45,8 @@ Healthbox.CENTERS = {
 
 function Healthbox.center(st, id)
   id = tonumber(id) or 0
+  local rs = st and st.double and rs_layout()
+  if rs then return rs.doublesCenters[id] or rs.doublesCenters[id % 2] end
   local t = Healthbox.CENTERS[(st and st.double) and true or false]
   return t[id] or t[id % 2]
 end
@@ -136,11 +153,34 @@ local function display_hp_nums(side, battler)
   return math.floor(hp), math.floor(maxHp)
 end
 
+-- pokefirered/src/battle_interface.c:1594
+local function shown_ailment(p, battler)
+  local s
+  if p and p.displayStatus ~= nil then
+    s = p.displayStatus
+  else
+    s = battler.status or (battler.mon and (battler.mon.status or battler.mon.status1))
+  end
+  if s == false or s == 0 then s = nil end
+  return require("src.core.game3.summary_data").statusAilment({ status = s })
+end
+Healthbox.shownAilment = shown_ailment
+
+-- One read-only FrlgFont opts table per colour set (FrlgFont never writes
+-- to opts), so per-frame healthbox text does not allocate.
+local _smallOpts = setmetatable({}, { __mode = "k" })
 local function small_opts(colors)
-  return { small = true, colors = colors or HB_TEXT }
+  colors = colors or HB_TEXT
+  local o = _smallOpts[colors]
+  if not o then
+    o = { small = true, colors = colors }
+    _smallOpts[colors] = o
+  end
+  return o
 end
 
 local function erase_placeholder_ink(boxX, boxY, pts)
+  if rs_layout() then return end
   love.graphics.setColor(CREAM)
   for i = 1, #pts do
     local p = pts[i]
@@ -149,10 +189,65 @@ local function erase_placeholder_ink(boxX, boxY, pts)
   love.graphics.setColor(1, 1, 1, 1)
 end
 
+local rsPalette, rsColors
+local function rs_text_colors(gender)
+  local pal = BattleChrome.manifest().healthboxPal
+  if rsPalette ~= pal then
+    rsPalette = pal
+    local function color(index)
+      local value = assert(pal[index + 1], "RS healthbox palette missing")
+      return { c5(value % 32), c5(math.floor(value / 32) % 32), c5(math.floor(value / 1024) % 32), 1 }
+    end
+    rsColors = { fg = color(1), shadow = color(3), bg = color(2) }
+    rsColors.M = { fg = color(11), shadow = rsColors.bg, bg = rsColors.bg }
+    rsColors.F = { fg = color(10), shadow = rsColors.bg, bg = rsColors.bg }
+  end
+  return rsColors[gender] or rsColors
+end
+
+-- One read-only native_4 opts table per colour set (FrlgFont never writes
+-- to opts). Weak-keyed so replaced palettes drop their entries.
+local _rsRowOpts = setmetatable({}, { __mode = "k" })
+local RS_MEASURE_OPTS = { font = "native_4", textMode = 0 }
+local function rs_row_opts(colors)
+  local o = _rsRowOpts[colors]
+  if not o then
+    o = { font = "native_4", textMode = 0,
+      colors = { fg = colors.fg, shadow = colors.shadow, bg = { 0, 0, 0, 0 } } }
+    _rsRowOpts[colors] = o
+  end
+  return o
+end
+
+local function rs_aligned(value, width)
+  local text = tostring(math.max(0, math.floor(value or 0)))
+  return string.char(0xFC, 0x13, math.max(0, width - FrlgFont.measure(text, RS_MEASURE_OPTS))) .. text
+end
+
+-- pokeruby/src/text.c:2372
+local function draw_rs_row(text, x, y, width, colors, fill)
+  local sx, sy, sw, sh = love.graphics.getScissor()
+  if sx then
+    local left, top = math.max(sx, x), math.max(sy, y)
+    love.graphics.setScissor(left, top, math.max(0, math.min(sx + sw, x + width) - left),
+      math.max(0, math.min(sy + sh, y + 8) - top))
+  else
+    love.graphics.setScissor(x, y, width, 8)
+  end
+  if fill then
+    love.graphics.setColor(colors.bg)
+    love.graphics.rectangle("fill", x, y, width, 8)
+  end
+  FrlgFont.draw(text, x, y - 8, rs_row_opts(colors))
+  if sx then love.graphics.setScissor(sx, sy, sw, sh) else love.graphics.setScissor() end
+  love.graphics.setColor(1, 1, 1, 1)
+end
+
 --- Pret UpdateNickInHealthbox: hide gender when nick == species for Nidoran.
 local function healthbox_gender(mon)
   if not mon then return nil end
   local g = mon.gender
+  if g == "U" then return nil end
   if g ~= "M" and g ~= "F" then
     local Pokemon = require("src.core.game3.pokemon")
     local species = tonumber(mon.species or mon.speciesId)
@@ -174,6 +269,19 @@ local function healthbox_gender(mon)
 end
 
 local function draw_name_gender(name, gender, x, y)
+  if rs_layout() then
+    -- pokeruby/src/battle_interface.c:1546
+    local top = y - TEXT_Y
+    for tile = 0, 6 do BattleChrome.drawElementTile(43, x + tile * 8, top, true) end
+    local colors = rs_text_colors()
+    draw_rs_row(name, x, top + 8, 56, colors, true)
+    if gender then
+      local offset = FrlgFont.measure(name, RS_MEASURE_OPTS)
+      local symbol = gender == "M" and "♂" or "♀"
+      if offset < 56 then draw_rs_row(symbol, x + offset, top + 8, 56 - offset, rs_text_colors(gender)) end
+    end
+    return
+  end
   FrlgFont.draw(name, x, y, small_opts(HB_TEXT))
   if not gender then return end
   local nw = FrlgFont.measure(name, { small = true })
@@ -189,6 +297,16 @@ end
 -- pokefirered/src/battle_interface.c:759
 local function draw_level(lv, boxX, y, winX)
   local digits = tostring(math.max(0, math.min(999, math.floor(tonumber(lv) or 1))))
+  if rs_layout() then
+    -- pokeruby/src/battle_interface.c:783
+    local text = digits
+    if tonumber(lv) ~= 100 then
+      text = string.char(0xFC, 0x11, 1, 0xFC, 0x14, 4) .. ":"
+        .. string.char(0xFC, 0x14, 0) .. digits
+    end
+    draw_rs_row(text, boxX + winX + 8, y - TEXT_Y + 8, 16, rs_text_colors(), true)
+    return
+  end
   local lvW = FrlgFont.advance(FrlgFont.CHAR_LV_2, { small = true })
   local x = boxX + winX + 5 * (3 - #digits)
   FrlgFont.drawGlyph(FrlgFont.CHAR_LV_2, x, y, small_opts(HB_TEXT))
@@ -196,6 +314,7 @@ local function draw_level(lv, boxX, y, winX)
 end
 
 local function erase_hp_window(boxX, boxY)
+  if rs_layout() then return end
   love.graphics.setColor(CREAM)
   love.graphics.rectangle("fill", boxX + HP_WIN_X, boxY + HP_TEXT_Y, HP_WIN_W, HP_WIN_H)
   love.graphics.setColor(1, 1, 1, 1)
@@ -226,8 +345,8 @@ end
 local function safari_balls_text(balls)
   if _ballsCount ~= balls or not _ballsText then
     _ballsCount = balls
-    -- pokefirered/src/battle_interface.c:1762
-    _ballsText = RomText.plain("gText_HighlightRed_Left") .. tostring(balls)
+    local key = require("src.core.game3.battle.profile").get(nil).strings.safariBallsLeft
+    _ballsText = RomText.plain(key) .. tostring(balls)
     _ballsW = FrlgFont.measure(_ballsText, { small = true })
   end
   return _ballsText, _ballsW
@@ -235,6 +354,14 @@ end
 
 -- pokefirered/src/battle_interface.c:795
 local function draw_hp_nums(cur, maxHp, boxX, boxY)
+  if rs_layout() then
+    -- pokeruby/src/battle_interface.c:835
+    -- text.c:2382
+    local colors = rs_text_colors()
+    draw_rs_row(rs_aligned(cur, 19) .. "/", boxX + 56, boxY + 24, 24, colors, true)
+    draw_rs_row(rs_aligned(maxHp, 15), boxX + 80, boxY + 24, 16, colors, true)
+    return
+  end
   FrlgFont.draw(string.format("%3d/", cur or 0), boxX + HP_CUR_X, boxY + HP_TEXT_Y, small_opts(HB_TEXT))
   FrlgFont.draw(string.format("%3d", maxHp or 0), boxX + HP_MAX_X, boxY + HP_TEXT_Y, small_opts(HB_TEXT))
 end
@@ -315,8 +442,29 @@ local BAR_FG = { c5(7), c5(7), c5(7), 1 }
 local BAR_SHADOW = { c5(26), c5(25), c5(23), 1 }
 local BOTTOM_RIGHT_CORNER_HP_AS_TEXT = 116
 
+local rsBarPalette, rsBarColors
+local function rs_bar_text_colors()
+  local pal = BattleChrome.manifest().healthbarPal
+  if rsBarPalette ~= pal then
+    local function color(i)
+      local value = assert(pal[i + 1], "RS healthbar palette missing")
+      return { c5(value % 32), c5(math.floor(value / 32) % 32), c5(math.floor(value / 1024) % 32), 1 }
+    end
+    rsBarColors = { fg = color(1), shadow = color(3), bg = { 0, 0, 0, 0 } }
+    rsBarPalette = pal
+  end
+  return rsBarColors
+end
+
 -- pokefirered/src/battle_interface.c:864
 local function draw_hp_text_doubles(bx, by, cur, maxHp)
+  if rs_layout() then
+    -- pokeruby/src/battle_interface.c:892
+    local colors = rs_bar_text_colors()
+    draw_rs_row(rs_aligned(cur, 43) .. "/", bx, by, 48, colors)
+    draw_rs_row(rs_aligned(maxHp, 15), bx + 48, by, 16, colors)
+    return
+  end
   local opts = { small = true, colors = { fg = BAR_FG, shadow = BAR_SHADOW } }
   local left = string.format("%3d/", math.max(0, math.min(999, math.floor(cur or 0))))
   local right = string.format("%3d", math.max(0, math.min(999, math.floor(maxHp or 0))))
@@ -361,9 +509,8 @@ local function draw_doubles(id, battler, st, opts)
   erase_placeholder_ink(tlX, tlY, isPlayer and PLAYER_PLACEHOLDER_INK or ENEMY_PLACEHOLDER_INK)
 
   local SummaryChrome = require("src.ui.game3.summary_chrome")
-  local SummaryData = require("src.core.game3.summary_data")
-  local stObj = battler.status or (battler.mon and (battler.mon.status or battler.mon.status1))
-  local ailment = SummaryData.statusAilment({ status = stObj, hp = battler.mon and battler.mon.hp })
+  local p = Anim.present and Anim.present(id)
+  local ailment = shown_ailment(p, battler)
   local statused = ailment >= 1 and ailment <= 6
   local hpText = isPlayer and Healthbox.hpTextShown(st, id)
 
@@ -376,12 +523,14 @@ local function draw_doubles(id, battler, st, opts)
     BattleChrome.drawElementTile(BOTTOM_RIGHT_CORNER_HP_AS_TEXT, tlX + 96, tlY + 16, true)
   else
     BattleChrome.drawHpBar(bx, by, hp, maxHp, statused)
+    if isPlayer and rs_layout() then
+      -- pokeruby/src/battle_interface.c:1043
+      BattleChrome.drawElementTile(117, tlX + 96, tlY + 16, true)
+    end
   end
 
   local name = State.displayName(battler)
-  local lv = battler.mon and battler.mon.level or 1
-  local p = Anim.present and Anim.present(id)
-  if p and p.displayLevel then lv = p.displayLevel end
+  local lv = (p and p.displayLevel) or (battler.mon and battler.mon.level) or 1
   local ty = tlY + TEXT_Y
   local gender = healthbox_gender(battler.mon)
   -- pokefirered/src/battle_interface.c:1531
@@ -389,7 +538,12 @@ local function draw_doubles(id, battler, st, opts)
   draw_level(lv, tlX, ty, isPlayer and PLAYER_LVL_X or ENEMY_LVL_X)
   if statused then
     -- pokefirered/src/battle_interface.c:1608
-    SummaryChrome.drawStatusIcon(tlX + (isPlayer and 10 or 2), tlY + 16, ailment)
+    if rs_layout() then
+      -- pokeruby/src/battle_interface.c:1662
+      BattleChrome.drawRsStatusIcon(id, ailment, tlX + (isPlayer and 16 or 8), tlY + 16)
+    else
+      SummaryChrome.drawStatusIcon(tlX + (isPlayer and 10 or 2), tlY + 16, ailment)
+    end
   end
 end
 
@@ -410,13 +564,18 @@ function Healthbox.draw(side, battler, opts)
   local oy = (opts and opts.oy) or 0
 
   local isPlayer = side == "player"
+  local bstSafari = live_st()
   local c0 = isPlayer and Healthbox.PLAYER_CENTER or Healthbox.ENEMY_CENTER
   local c = { x = c0.x, y = c0.y + oy }
   local tlX, tlY
   if isPlayer then
     tlX, tlY = player_top_left(c.x + ox, c.y)
     local lvl = love and love.graphics and set_level_up_shader(hb and hb.levelUpBlend)
-    BattleChrome.drawPlayerBox(tlX, tlY)
+    if rs_layout() and bstSafari and bstSafari.safari then
+      assert(BattleChrome.drawSafariBox(tlX, tlY), "native RS Safari healthbox missing")
+    else
+      BattleChrome.drawPlayerBox(tlX, tlY)
+    end
     if lvl then love.graphics.setShader() end
     erase_placeholder_ink(tlX, tlY, PLAYER_PLACEHOLDER_INK)
     erase_hp_window(tlX, tlY)
@@ -426,8 +585,20 @@ function Healthbox.draw(side, battler, opts)
     erase_placeholder_ink(tlX, tlY, ENEMY_PLACEHOLDER_INK)
   end
 
-  local bstSafari = live_st()
   if isPlayer and bstSafari and bstSafari.safari then
+    if rs_layout() then
+      -- pokeruby/src/battle_interface.c:1785
+      local colors = rs_text_colors()
+      for tile = 0, 6 do BattleChrome.drawElementTile(43, tlX + 24 + tile * 8, tlY, true) end
+      draw_rs_row(RomText.plain("BattleText_SafariBalls"), tlX + 24, tlY + 8, 56, colors, true)
+      local balls = math.max(0, math.floor(tonumber(bstSafari.safariState and bstSafari.safariState.balls) or 0))
+      local digits = tostring(balls)
+      local width = FrlgFont.measure(digits, { font = "native_4", textMode = 0 })
+      local text = RomText.plain("BattleText_SafariBallsLeft")
+        .. string.char(0xFC, 0x11, math.max(0, 10 - width)) .. digits
+      draw_rs_row(text, tlX + 48, tlY + 24, 40, colors, true)
+      return
+    end
     -- pokefirered/src/battle_interface.c:1743
     local balls = (bstSafari.safariState and tonumber(bstSafari.safariState.balls)) or 0
     local sbx, sby = hp_bar_top_left(hp_bar_center(side, c.x + ox, c.y))
@@ -441,13 +612,19 @@ function Healthbox.draw(side, battler, opts)
     return
   end
 
+  local p = nil
+  do
+    local ok, AnimP = pcall(require, "src.core.game3.battle.anim")
+    if ok and AnimP and AnimP.present then
+      p = AnimP.present(side)
+    end
+  end
+
   local barCx, barCy = hp_bar_center(side, c.x + ox, c.y)
   local bx, by = hp_bar_top_left(barCx, barCy)
   local statusBorder = false
   if not isPlayer then
-    local SummaryData = require("src.core.game3.summary_data")
-    local st1 = battler.status or (battler.mon and (battler.mon.status or battler.mon.status1))
-    local a = SummaryData.statusAilment({ status = st1, hp = battler.mon and battler.mon.hp })
+    local a = shown_ailment(p, battler)
     -- pokefirered/src/battle_interface.c:1668
     statusBorder = a >= 1 and a <= 6
   end
@@ -455,14 +632,7 @@ function Healthbox.draw(side, battler, opts)
   BattleChrome.drawHpBar(bx, by, hpNow, hpMax, statusBorder)
 
   local name = State.displayName(battler)
-  local lv = battler.mon and battler.mon.level or 1
-  do
-    local ok, AnimP = pcall(require, "src.core.game3.battle.anim")
-    if ok and AnimP and AnimP.present then
-      local p = AnimP.present(side)
-      if p and p.displayLevel then lv = p.displayLevel end
-    end
-  end
+  local lv = (p and p.displayLevel) or (battler.mon and battler.mon.level) or 1
 
   local ty = tlY + TEXT_Y
   local lvlX = isPlayer and PLAYER_LVL_X or ENEMY_LVL_X
@@ -483,16 +653,19 @@ function Healthbox.draw(side, battler, opts)
   end
 
   local SummaryChrome = require("src.ui.game3.summary_chrome")
-  local SummaryData = require("src.core.game3.summary_data")
-  local stObj = battler.status or (battler.mon and (battler.mon.status or battler.mon.status1))
-  local ailment = SummaryData.statusAilment({ status = stObj, hp = battler.mon and battler.mon.hp })
+  local ailment = shown_ailment(p, battler)
 
   if isPlayer then
     draw_name_gender(name, gender, tlX + 16, ty)
     draw_level(lv, tlX, ty, lvlX)
     if ailment >= 1 and ailment <= 6 then
       -- pokefirered/src/battle_interface.c:1608
-      SummaryChrome.drawStatusIcon(tlX + 10, tlY + 24, ailment)
+      if rs_layout() then
+        -- pokeruby/src/battle_interface.c:1660
+        BattleChrome.drawRsStatusIcon(0, ailment, tlX + 16, tlY + 24)
+      else
+        SummaryChrome.drawStatusIcon(tlX + 10, tlY + 24, ailment)
+      end
     end
     local mon = battler.mon
     if mon then
@@ -516,7 +689,12 @@ function Healthbox.draw(side, battler, opts)
     draw_level(lv, tlX, ty, lvlX)
     if ailment >= 1 and ailment <= 6 then
       -- pokefirered/src/battle_interface.c:1614
-      SummaryChrome.drawStatusIcon(tlX + 2, tlY + 16, ailment)
+      if rs_layout() then
+        -- pokeruby/src/battle_interface.c:1667
+        BattleChrome.drawRsStatusIcon(1, ailment, tlX + 8, tlY + 16)
+      else
+        SummaryChrome.drawStatusIcon(tlX + 2, tlY + 16, ailment)
+      end
     else
       -- pokefirered/src/battle_interface.c:1658
       local species = battler.species or (battler.mon and (battler.mon.species or battler.mon.speciesId))
@@ -556,7 +734,7 @@ function Healthbox.shouldShowCaughtMarker(st, battler)
     return false
   end
   local name = State.displayName(battler)
-  if name == RomText.plain("gText_Ghost") then
+  if RomText.has("gText_Ghost") and name == RomText.plain("gText_Ghost") then
     return false
   end
 

@@ -55,6 +55,36 @@ local SaveData = require("src.core.SaveData")
 -- had when they required the module by hand.
 local Screens = require("src.ui.Screens")
 
+-- Already loaded by src/world/gen2/World.lua above; bound here so the
+-- per-frame update/draw paths do not call require() every frame.
+local GbcPalette = require("src.render.GbcPalette")
+local Pipelines = require("src.render.Pipelines")
+local Tilt = require("src.render.Tilt")
+
+-- Resolved on first use rather than at load, keeping this file's load order.
+local lazyModules = {}
+local function lazy(name)
+  local mod = lazyModules[name]
+  if mod == nil then
+    mod = require(name)
+    lazyModules[name] = mod
+  end
+  return mod
+end
+
+-- DiscordPresence is optional: a require that fails once is not retried
+-- every frame, and no closure is minted per frame to guard the call.
+local discordPresence = nil
+local function discordUpdate(dt)
+  if discordPresence == nil then
+    local ok, mod = pcall(require, "src.core.DiscordPresence")
+    discordPresence = (ok and type(mod) == "table") and mod or false
+  end
+  if discordPresence and discordPresence.update then
+    pcall(discordPresence.update, dt)
+  end
+end
+
 local Game2 = {}
 Game2.__index = Game2
 
@@ -312,7 +342,9 @@ function Game2:continueGame(save)
   self:applyOptions()
   self.stack:clear()
   self.world = nil
+  require("src.world.gen2.UnionSafety").settle(save, self.data)
   self:startWorld()
+  require("src.online.union.TradeTxn").resumePending(self)
   -- After the adopt and after the world is standing, which is where Gen 1
   -- emits it (src/core/Game.lua:1127, once the stack has been rebuilt).
   if modsDiff then
@@ -934,6 +966,18 @@ function Game2:snapshotSave()
     }
     self.save.events = world.events and world.events:serialize()
       or self.save.events
+    if type(world.objectMasks) == "table" then
+      local previous = self.save.mapObjectMasks
+      local state = { map = world.map.id, masks = {},
+        raw = type(previous) == "table" and previous.map == world.map.id and previous.raw or nil }
+      for i, obj in ipairs((world.map.def and world.map.def.objects) or {}) do
+        local key = world:objectMaskKey(obj, i)
+        state.masks[i] = world.objectMasks[key]
+      end
+      self.save.mapObjectMasks = state
+    else
+      self.save.mapObjectMasks = nil
+    end
     self.save.mapScenes = world.mapScenes or self.save.mapScenes
     -- wPlayerState, out of the same sPlayerData block the flags and the scene
     -- ids come from: save on the BICYCLE and the reload has to come back on
@@ -960,6 +1004,9 @@ function Game2:snapshotSave()
     -- WRAM on the cart, so a save made on POKECENTER_2F must still know which
     -- centre's stairs lead back down -- World:loadPlayerData reads it back.
     self.save.backupWarp = world.backupWarp or self.save.backupWarp
+    -- engine/events/field_moves.asm:15
+    self.save.flashUsed = world.flashUsed and true or nil
+    require("src.world.gen2.UnionSafety").seal(self.save, self.data)
   end
   self.save.options = self.options
   return self.save
@@ -1024,7 +1071,7 @@ end
 function Game2:load(opts)
   opts = opts or {}
   local arena = opts.arena
-  Input:init()
+  Input:init(false)
   -- Before applyOptions, which is what pushes options.touchControls into it:
   -- init() decides whether the platform wants the overlay at all and loads the
   -- art, applyOptions then lays it out (src/core/Game.lua:59-60 does the pair
@@ -1095,6 +1142,7 @@ function Game2:load(opts)
   self.data.gen2Scripts = loadGenerated("data/generated/scripts.lua")
   self.data.gen2StdScripts = loadGenerated("data/generated/std_scripts.lua")
   self.data.gen2Text = loadGenerated("data/generated/text.lua")
+  require("src.world.gen2.UnionCenter2F").apply(self.data)
   -- The engine's own strings, keyed by the disassembly's label.  gen2Text
   -- above is the script text and is keyed by bank:address for the overworld
   -- VM, so the two are different tables and both are loaded.  This one is
@@ -1192,6 +1240,7 @@ function Game2:load(opts)
     pcall(Font.load, self.data)
   end
   Strings.load(self.data)
+  self:prewarmSessionSfx()
 
   -- The boot skeleton (Game2.new built it, before any bus existed) announced
   -- here rather than at its construction, which is the same spot in the boot
@@ -1254,6 +1303,12 @@ function Game2:load(opts)
       self:softReset()
       return
     end
+    -- LoadPoisonBGPals' four-frame hold and the void-fill dissolve are spent
+    -- here, on the logic clock and whatever is on top (the faint text can
+    -- open the same frame), rather than once per render frame in World:draw.
+    local world = self.world
+    if world and world.tickFrameClocks then world:tickFrameClocks() end
+    if world then require("src.world.gen2.UnionRoomPresence").tick(self) end
     -- Not the audio tick: _UpdateSound runs once per frame off VBlank
     -- (audio/engine.asm:84, home/vblank.asm:141-143), never off the logic clock.
     local top = self.stack:top()
@@ -1294,6 +1349,25 @@ function Game2:load(opts)
   end
 end
 
+Game2.SESSION_SFX = {
+  -- engine/overworld/scripting.asm:467
+  "Sfx_Item", "Sfx_KeyItem", "Sfx_GetTm",
+  "Sfx_ReadText2", "Sfx_Menu", "Sfx_Bump", "Sfx_EnterDoor",
+  "Sfx_ExitBuilding", "Sfx_JumpOverLedge", "Sfx_WarpTo", "Sfx_WarpFrom",
+  "Sfx_Save", "Sfx_Transaction", "Sfx_Wrong", "Sfx_SwitchPokemon",
+  "Sfx_GetBadge", "Sfx_Strength",
+}
+
+function Game2:prewarmSessionSfx()
+  local Sound = require("src.core.Sound")
+  local ChipAudio = require("src.core.ChipAudio")
+  ChipAudio.prewarmPinned(function()
+    for _, name in ipairs(Game2.SESSION_SFX) do
+      pcall(Sound.prewarmSfx, self.data, name)
+    end
+  end)
+end
+
 function Game2:inFillBoot()
   -- Entire pre-world cinema (copyright / title / Oak / name / nested NamingScreen)
   -- draws in GB letterbox space.
@@ -1328,6 +1402,9 @@ function Game2:logicSpeed()
 end
 
 function Game2:update(dt)
+  require("src.core.DeferredWrite").tick()
+  local ChipAudio = package.loaded["src.core.ChipAudio"]
+  if ChipAudio then ChipAudio.pumpEffects() end
   -- _UpdateSound is a VBlank job, so it runs at 60Hz off real time whatever the
   -- logic multiplier is (audio/engine.asm:84, home/vblank.asm:141-143).
   local step = FixedStep.STEP
@@ -1340,12 +1417,12 @@ function Game2:update(dt)
   end
   -- TILT eases toward its new angle in real time, not on the logic clock, so
   -- fast-forward does not fling the camera over.
-  require("src.render.Tilt").update(dt)
+  Tilt.update(dt)
   -- Mod render pipelines tween on the same real-frame clock, for the same
   -- reason and at the same place Gen 1 ticks them (src/core/Game.lua:265):
   -- they are presentational, so fast-forward must not speed them up.
-  require("src.render.Pipelines").update(dt)
-  pcall(function() require("src.core.DiscordPresence").update(dt) end)
+  Pipelines.update(dt)
+  discordUpdate(dt)
   -- GAME SPEED scales the logic clock only, exactly as the Gen 1 path does:
   -- audio runs off its own real-time accumulator, so music and sfx keep their
   -- tempo at every multiplier (#1990/#1991/#1997).  speedOverride is the
@@ -1371,8 +1448,9 @@ end
 -- (Renderer:endFrame's Sp).  Following the zoom used to shrink the LCD grid to
 -- one screen pixel a cell out at survey range.
 function Game2:pixelScale(w, h)
+  local d = Playfield.ratio()
   local _, _, pw, ph = Playfield.rect(w, h)
-  return math.max(1, math.floor(math.min(pw / 160, ph / 144)))
+  return math.max(1, math.floor(math.min(pw * d / 160, ph * d / 144) + 1e-9))
 end
 
 -- A window-sized canvas the whole frame is composed into, so the post passes
@@ -1395,30 +1473,31 @@ function Game2:presentCanvas(index, w, h)
   return canvas
 end
 
+function Game2:pixelFrame(w, h)
+  local d = Playfield.ratio()
+  local x, y, pw, ph = Playfield.rect(w, h)
+  return d, math.floor(x * d + 0.5), math.floor(y * d + 0.5),
+    math.floor(pw * d + 0.5), math.floor(ph * d + 0.5)
+end
+
 -- The letterbox this frame is being drawn in, in the terms Gen 1's
 -- Renderer:endFrame reports it: the integer fit scale, the centred origin that
 -- goes with it, the window in LOVE units and in framebuffer pixels, and the DPI
--- scale between the two.
---
--- One difference from Gen 1 has to be named, because two payload fields carry
--- it.  Gen 1 fits in FRAMEBUFFER pixels and divides back into units, so its
--- `scale` is framebuffer-pixels-per-GB-pixel; Gold fits in LOVE units
--- throughout (Chrome.fitScale takes love.graphics.getDimensions), so `scale`
--- here is units-per-GB-pixel.  They are the same number on every 1x display,
--- which is where Gen 1 mods are written and verified, and on a HiDPI display
--- this is the one that actually describes Gold's picture -- `gameX + x * scale`
--- lands on GB pixel x either way.  The rect fields (gameX/gameY/gameWidth/
--- gameHeight, ox/oy/vpw/vph) are LOVE units in both generations.
+-- scale between the two.  `scale` and the rect fields are LOVE units.
 function Game2:frameFit(w, h)
-  local scale = Chrome.fitScale(w, h)
-  local ox, oy = Chrome.fitOrigin(w, h, scale)
-  local dpi = 1
-  if love.window and love.window.getDPIScale then
-    dpi = tonumber(love.window.getDPIScale()) or 1
+  local d, fx, fy, fw, fh = self:pixelFrame(w, h)
+  local bx, by, bw, bh = Game2.faithfulBox(fw, fh, d)
+  if bx then fx, fy, fw, fh = fx + bx, fy + by, bw, bh end
+  local k = math.max(1, math.floor(math.min(fw / 160, fh / 144)))
+  local lift = 0
+  local ScreenPosition = require("src.core.ScreenPosition")
+  if not ScreenPosition.skinActive(w, h) then
+    lift = ScreenPosition.lift(fh, 144 * k, ScreenPosition.safeTop() * d)
   end
-  local pw, ph = w * dpi, h * dpi
-  pw, ph = GameViewport.pixelDimensions()
-  return scale, ox, oy, dpi, pw, ph
+  local ox = fx + math.floor((fw - 160 * k) / 2)
+  local oy = fy + math.floor((fh - 144 * k) / 2) - lift
+  local pw, ph = GameViewport.pixelDimensions()
+  return k / d, ox / d, oy / d, d, pw, ph
 end
 
 -- render.hud's payload (src/core/Game.lua:521), which is what Renderer:endFrame
@@ -1464,11 +1543,16 @@ end
 -- Payload is Gen 1's table field for field (Renderer.lua:840).
 function Game2:letterbox(w, h, worldActive)
   if not ModRuntime.wantsHook("render.letterbox") then return end
-  local scale, ox, oy, dpi, pw, ph = self:frameFit(w, h)
+  local dpi = self.pixelRatio or 1
+  local scale = Chrome.fitScale(w, h)
+  local ox, oy = Chrome.fitOrigin(w, h, scale)
+  scale, ox, oy = scale / dpi, ox / dpi, oy / dpi
+  local pw, ph = GameViewport.pixelDimensions()
   local G = love.graphics
   G.push("all")
+  G.scale(dpi, dpi)
   ModRuntime.call("render.letterbox", noop, {
-    ww = w, wh = h, pw = pw, ph = ph,
+    ww = w / dpi, wh = h / dpi, pw = pw, ph = ph,
     ox = ox, oy = oy, vpw = 160 * scale, vph = 144 * scale,
     scale = scale, dpiX = dpi, dpiY = dpi,
     worldActive = worldActive and true or false,
@@ -1488,7 +1572,6 @@ end
 -- present pass has always been.
 function Game2:blitZones(canvas, zones, w, h)
   local G = love.graphics
-  local GbcPalette = require("src.render.GbcPalette")
   local px, py, pw, ph = Playfield.rect(w, h)
   local sx, sy = pw / 160, ph / 144
   G.setColor(1, 1, 1, 1)
@@ -1563,8 +1646,8 @@ end
 function Game2:fxWorldOrigin(w, h, scale)
   local cam = self.world and self.world.camera
   if not cam then return nil end
-  local fx, fy, fw, fh = Playfield.rect(w, h)
-  local bx, by = Game2.faithfulBox(fw, fh)
+  local d, fx, fy, fw, fh = self:pixelFrame(w, h)
+  local bx, by = Game2.faithfulBox(fw, fh, d)
   if bx then fx, fy = fx + bx, fy + by end
   return fx + math.floor(-cam.x * scale), fy + math.floor(-cam.y * scale)
 end
@@ -1576,7 +1659,8 @@ function Game2:fxSplitsUi(w, h)
   if world:zoomScale() ~= fs then return true end
   local wx, wy = self:fxWorldOrigin(w, h, fs)
   if not wx then return false end
-  local ox, oy = Chrome.fitOrigin(w, h, fs)
+  local _, ox, oy, d = self:frameFit(w, h)
+  ox, oy = math.floor(ox * d + 0.5), math.floor(oy * d + 0.5)
   return (ox - wx) % fs ~= 0 or (oy - wy) % fs ~= 0
 end
 
@@ -1599,7 +1683,7 @@ end
 -- the grid itself.
 function Game2:drawViewportFrame()
   local G = love.graphics
-  local serial = require("src.core.FaithfulRes").modeSerial
+  local serial = lazy("src.core.FaithfulRes").modeSerial
   if serial ~= (self.modeSerial or 0) then
     if self.world and self.world.map then
       self.world:dropBakes()
@@ -1607,9 +1691,7 @@ function Game2:drawViewportFrame()
     self.modeSerial = serial
   end
   local w, h = GameViewport.dimensions()
-  local ShaderFX = require("src.render.ShaderFX")
-  local GbcPalette = require("src.render.GbcPalette")
-  local Pipelines = require("src.render.Pipelines")
+  local ShaderFX = lazy("src.render.ShaderFX")
   -- Same dispatch src/render/Renderer.lua:1185 already uses for Gen 1
   -- (ShaderFX replaced GBCFX's slot; GBCFX.lua itself is removed).
   local shaderfx = ShaderFX.active()
@@ -1626,10 +1708,24 @@ function Game2:drawViewportFrame()
   -- lighting mod written against Gen 1 tints Gold through the same seam.
   local zones = nil
   local classic = GbcPalette.available() and GbcPalette.presentColors() or nil
+  local zoneHook = ModRuntime.wantsHook("render.zones")
   if classic then
-    zones = { { x = 0, y = 0, w = 160, h = 144, colors = classic } }
+    if zoneHook or ModRuntime.wantsHook("render.compose") then
+      -- A mod may keep or edit the list it is handed: give it a fresh one.
+      zones = { { x = 0, y = 0, w = 160, h = 144, colors = classic } }
+    else
+      -- Nobody else sees it, so the one list is reused frame to frame.
+      local zone = self._classicZone
+      if not zone then
+        zone = { x = 0, y = 0, w = 160, h = 144 }
+        self._classicZone = zone
+        self._classicZones = { zone }
+      end
+      zone.colors = classic
+      zones = self._classicZones
+    end
   end
-  if ModRuntime.wantsHook("render.zones") then
+  if zoneHook then
     zones = ModRuntime.call("render.zones", sameZones, self, zones)
   end
   local zoned = type(zones) == "table" and zones[1] ~= nil
@@ -1729,12 +1825,12 @@ function Game2:drawViewportFrame()
       if shaderfx then
         -- Whole window, matching Renderer.lua: the world at its zoom scale
         -- when the UI was split off, otherwise everything at FIT.
-        local s = scale * dpi
-        local ws = uiLayer and self.world:zoomScale() * dpi or s
+        local s = math.floor(scale * dpi + 0.5)
+        local ws = uiLayer and self.world:zoomScale() or s
         local wox, woy = ox * dpi, oy * dpi
         if self.frameWorldActive then
-          local wx, wy = self:fxWorldOrigin(w, h, ws / dpi)
-          if wx then wox, woy = wx * dpi, wy * dpi end
+          local wx, wy = self:fxWorldOrigin(w, h, ws)
+          if wx then wox, woy = wx, wy end
         end
         ShaderFX.render(source, { x = 0, y = 0, w = pw, h = ph, scale = ws },
           { w = pw / ws, h = ph / ws }, dpi, dpi, { originX = wox, originY = woy })
@@ -1782,32 +1878,56 @@ function Game2:textboxPaper()
   return nil
 end
 
-function Game2.faithfulBox(w, h)
+function Game2.faithfulBox(w, h, d)
   if not require("src.core.FaithfulRes").scaleCap() then return nil end
   local s = math.max(1, math.floor(math.min(w / 160, h / 144)))
   local bw, bh = 160 * s, 144 * s
   local lift = 0
   local ScreenPosition = require("src.core.ScreenPosition")
   if not ScreenPosition.skinActive(w, h) then
-    lift = ScreenPosition.lift(h, bh, ScreenPosition.safeTop())
+    lift = ScreenPosition.lift(h, bh, ScreenPosition.safeTop() * (d or 1))
   end
   return math.floor((w - bw) / 2), math.floor((h - bh) / 2) - lift, bw, bh
 end
 
+local function maskOutside(w, h, bx, by, bw, bh)
+  local G = love.graphics
+  G.push("all")
+  G.setShader()
+  G.setBlendMode("alpha")
+  G.setColor(0, 0, 0, 1)
+  if bx > 0 then G.rectangle("fill", 0, 0, bx, h) end
+  if bx + bw < w then G.rectangle("fill", bx + bw, 0, w - bx - bw, h) end
+  if by > 0 then G.rectangle("fill", bx, 0, bw, by) end
+  if by + bh < h then G.rectangle("fill", bx, by + bh, bw, h - by - bh) end
+  G.pop()
+end
+
 function Game2:drawContained(w, h)
-  local pw, ph, px, py = Playfield.push(w, h)
-  local bx, by, bw, bh = Game2.faithfulBox(pw, ph)
+  local _, _, px, py = Playfield.push(w, h)
+  local G = love.graphics
+  local d, _, _, pw, ph = self:pixelFrame(w, h)
+  G.scale(1 / d, 1 / d)
+  px, py = px * d, py * d
+  Playfield.enter(px, py, pw, ph)
+  local fw, fh = pw, ph
+  local bx, by, bw, bh = Game2.faithfulBox(pw, ph, d)
   if bx then
-    local G = love.graphics
     G.setColor(0, 0, 0, 1)
     G.rectangle("fill", 0, 0, pw, ph)
     G.setColor(1, 1, 1, 1)
-    G.setScissor(px + bx, py + by, bw, bh)
+    G.push()
     G.translate(bx, by)
     Playfield.enter(px + bx, py + by, bw, bh)
     pw, ph = bw, bh
   end
+  self.pixelRatio = d
   local ok, err = pcall(self.drawScene, self, pw, ph)
+  self.pixelRatio = nil
+  if bx then
+    G.pop()
+    if ok then maskOutside(fw, fh, bx, by, bw, bh) end
+  end
   Playfield.pop()
   if not ok then error(err, 0) end
 end
@@ -2075,7 +2195,7 @@ end
 -- path binds them in (src/core/Game.lua keypressed), driving the same shared
 -- modules so a player's muscle memory carries between the two games:
 --
---   F1/F2  write / reload the save        1  GAME SPEED
+--   F1/F2  write / reload the save        1  GAME SPEED (0 steps down)
 --   -  =   zoom one step out / in         2  COLOR
 --   4      cycle ZOOM                     3  TILT (mnemonic: 3D)
 --
@@ -2103,6 +2223,12 @@ function Game2:hotkey(key)
     if self:speedLocked() then return true end
     local GameSpeed = require("src.core.GameSpeed")
     options.speed = GameSpeed.cycle(options.speed, 1)
+    persist()
+    return true
+  elseif hk == "0" then
+    if self:speedLocked() then return true end
+    local GameSpeed = require("src.core.GameSpeed")
+    options.speed = GameSpeed.cycle(options.speed, -1)
     persist()
     return true
   elseif hk == "2" then
@@ -2140,7 +2266,7 @@ function Game2:storeZoom()
   self.options = options
   options.zoom = require("src.render.Zoom").offset
   if self.save then self.save.options = options end
-  self:persistOptions()
+  require("src.core.DeferredWrite").schedule("options", function() self:persistOptions() end)
 end
 
 function Game2:zoomStep(delta)
@@ -2353,7 +2479,7 @@ end
 function Game2:focus(f)
   Input:reset()
   TouchControls:reset()
-  if f then Input:reconcile() end
+  if f then Input:reconcile() else require("src.core.DeferredWrite").flush("options") end
   self:cancelPointers()
 end
 
@@ -2361,6 +2487,7 @@ function Game2:visible(v)
   if v then
     self:onResume()
   else
+    require("src.core.DeferredWrite").flush("options")
     Input:reset()
     TouchControls:reset()
     self:cancelPointers()
@@ -2404,6 +2531,7 @@ function Game2:applyOptions()
     hotbar = options.hotbar,
   })
   require("src.core.VideoMode").applyOptions(options)
+  require("src.core.Orientation").applyOptions(options)
   require("src.core.FaithfulRes").applyOptions(options)
   require("src.core.ScreenPosition").applyOptions(options)
   require("src.core.VSync").applyOptions(options)
@@ -2528,6 +2656,18 @@ function Game2:gamepadaxis(joystick, axis, value)
       end
       return
     end
+    local stickEvents = Input.stickAxisEvents and Input:stickAxisEvents(axis, value)
+    if stickEvents then
+      for i = 1, #stickEvents do
+        local ev = stickEvents[i]
+        if ev.phase == "pressed" then
+          padPressedBody(self, joystick, ev.button)
+        elseif ev.phase == "released" then
+          padReleasedBody(self, joystick, ev.button)
+        end
+      end
+      return
+    end
     Input:gamepadaxis(joystick, axis, value)
   end
   if not ModRuntime.wantsHook("input.gamepad") then return vanilla() end
@@ -2541,6 +2681,7 @@ local function isRawStick(joystick)
 end
 
 function Game2:joystickpressed(joystick, button)
+  if GamepadMap.ignoreRawForJoystick(joystick) then return end
   if GamepadMap.isAccelerometer(joystick) then return end
   TouchControls:noteGamepad()
   local top = self.stack and self.stack:top()
@@ -2608,6 +2749,7 @@ end
 -- Same rule as Gen1: only release known GPU owners -- never fan out
 -- arbitrary field:release() (shared modules use :release as a handle API).
 function Game2:reset()
+  require("src.core.DeferredWrite").flush("options")
   if self.stack and self.stack.clear then
     pcall(function() self.stack:clear() end)
   end
