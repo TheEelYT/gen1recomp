@@ -42,11 +42,14 @@ local resultChannel = love.thread and love.thread.getChannel and love.thread.get
 local PROGRESS_HZ = 20
 
 local ok, err = pcall(function()
+  -- A LOVE thread has its own Lua state; it does not inherit the launcher's
+  -- selected game. Set this before loading any version-sensitive readers.
+  local GameVersion = require("src.core.GameVersion")
+  GameVersion.set(version)
   local CacheFs = require("src.import.CacheFs")
   CacheFs.prefix = prefix
 
   local manifest = require("src.import.RomManifest").decode(version)
-  local GameVersion = require("src.core.GameVersion")
   local gen = GameVersion.generation(version)
   local RomExtractor = gen == 3
     and require("src.import.RomExtractorGen3")

@@ -107,6 +107,9 @@ local POKEMON_SUBTASKS = {
 function RomExtractorGen3.new(romData, manifest, progressCb, romSha1)
   local sha1 = romSha1 or (manifest and manifest.romSha1) or hexSha1(romData)
   local version = importVersion(sha1)
+  -- Family/Profile readers use GameVersion while ROM readers use Versions.
+  -- Keep both aligned for threaded imports, coroutine fallback and tools.
+  GameVersion.set(version)
   require("src.import.gba.versions").select(sha1)
   return setmetatable({
     version = version,
