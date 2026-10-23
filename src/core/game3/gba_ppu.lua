@@ -148,6 +148,10 @@ function Ppu.clearCache()
   cacheImages = {}
 end
 
+-- vitaGL aliases the GLSL swizzle token `t` to `y` with a macro. A texture
+-- parameter named `t` then conflicts with the local y coordinate in these
+-- shaders, and its deferred compiler/linker can crash on the failed program.
+-- Keep the effect texture parameter named `sourceTexture` in all three stages.
 local BG_SHADER = [[
 extern Image idxTex;
 extern vec2 texSize;
@@ -160,7 +164,7 @@ extern vec4 mat;
 extern vec2 ref;
 extern float wrap;
 extern float bpp8;
-vec4 effect(vec4 color, Image t, vec2 tc, vec2 sc) {
+vec4 effect(vec4 color, Image sourceTexture, vec2 tc, vec2 sc) {
   float x = floor(sc.x);
   float y = floor(sc.y);
   vec2 p;
@@ -208,7 +212,7 @@ extern float palBase;
 extern float bpp8;
 extern Image palTex;
 extern float tag;
-vec4 effect(vec4 color, Image t, vec2 tc, vec2 sc) {
+vec4 effect(vec4 color, Image sourceTexture, vec2 tc, vec2 sc) {
   vec2 l = floor(sc) - boxPos;
   vec2 s;
   if (affine > 0.5) {
@@ -268,7 +272,7 @@ void push(inout float n, inout float id1, inout vec3 col1, inout float semi1, in
   }
 }
 
-vec4 effect(vec4 color, Image t, vec2 tc, vec2 sc) {
+vec4 effect(vec4 color, Image sourceTexture, vec2 tc, vec2 sc) {
   vec2 uv = sc / vec2(240.0, 160.0);
   float x = floor(sc.x);
   float y = floor(sc.y);
