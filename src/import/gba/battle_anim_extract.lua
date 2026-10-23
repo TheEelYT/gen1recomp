@@ -530,6 +530,28 @@ end
 
 local static_raw_buf = nil
 local static_raw_cap = 0
+-- A Lua number array uses at least eight bytes per channel. Keep the existing
+-- 1-based indexing on Vita, but store each channel in one byte instead.
+local function new_pixels(size, opaque)
+  local pixels
+  if _G.POKEPORT_VITA and ffi then
+    pixels = ffi.new("uint8_t[?]", size + 1)
+  else
+    pixels = {}
+    for i = 1, size do pixels[i] = 0 end
+  end
+  if opaque then
+    for i = 4, size, 4 do pixels[i] = 255 end
+  end
+  return pixels
+end
+
+local function collect_asset_garbage()
+  -- The preceding asset's decompressed tables and PNG strings are dead here.
+  -- Do not let them accumulate until the end of the whole animation task.
+  if _G.POKEPORT_VITA then collectgarbage("collect") end
+end
+
 local function get_raw_buffer(size)
   if not ffi then return nil end
   if static_raw_cap < size then
@@ -539,7 +561,7 @@ local function get_raw_buffer(size)
   return static_raw_buf
 end
 
---- Encode RGBA pixel array/string to PNG bytes.
+--- Encode RGBA pixel array/string to PNG bytes (byte arrays are 1-based).
 local function encode_png(pixels, w, h)
   local raw_size = h * (1 + w * 4)
   local buf = get_raw_buffer(raw_size)
@@ -549,8 +571,8 @@ local function encode_png(pixels, w, h)
   if buf then
     local dest = 0
     local row_bytes = w * 4
-    if is_str and ffi and ffi.copy then
-      local c_src = ffi.cast("const char*", pixels)
+    if (is_str or type(pixels) == "cdata") and ffi and ffi.copy then
+      local c_src = is_str and ffi.cast("const uint8_t*", pixels) or (pixels + 1)
       for y = 0, h - 1 do
         buf[dest] = 0 -- Filter: None
         dest = dest + 1
@@ -620,6 +642,7 @@ local function extract_tag_sheets(rom, cache, root, usedTags, tag_dims)
   local pal_base = anim.pal_table
 
   for idx = 0, anim.tag_count - 1 do
+    collect_asset_garbage()
     local name = TAG_NAMES[idx]
     if not name then goto continue_tag end
 
@@ -673,10 +696,8 @@ local function extract_tag_sheets(rom, cache, root, usedTags, tag_dims)
     if img_h == 0 then img_h = img_w end
 
     -- Decode all tiles to RGBA
-    local pixels = {}
-    for pi = 1, img_w * img_h * 4 do pixels[pi] = 0 end
-    local ipx = {}
-    for pi = 1, img_w * img_h * 4 do ipx[pi] = (pi % 4 == 0) and 255 or 0 end
+    local pixels = new_pixels(img_w * img_h * 4)
+    local ipx = new_pixels(img_w * img_h * 4, true)
 
     local tiles_wide = math.floor(img_w / 8)
     for ti = 0, tile_count - 1 do
@@ -816,11 +837,8 @@ local function decode_bg(tiles, map, palInts, opaque0)
   local mw = (entries >= 2048) and 64 or 32
   local mh = math.max(1, math.min(32, math.floor(entries / mw)))
   local w, h = mw * 8, mh * 8
-  local rgba, idx = {}, {}
-  for i = 1, w * h * 4 do
-    rgba[i] = 0
-    idx[i] = (i % 4 == 0) and 255 or 0
-  end
+  local rgba = new_pixels(w * h * 4)
+  local idx = new_pixels(w * h * 4, true)
   local cols = {}
   for ci = 0, 15 do
     local c = palInts[ci + 1] or 0
@@ -873,6 +891,7 @@ local function extract_named_bgs(rom, cache, root, out)
   local named = anim and anim.named_bgs
   if not named then return out end
   for key, e in pairs(named) do
+    collect_asset_garbage()
     local tiles
     if e.gfx_raw then
       tiles = raw_at(rom, e.gfx_raw, e.gfx_size or 0x800)
@@ -911,6 +930,7 @@ local function extract_anim_bgs(rom, cache, root)
   if not base then return out end
   local done = {}
   for id = 0, count - 1 do
+    collect_asset_garbage()
     local imgPtr = rom:u32(base + id * 12)
     local palPtr = rom:u32(base + id * 12 + 4)
     local mapPtr = rom:u32(base + id * 12 + 8)
@@ -958,10 +978,10 @@ local function extract_stat_mask(rom, cache, root)
   end
   local ntiles = math.floor(#tiles / 32)
   for mi, off in ipairs({ anim.stat_mask_tilemap1, anim.stat_mask_tilemap2 }) do
+    collect_asset_garbage()
     local map = lz_at(rom, off + 0x08000000)
     if not map then return nil end
-    local pixels = {}
-    for i = 1, 256 * 256 * 4 do pixels[i] = 0 end
+    local pixels = new_pixels(256 * 256 * 4)
     for e = 0, 1023 do
       local v = map[e * 2 + 1] + map[e * 2 + 2] * 256
       local tile = v % 1024
@@ -1226,11 +1246,8 @@ function BattleAnimExtract.run(rom, cache, opts)
       local palInts = pal_ints(pb)
       local ntiles = math.floor(#tb / 32)
       local w, h = 16, math.ceil(ntiles / 2) * 8
-      local px, ipx = {}, {}
-      for i = 1, w * h * 4 do
-        px[i] = 0
-        ipx[i] = (i % 4 == 0) and 255 or 0
-      end
+      local px = new_pixels(w * h * 4)
+      local ipx = new_pixels(w * h * 4, true)
       for ti = 0, ntiles - 1 do
         local tx, ty = ti % 2, math.floor(ti / 2)
         for row = 0, 7 do
@@ -1259,10 +1276,10 @@ function BattleAnimExtract.run(rom, cache, opts)
     if palBytes then
       local pal = decode_palette(palBytes)
       for key, off in pairs({ SUBSTITUTE_DOLL_FRONT = anim.substitute_front, SUBSTITUTE_DOLL_BACK = anim.substitute_back }) do
+        collect_asset_garbage()
         local tb = off and lz_at(rom, off + 0x08000000)
         if tb and #tb >= 2048 then
-          local pixels = {}
-          for i = 1, 64 * 64 * 4 do pixels[i] = 0 end
+          local pixels = new_pixels(64 * 64 * 4)
           for ti = 0, 63 do
             local tx, ty = ti % 8, math.floor(ti / 8)
             for row = 0, 7 do
@@ -1320,6 +1337,7 @@ function BattleAnimExtract.run(rom, cache, opts)
   end
 
   -- ── Step 3: Serialize pack ──────────────────────────────────────────
+  collect_asset_garbage()
   local pack = {
     version = BattleAnimExtract.FORMAT_VERSION,
     moves   = moves,
