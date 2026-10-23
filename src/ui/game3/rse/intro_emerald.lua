@@ -254,6 +254,10 @@ function Intro:update(input)
 end
 
 function Intro:draw()
+  if self.m.ppu.trace then
+    self.m.ppu.traceContext = ("emerald intro scene=%s frame=%s counter=%s")
+      :format(tostring(self.scene), tostring(self.frames), tostring(self.counter))
+  end
   self.m.ppu:draw(0, 0)
 end
 

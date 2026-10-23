@@ -74,6 +74,7 @@ local REG_DEFAULTS = {
 
 function Ppu.new()
   local self = setmetatable({}, Ppu)
+  if _G.POKEPORT_VITA then self.trace = require("src.debug.VitaGpuTrace").new() end
   self.palette = Palette.new()
   self.sprites = Sprites.new(self.palette)
   self.scanline = Scanline.new()
@@ -528,18 +529,30 @@ local function window(h, v, maxW, maxH)
 end
 
 function Ppu:render()
+  local trace = self.trace
+  if trace then trace:beginFrame(self.traceContext) end
   local g = self:_ensureGpu()
+  if trace then trace:note("gpu resources ready") end
   love.graphics.push("all")
   love.graphics.origin()
   love.graphics.setScissor()
   love.graphics.setColor(1, 1, 1, 1)
   self:_uploadPalette(g)
+  if trace then trace:note("palette uploaded") end
   local lines, dest = self.scanline:lineValues()
   local lineDest = dest and LINE_DEST[dest] or nil
   local on = {}
   for i = 0, 3 do
     on[i] = self:_bgEnabled(i)
-    if on[i] then self:_renderBg(g, i, lines, lineDest) end
+    if on[i] then
+      if trace then trace:note("bg" .. i .. " begin") end
+      self:_renderBg(g, i, lines, lineDest)
+      if trace then
+        local layer = self.bg[i].layer
+        trace:checkpoint(("bg%d size=%dx%d affine=%s"):format(i,
+          layer.w, layer.h, tostring(self:_isAffine(i))), g.bg[i])
+      end
+    end
   end
   local r = self.regs
   local objOn = band(r.DISPCNT, Ppu.DISPCNT_OBJ_ON) ~= 0 and band(r.DISPCNT, Ppu.DISPCNT_FORCED_BLANK) == 0
@@ -550,10 +563,15 @@ function Ppu:render()
       if e.objMode == 2 then winList[#winList + 1] = e else shown[#shown + 1] = e end
     end
   end
+  if trace then trace:note("objects begin") end
   self:_renderObjs(g, shown, g.obj, false, ranges)
+  if trace then trace:checkpoint("objects count=" .. #shown, g.obj) end
   local objWinOn = band(r.DISPCNT, Ppu.DISPCNT_OBJWIN_ON) ~= 0 and objOn
+  if trace then trace:note("object window begin") end
   self:_renderObjs(g, objWinOn and winList or {}, g.objWin, true, ranges)
+  if trace then trace:checkpoint("object window count=" .. (objWinOn and #winList or 0), g.objWin) end
   local sh = g.composeShader
+  if trace then trace:note("composition begin") end
   love.graphics.setCanvas(g.out)
   love.graphics.clear(0, 0, 0, 1)
   love.graphics.setShader(sh)
@@ -582,7 +600,9 @@ function Ppu:render()
     math.min(16, band(r.BLDY, 0x1F)),
   })
   love.graphics.draw(g.pixel, 0, 0, 0, Ppu.W, Ppu.H)
+  if trace then trace:checkpoint("composition", g.out) end
   love.graphics.pop()
+  if trace then trace:endFrame() end
   return g.out
 end
 
