@@ -122,24 +122,41 @@ end
 
 local cacheImages = {}
 
-local function collectImageGarbage(path)
-  if not _G.POKEPORT_VITA then return end
+local function loadImage(loader, path)
+  if not _G.POKEPORT_VITA then return loader(path) end
+  -- A full scan of the live game heap costs ~1.45 s on device, even when
+  -- nothing is reclaimed. Advance normal GC instead; retain a single full
+  -- collection/retry for genuine allocation pressure, including native data
+  -- which Lua's heap counter cannot see.
+  collectgarbage("step", 1)
+  local ok, img = pcall(loader, path)
+  if ok then return img end
+  local err = tostring(img):lower()
+  if not (err:find("out of memory", 1, true) or err:find("not enough memory", 1, true)
+      or err:find("cannot allocate", 1, true)) then error(img, 0) end
   local timer = love and love.timer
   local started = timer and timer.getTime and timer.getTime()
   collectgarbage("collect")
   if started then
-    require("src.debug.VitaLoadTrace").slow("gc", path, "before-image", timer.getTime() - started, "full")
+    require("src.debug.VitaLoadTrace").slow("gc", path, "image-allocation-retry", timer.getTime() - started, "full")
   end
+  return loader(path)
+end
+
+local function loadLayer(path)
+  if not _G.POKEPORT_VITA then return love.graphics.newImage(path) end
+  local data = love.image.newImageData(path)
+  local ok, img = pcall(love.graphics.newImage, data)
+  data:release()
+  if not ok then error(img, 0) end
+  return img
 end
 
 function Ppu.indexLayer(path, w, h, bpp)
   local key = "L:" .. path
   local hit = cacheImages[key]
   if not hit then
-    -- Native image allocations are not represented by the Lua heap count.
-    -- Reclaim the previous asset's temporary data before decoding another.
-    collectImageGarbage(path)
-    local img = love.graphics.newImage(path)
+    local img = loadImage(loadLayer, path)
     img:setFilter("nearest", "nearest")
     hit = { image = img, w = w or img:getWidth(), h = h or img:getHeight(), bpp = bpp or 4 }
     cacheImages[key] = hit
@@ -151,10 +168,9 @@ function Ppu.indexSheet(path, frameW, frameH, rects)
   local key = "S:" .. path
   local hit = cacheImages[key]
   if not hit then
-    collectImageGarbage(path)
     local timer = _G.POKEPORT_VITA and love and love.timer
     local started = timer and timer.getTime and timer.getTime()
-    local img = IndexedPng.indexImage(path)
+    local img = loadImage(IndexedPng.indexImage, path)
     if started then
       require("src.debug.VitaLoadTrace").slow("indexed-png", path, "decode+upload", timer.getTime() - started)
     end
@@ -366,12 +382,20 @@ local function canvas()
   return c
 end
 
+local vitaShaders
+
 function Ppu:_ensureGpu()
   if self.gpu then return self.gpu end
   local g = {}
-  g.bgShader = love.graphics.newShader(BG_SHADER)
-  g.objShader = love.graphics.newShader(OBJ_SHADER)
-  g.composeShader = love.graphics.newShader(COMPOSE_SHADER)
+  -- Uniforms are supplied on each draw, so instances can share the programs
+  -- while keeping their canvases/palettes separate. Vita keeps one GL context.
+  local shaders = _G.POKEPORT_VITA and vitaShaders
+  if not shaders then
+    shaders = { love.graphics.newShader(BG_SHADER), love.graphics.newShader(OBJ_SHADER),
+      love.graphics.newShader(COMPOSE_SHADER) }
+    if _G.POKEPORT_VITA then vitaShaders = shaders end
+  end
+  g.bgShader, g.objShader, g.composeShader = shaders[1], shaders[2], shaders[3]
   g.bg = {}
   for i = 0, 3 do g.bg[i] = canvas() end
   g.obj = canvas()

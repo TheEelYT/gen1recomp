@@ -32,11 +32,14 @@ io.open = function() return {write = function() end, flush = function() end, clo
 local function call(name) return function() order[#order + 1] = name end end
 love.graphics.flushBatch, love.graphics.setCanvas, love.graphics.setShader = call("flush"), call("canvas"), call("shader")
 love.window = {close = call("close")}
-require("src.debug.VitaShutdown").closeWindow()
-T.same(order, {"flush", "canvas", "shader", "close"}, "detach before closing window while Lua remains alive")
+require("src.debug.VitaShutdown").prepare()
+T.same(order, {"flush", "canvas", "shader"}, "detach without invoking crashing window teardown")
+T.eq(_G.G1R_VITA_SHUTDOWN_READY, true, "actual Vita exit arms native process shutdown")
+_G.G1R_VITA_SHUTDOWN_READY = nil
 _G.POKEPORT_VITA = false
-require("src.debug.VitaShutdown").closeWindow()
-T.eq(#order, 4, "desktop shutdown untouched")
+require("src.debug.VitaShutdown").prepare()
+T.eq(#order, 3, "desktop shutdown untouched")
+T.eq(_G.G1R_VITA_SHUTDOWN_READY, nil, "desktop never requests native exit")
 io.open = realOpen
 _G.POKEPORT_VITA = nil
 T.finish("Vita transition diagnostics and shutdown ordering")

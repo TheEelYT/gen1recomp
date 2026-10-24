@@ -117,3 +117,42 @@ decodes/uploads and shader creation, preserving argument/result counts. Slow
 full GC before PPU images and indexed-PNG preparation are logged separately.
 These supplement the earlier queue/GC timings; they do not remove load work or
 claim to resolve the pauses. GPU tracing can remain disabled.
+
+## Measured transition stalls and the next close test
+
+The subsequent full-intro/walking run records 42 pre-image full collections,
+about 63.6 seconds combined. Most scan the same ~92 MiB live heap for ~1.45 s
+without reclaiming appreciable memory. The earlier unconditional allocation
+safeguard is therefore itself a source of scene-loading pauses. PPU cache misses
+now advance one incremental step, release temporary ImageData handles explicitly,
+and perform a full collection only for one allocation-error retry. Corrupt asset
+errors still propagate without retry. Indexed-PNG uploads release their temporary
+handle on failure as well as success.
+
+The log also records first-use shader compilation (~0.25–5.2 s), including
+recompilation of the three PPU programs on a later renderer instance. Vita PPU
+instances now share those three programs, with uniforms supplied on each draw;
+canvases, palette and scanline data remain instance-owned. This removes repeated
+program creation, not the initial compile. The synchronous tileset preparations
+(4.38 s and 0.70 s) and other IO/worker timings are separate remaining work; worker
+CPU durations alone do not establish a main-thread stall.
+
+The new close dump (`1792880736`, matching `love(3)`) faults in the same native
+texture-free path, now through `Window::close` → `Volatile::unloadAll` →
+`Font::unloadVolatile`. Explicit window closure is removed. Only after actual
+application shutdown hooks, Lua sets `G1R_VITA_SHUTDOWN_READY`; the incremental
+native `love-vita-process-exit.patch` in the port repository honors this on real
+quit by finishing GPU work, flushing C streams and exiting the process. The OS
+reclaims process resources without traversing the failing graphics finalizers.
+Returning to launcher and native restarts do not take that exit path. This is a
+workaround for process close, not a repair of the invalid free's origin.
+
+**This test requires a native runtime rebuild as well as repackaging.** The port's
+existing `scripts/rebuild_shader_diagnostics.sh` now applies both incremental
+patches without resetting local source or configure/heap settings. Do not apply
+the full LOVE patch again. No cache deletion or ROM re-import is needed. Keep
+GPU tracing disabled, repeat the intro/building/save/exit test, and copy
+`g1r-loads.txt` and `g1r-shutdown.txt`. Native completion is recorded as
+`native GPU finish complete; exiting process`. A new crash also needs the dump
+and the newly rebuilt `vendor/love-vita/src/love` symbol file. Host control-flow,
+allocation/error-path and Gen3 tests pass; device results remain unverified.

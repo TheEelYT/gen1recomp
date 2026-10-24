@@ -1812,7 +1812,7 @@ function love.quit()
   -- report still land exactly once, here).
   FrameProfiler.finish()
   endProcessOnce()
-  require("src.debug.VitaShutdown").closeWindow()
+  require("src.debug.VitaShutdown").prepare()
 end
 
 function love.filedropped(file)
