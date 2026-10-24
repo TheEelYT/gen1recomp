@@ -124,7 +124,7 @@ do
   S.colorMapIndex = 4
   R._colorMapUniforms(sh, 0)
   eq(#sends, n1 + 1, "only the changed row is resent")
-  eq(sh.sent.row, 3, "row follows colorMapIndex")
+  eq(sh.sent.weatherRow, 3, "weather row follows colorMapIndex")
   S.colorMapIndex = -2
   R._colorMapUniforms(sh, 0)
   eq(sh.sent.mode, 2, "negative index switches to dither mode")

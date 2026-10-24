@@ -26,7 +26,11 @@ end
 
 local function resume(job)
   if not job.co then job.co = coroutine.create(job.fn) end
+  local started = _G.POKEPORT_VITA == true and clock()
   local ok, err = coroutine.resume(job.co)
+  if started then
+    require("src.debug.VitaLoadTrace").slow("warm", job.key, "slice", clock() - started)
+  end
   if not ok then
     print("[game3/warm] " .. tostring(job.key) .. ": " .. tostring(err))
     finish(job)

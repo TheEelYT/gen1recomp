@@ -206,7 +206,7 @@ extern Image lut;
 extern Image dlut;
 extern Image amask;
 extern float mode;
-extern float row;
+extern float weatherRow;
 extern float dtable;
 extern float useMask;
 extern vec2 maskSize;
@@ -217,7 +217,7 @@ vec4 effect(vec4 color, Image tex, vec2 tc, vec2 sc)
   vec3 v = floor(c.rgb * 31.0 + 0.5);
   vec3 o;
   if (mode < 1.5) {
-    float r = row;
+    float r = weatherRow;
     if (useMask > 0.5 && r < 18.5 && Texel(amask, sc / maskSize).r > 0.5) r = r + 19.0;
     float y = (r + 0.5) / 38.0;
     o.r = Texel(lut, vec2((v.r + 0.5) / 32.0, y)).r;
@@ -288,6 +288,7 @@ local function loadAssets()
   if assets and assetsKey == key then return assets end
   local m = R.manifest()
   if not m then return nil end
+  local started = _G.POKEPORT_VITA == true and love.timer and love.timer.getTime and love.timer.getTime()
   local out = { sheets = {} }
   for name, b in pairs(m.blobs or {}) do
     local raw = cacheRead("data/generated/gba/weather/" .. b.file)
@@ -307,6 +308,9 @@ local function loadAssets()
     shader:send("dlut", out.dlut)
   end
   assets, assetsKey = out, key
+  if started then
+    require("src.debug.VitaLoadTrace").slow("weather", key, "assets+shaders", love.timer.getTime() - started)
+  end
   return assets
 end
 
@@ -1920,7 +1924,7 @@ local function colorMapUniforms(shader, kind)
   local idx = S.colorMapIndex
   if idx > 0 then
     send(shader, "mode", 1)
-    send(shader, "row", (kind == COLOR_MAP_CONTRAST and NUM_WEATHER_COLOR_MAPS or 0) + idx - 1)
+    send(shader, "weatherRow", (kind == COLOR_MAP_CONTRAST and NUM_WEATHER_COLOR_MAPS or 0) + idx - 1)
     return true
   elseif idx < 0 then
     send(shader, "mode", 2)

@@ -88,6 +88,19 @@ vec4 effect(vec4 color, Image t, vec2 tc, vec2 sc) {
         with self.assertRaises(moderngl.Error):
             self.compile(source, ALIASES)
 
+    def test_weather_stages_compile_with_vita_aliases(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        source = (root / "src/core/game3/field_weather_rse.lua").read_text()
+        stages = re.findall(r"local (\w+_SHADER) = \[\[(.*?)\]\]", source, re.S)
+        self.assertEqual(len(stages), 3)
+        for name, shader in stages:
+            # Unlike desktop GLSL, the device's ShaccCg rejects this keyword
+            # (captured g1r-shaders.txt, line 234, during world entry).
+            self.assertNotRegex(shader, r"\brow\b")
+            for aliases in ("", ALIASES):
+                with self.subTest(stage=name, vita=bool(aliases)):
+                    self.compile(shader, aliases).release()
+
     def test_background_pixels_match_fixed_point_sampler(self):
         # Exercise actual GPU shader output, including the Emerald Pokeball's
         # first eight affine matrices. No ROM assets or native Vita SDK needed.

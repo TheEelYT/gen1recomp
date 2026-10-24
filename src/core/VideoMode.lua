@@ -20,6 +20,8 @@ function VideoMode.modeLabel(mode)
 end
 
 function VideoMode.fixedDisplay()
+  -- The Vita runtime reports Linux; its panel is still a fixed framebuffer.
+  if _G.POKEPORT_VITA == true then return true end
   if not love or not love.system or not love.system.getOS then return false end
   local osName = love.system.getOS()
   return osName == "Android" or osName == "iOS" or osName == "NX"

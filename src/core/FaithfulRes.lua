@@ -108,6 +108,7 @@ function FaithfulRes.cycle(v, dir)
 end
 
 function FaithfulRes.fixedDisplay()
+  if _G.POKEPORT_VITA == true then return true end
   -- POKEPORT_FORCE_MOBILE=1: take the mobile branch on a desktop build, so the
   -- scale lock can be seen and driven without a device.  The window is still
   -- resizable, which is the point -- drag it to a phone aspect, rotate it by

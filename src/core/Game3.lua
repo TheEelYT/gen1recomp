@@ -780,8 +780,9 @@ Game3._gcNextKB = nil
 function Game3.stepGC()
   if not collectgarbage then return end
   local timer = love and love.timer
-  if timer and timer.getTime then
-    local t0 = timer.getTime()
+  local t0 = timer and timer.getTime and timer.getTime()
+  local full = false
+  if t0 then
     local steps = 0
     while steps < Game3.GC_MAX_STEPS and timer.getTime() - t0 < Game3.GC_BUDGET_SEC do
       collectgarbage("step", 1)
@@ -791,8 +792,13 @@ function Game3.stepGC()
     collectgarbage("step", 1)
   end
   if collectgarbage("count") > (Game3._gcNextKB or Game3.GC_CEILING_KB) then
+    full = true
     collectgarbage("collect")
     Game3._gcNextKB = math.max(Game3.GC_CEILING_KB, collectgarbage("count") * 2)
+  end
+  if _G.POKEPORT_VITA == true and t0 then
+    require("src.debug.VitaLoadTrace").slow("gc", "game3", "step", timer.getTime() - t0,
+      full and "full" or "incremental")
   end
 end
 

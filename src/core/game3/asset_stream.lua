@@ -13,6 +13,9 @@ end
 local clock = function() return love and love.timer and love.timer.getTime() or os.clock() end
 local function record(job, phase, seconds, route)
   if Stream.onTiming then Stream.onTiming(job.kind, job.key, phase, seconds, route) end
+  if _G.POKEPORT_VITA == true then
+    require("src.debug.VitaLoadTrace").slow(job.kind, job.key, phase, seconds, route)
+  end
   if os.getenv("POKEPORT_ASSET_PROFILE") == "1" then
     print(string.format("[game3/asset] %s=%s %s=%.3fms route=%s", job.kind, job.key, phase, seconds * 1000, route))
   end

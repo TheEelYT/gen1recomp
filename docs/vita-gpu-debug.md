@@ -62,3 +62,39 @@ or Vita GPU execution.
 New traces identify this candidate with `bgSampling=bounded-v1` and record
 each affine matrix, reference coordinate and wrapping flag before the draw.
 Keep the marker on `trace` for the next hardware comparison.
+
+With `bounded-v1` on hardware, Emerald reached its title, completed the Birch
+sequence, entered the world and saved. The next native guard/logger build also
+allowed continued play. Its compiler log identifies the field-weather failure:
+ShaccCg rejects `row` as a keyword at the uniform declaration and its use. The
+shader uniform and its Lua upload are now named `weatherRow`; the native guard
+remains useful for any future compilation failures.
+
+Returning to the launcher also entered `LauncherWindow.activate`, which applies
+desktop window preferences with `love.window.setMode`. Vita reports Linux, so
+the OS-name check admitted it to that path. `VideoMode.fixedDisplay` and
+`FaithfulRes.fixedDisplay` now honor `POKEPORT_VITA`, preventing launcher window
+restoration, fullscreen toggles and desktop resolution changes on the panel.
+The exit dump is a CPU data abort in SceLibKernel. The old uploaded ELF predates
+the native rebuild, so exact symbolization of that dump still needs the matching
+`vendor/love-vita/src/love` if the exit failure persists after this change.
+
+## CPU load pauses
+
+The October 24 frame log records multi-second stalls during gameplay, but lacks
+operation labels. They are not established as GC, decoding, uploads or shader
+compilation by those timings alone.
+
+Vita now writes `ux0:/data/g1r-loads.txt` for warm-job slices, weather asset/shader
+setup, GC steps and asset decode/upload timings of at least 50 ms. Each entry records the key,
+phase, elapsed time, route (`worker`, synchronous or warm upload), timestamp and
+Lua heap size. Worker decode time is CPU work measured on that worker; it does
+not by itself mean the render thread stalled for that duration. A forced
+synchronous asset demand is identified separately.
+
+This diagnostic runs independently of the GPU marker, adds no graphics calls,
+and performs file IO only after a slow operation. It retains at most 512 entries
+in a process and limits key length. The first slow event replaces the preceding
+process's log; absent new slow events, an old file can remain. It covers these
+load paths, not every possible source of a stalled frame. Keep GPU tracing off
+for the next gameplay comparison and copy this log after reproducing a pause.
