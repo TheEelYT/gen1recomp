@@ -109,10 +109,18 @@ ppu:set("DISPCNT", Ppu.DISPCNT_BG0_ON)
 ppu:setBg(0, 0, { image = {}, w = 16, h = 8 })
 ppu:render()
 T.eq(active, original, "PPU integration restores caller's render target")
+T.check(files[path]:find("bgSampling=bounded-v1", 1, true), "background shader revision logged")
 for _, label in ipairs({ "bg0 size=16x8 affine=false", "objects count=0", "object window count=0", "composition" }) do
   T.check(files[path]:find(label .. " readback complete", 1, true), label .. " completed")
 end
 T.eq(ppu.trace.file, nil, "PPU closes its trace at frame end")
+ppu:set("DISPCNT", Ppu.DISPCNT_MODE_1 + Ppu.DISPCNT_BG2_ON)
+ppu:setBg(2, 0, { image = {}, w = 256, h = 256 }, false)
+ppu:setAffine(2, { pa = 1815, pb = -1213, pc = 1213, pd = 1815,
+  dx = -88074, dy = -258110 })
+ppu:render()
+T.check(files[path]:find("bg2 affine mat=1815,-1213,1213,1815 ref=-88074,-258110 wrap=false", 1, true),
+  "affine matrix and reference logged before draw")
 marker, calls = nil, {}
 local normalPpu = Ppu.new()
 normalPpu:render()

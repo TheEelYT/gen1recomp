@@ -173,14 +173,21 @@ vec4 effect(vec4 color, Image sourceTexture, vec2 tc, vec2 sc) {
   float x = floor(sc.x);
   float y = floor(sc.y);
   vec2 p;
+  float visible = 1.0;
   if (affine > 0.5) {
     float tx = floor((ref.x + mat.x * x + mat.y * y) / 256.0);
     float ty = floor((ref.y + mat.z * x + mat.w * y) / 256.0);
     if (wrap > 0.5) {
       tx = mod(tx, texSize.x);
       ty = mod(ty, texSize.y);
-    } else if (tx < 0.0 || ty < 0.0 || tx >= texSize.x || ty >= texSize.y) {
-      return vec4(0.0);
+    } else {
+      // Keep texture sampling out of per-pixel control flow. In particular,
+      // the Vita's spinning intro background has mostly out-of-range pixels.
+      // Sample a bounded coordinate and mask it instead of returning early.
+      visible = step(0.0, tx) * step(0.0, ty)
+        * (1.0 - step(texSize.x, tx)) * (1.0 - step(texSize.y, ty));
+      tx = clamp(tx, 0.0, texSize.x - 1.0);
+      ty = clamp(ty, 0.0, texSize.y - 1.0);
     }
     p = vec2(tx, ty);
   } else {
@@ -195,11 +202,12 @@ vec4 effect(vec4 color, Image sourceTexture, vec2 tc, vec2 sc) {
   }
   float idx = floor(Texel(idxTex, (p + 0.5) / texSize).r * 255.0 + 0.5);
   if (bpp8 > 0.5) {
-    if (idx < 0.5) return vec4(0.0);
-  } else if (mod(idx, 16.0) < 0.5) {
-    return vec4(0.0);
+    visible *= step(0.5, idx);
+  } else {
+    visible *= step(0.5, mod(idx, 16.0));
   }
-  return vec4(Texel(palTex, vec2((idx + 0.5) / 256.0, 0.25)).rgb, 1.0);
+  vec3 rgb = Texel(palTex, vec2((idx + 0.5) / 256.0, 0.25)).rgb;
+  return vec4(rgb * visible, visible);
 }
 ]]
 
@@ -536,7 +544,7 @@ function Ppu:render()
   local trace = self.trace
   if trace then trace:beginFrame(self.traceContext) end
   local g = self:_ensureGpu()
-  if trace then trace:note("gpu resources ready") end
+  if trace then trace:note("gpu resources ready bgSampling=bounded-v1") end
   love.graphics.push("all")
   love.graphics.origin()
   love.graphics.setScissor()
@@ -550,6 +558,12 @@ function Ppu:render()
     on[i] = self:_bgEnabled(i)
     if on[i] then
       if trace then trace:note("bg" .. i .. " begin") end
+      if trace and self:_isAffine(i) then
+        local p, r = "BG" .. i, self.regs
+        trace:note(("bg%d affine mat=%s,%s,%s,%s ref=%s,%s wrap=%s"):format(i,
+          r[p .. "PA"], r[p .. "PB"], r[p .. "PC"], r[p .. "PD"],
+          r[p .. "X"], r[p .. "Y"], tostring(self.bg[i].wrap)))
+      end
       self:_renderBg(g, i, lines, lineDest)
       if trace then
         local layer = self.bg[i].layer

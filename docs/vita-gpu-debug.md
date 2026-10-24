@@ -39,3 +39,26 @@ the earlier GPU hang. Sync probes now request one pixel (four RGBA8 bytes),
 instead of a full 240x160 image (150 KiB), and uncached Vita image loads collect
 temporary Lua objects first. This bounds the requested readback image size; it
 does not prove the native driver has no additional allocations or leaks.
+
+The October 24 sync and trace runs both reached scene 3, counter 6 (render
+frame 1139), immediately after loading `scene3_pokeball_idx.png`. Sync reported
+no readback failures and completed the affine BG2 read before the last object
+checkpoint. Trace completed that frame's offscreen composition before the GPU
+abort. Both dumps are complete gzip streams and contain GPU_INFO records;
+their TTY output reports `render gpu crash`, with no Lua error. GPU execution is
+asynchronous: these checkpoints do not identify the exact faulting command.
+
+The next compatibility candidate removes per-pixel early returns before the
+background shader's texture lookups. Non-wrapped affine coordinates are clamped
+for sampling, then masked transparent when originally outside the layer. Index
+zero and 4-bit palette-bank index zero are also masked instead of returning.
+This is a workaround candidate for the rotating background's shader path, not
+a confirmed diagnosis of the native driver. The optional Mesa/EGL test compares
+all 240x160 output pixels with a CPU sampler for the initial Pokeball matrices,
+wrapping/boundary cases, 4-/8-bit transparency, and horizontal/vertical scanline
+offsets, with and without vitaGL's swizzle macros. It does not emulate ShaccCg
+or Vita GPU execution.
+
+New traces identify this candidate with `bgSampling=bounded-v1` and record
+each affine matrix, reference coordinate and wrapping flag before the draw.
+Keep the marker on `trace` for the next hardware comparison.
