@@ -94,12 +94,7 @@ function IndexedPng.indexImageData(decoded)
 end
 
 function IndexedPng.indexImage(path)
-  local data = IndexedPng.indexImageData(IndexedPng.load(path))
-  local ok, img = pcall(love.graphics.newImage, data)
-  -- The Image retains its own native reference. Release the temporary Lua
-  -- handle on both success and failure instead of waiting for a GC cycle.
-  if data.release then data:release() end
-  if not ok then error(img, 0) end
+  local img = love.graphics.newImage(IndexedPng.indexImageData(IndexedPng.load(path)))
   img:setFilter("nearest", "nearest")
   return img
 end

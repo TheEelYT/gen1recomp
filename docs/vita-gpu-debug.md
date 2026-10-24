@@ -156,3 +156,26 @@ GPU tracing disabled, repeat the intro/building/save/exit test, and copy
 `native GPU finish complete; exiting process`. A new crash also needs the dump
 and the newly rebuilt `vendor/love-vita/src/love` symbol file. Host control-flow,
 allocation/error-path and Gen3 tests pass; device results remain unverified.
+
+## Rollback after device performance regression
+
+The `cd1bbd3a` optimization candidate regressed Emerald's intro on hardware;
+the user could not reach the title because execution was too slow. Host tests
+validated control flow and ownership stubs, not device performance. No new timing
+log accompanies that report, so it does not identify which change caused the
+regression.
+
+Restore `gba_ppu.lua`, `indexed_png.lua` and the image-GC regression test exactly
+to the playable `b9eadd02` versions. This restores per-image full collection,
+the original image creation/ownership path and per-instance shader programs as
+one conservative rollback. The known transition pauses remain; the preceding
+optimization description is a failed candidate, not current runtime behavior.
+Keep the independent application-close workaround and its native rebuild. The
+native process-exit gate only runs after the boot coroutine returns a flagged
+real quit, and is not reverted by this Lua-only change.
+
+Repackage with the already rebuilt runtime; no native rebuild or ROM re-import
+is needed for this rollback. Confirm the previous playable speed first, keeping
+GPU tracing off. Copy `g1r-loads.txt` from the slow build before launching again
+if it is still available, since the next run can replace it. That comparison is
+needed before attempting another GC/image/shader performance change.
