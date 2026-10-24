@@ -122,13 +122,23 @@ end
 
 local cacheImages = {}
 
+local function collectImageGarbage(path)
+  if not _G.POKEPORT_VITA then return end
+  local timer = love and love.timer
+  local started = timer and timer.getTime and timer.getTime()
+  collectgarbage("collect")
+  if started then
+    require("src.debug.VitaLoadTrace").slow("gc", path, "before-image", timer.getTime() - started, "full")
+  end
+end
+
 function Ppu.indexLayer(path, w, h, bpp)
   local key = "L:" .. path
   local hit = cacheImages[key]
   if not hit then
     -- Native image allocations are not represented by the Lua heap count.
     -- Reclaim the previous asset's temporary data before decoding another.
-    if _G.POKEPORT_VITA then collectgarbage("collect") end
+    collectImageGarbage(path)
     local img = love.graphics.newImage(path)
     img:setFilter("nearest", "nearest")
     hit = { image = img, w = w or img:getWidth(), h = h or img:getHeight(), bpp = bpp or 4 }
@@ -141,8 +151,13 @@ function Ppu.indexSheet(path, frameW, frameH, rects)
   local key = "S:" .. path
   local hit = cacheImages[key]
   if not hit then
-    if _G.POKEPORT_VITA then collectgarbage("collect") end
+    collectImageGarbage(path)
+    local timer = _G.POKEPORT_VITA and love and love.timer
+    local started = timer and timer.getTime and timer.getTime()
     local img = IndexedPng.indexImage(path)
+    if started then
+      require("src.debug.VitaLoadTrace").slow("indexed-png", path, "decode+upload", timer.getTime() - started)
+    end
     hit = { image = img, w = img:getWidth(), h = img:getHeight(), frameW = frameW, frameH = frameH, rects = rects }
     cacheImages[key] = hit
   end

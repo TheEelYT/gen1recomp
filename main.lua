@@ -16,6 +16,7 @@ if os.getenv("POKEPORT_JIT") == "0" and jit and jit.off then
 end
 
 local SwitchDiagnostics = require("src.debug.SwitchDiagnostics")
+require("src.debug.VitaLoadTrace").install()
 
 -- Global emergency quit: holding Start + Select for 5 seconds forcefully terminates LOVE.
 local emergencyQuitTimer = 0
@@ -1811,6 +1812,7 @@ function love.quit()
   -- report still land exactly once, here).
   FrameProfiler.finish()
   endProcessOnce()
+  require("src.debug.VitaShutdown").closeWindow()
 end
 
 function love.filedropped(file)

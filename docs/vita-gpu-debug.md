@@ -98,3 +98,22 @@ in a process and limits key length. The first slow event replaces the preceding
 process's log; absent new slow events, an old file can remain. It covers these
 load paths, not every possible source of a stalled frame. Keep GPU tracing off
 for the next gameplay comparison and copy this log after reproducing a pause.
+
+Returning to the launcher succeeded on hardware after the fixed-display change.
+Closing the app's X still faults. The matching `love(3)` ELF resolves its stack
+to `lua_close` -> userdata/font destruction -> Image destruction ->
+`OpenGL::deleteTexture` -> `gpu_free_texture_data`, then a SceLibKernel data abort.
+This identifies the failing cleanup path, not the origin of the invalid memory.
+The next candidate calls `love.window.close()` after process shutdown hooks,
+before Lua finalization. That invokes LOVE's graphics/volatile unload while
+Lua-owned images and fonts still exist. `g1r-shutdown.txt` records completion of
+render-state detachment and explicit window closure. It does not bypass saving,
+worker shutdown or the normal Lua-state destruction. Hardware validation remains
+required; the change is a shutdown-order candidate, not a confirmed allocator fix.
+
+Pauses on every new area and intro/title scene also require timings outside the
+asset queue. `VitaLoadTrace.install()` wraps main-state LOVE file reads, image
+decodes/uploads and shader creation, preserving argument/result counts. Slow
+full GC before PPU images and indexed-PNG preparation are logged separately.
+These supplement the earlier queue/GC timings; they do not remove load work or
+claim to resolve the pauses. GPU tracing can remain disabled.
