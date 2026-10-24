@@ -139,7 +139,9 @@ function Intro:sprite(key)
 end
 
 function Intro:layer(key)
-  return Machine.layer(assert(self.man.layers[key], "intro_emerald: layer " .. key .. " missing from cache"))
+  local entry = assert(self.man.layers[key], "intro_emerald: layer " .. key .. " missing from cache")
+  if self.m.ppu.trace then self.m.ppu.trace:asset("layer " .. key, entry.index, entry.w, entry.h) end
+  return Machine.layer(entry)
 end
 
 function Intro:pal(name)

@@ -50,8 +50,10 @@ T.eq(#calls, 1, "trace mode submits without readback")
 marker = "sync"
 trace, calls = Trace.new(), {}
 trace:beginFrame("sync test")
-trace:checkpoint("composition", { newImageData = function()
+trace:checkpoint("composition", { newImageData = function(_, slice, mipmap, x, y, w, h)
   T.eq(active, nil, "readback target detached")
+  T.same({ slice, mipmap, x, y }, { 1, 1, 0, 0 }, "LOVE 11 readback arguments")
+  T.eq(w * h * 4, 4, "RGBA8 readback allocation is bounded to four bytes")
   calls[#calls + 1] = "readback"
   return { release = function() calls[#calls + 1] = "release" end }
 end })
@@ -62,6 +64,11 @@ T.eq(active, original, "render state restored after a readback error")
 T.eq(trace.mode, "trace", "unsupported readback downgrades to trace")
 T.check(files[path]:find("readback unavailable", 1, true), "readback error recorded")
 trace:endFrame()
+love.filesystem = { getInfo = function() return { size = 1234 } end }
+trace:asset("layer scene1_bg3", "intro/scene1_bg3.png", 256, 256)
+T.check(files[path]:find("asset layer scene1_bg3 file=intro/scene1_bg3.png", 1, true), "asset path logged between frames")
+T.check(files[path]:find("fileBytes=1234", 1, true), "asset file size logged")
+T.eq(trace.file, nil, "asset log closes its temporary handle")
 for i = 2, 241 do trace:beginFrame("rotation"); trace:endFrame() end
 T.check(files[path]:match("^241 ") ~= nil, "first chunk rotates at frame 241")
 T.check(files["ux0:/data/g1r-render-1.txt"]:match("^121 ") ~= nil, "previous chunk retained")
@@ -88,8 +95,9 @@ graphics.newImage = function() return { setFilter = noop, replacePixels = noop }
 graphics.newShader = function() return { send = noop } end
 graphics.newCanvas = function()
   local target = { setFilter = noop }
-  function target:newImageData()
+  function target:newImageData(_, _, _, _, w, h)
     T.check(active ~= self, "PPU target detached before readback")
+    T.eq(w * h, 1, "PPU readback requests one pixel")
     return { release = noop }
   end
   return target

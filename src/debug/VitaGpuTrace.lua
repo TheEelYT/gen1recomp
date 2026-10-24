@@ -40,12 +40,32 @@ function Trace:beginFrame(context)
   local ok, file = pcall(io.open, path, (self.frame - 1) % 120 == 0 and "w" or "a")
   if not ok or not file then self.disabled = true; return end
   self.file = file
+  self.path = path
   self:note("begin mode=" .. self.mode .. " " .. tostring(context or "gba_ppu"))
   local statsOk, stats = pcall(function() return love.graphics.getStats() end)
   if statsOk and stats then
     self:note(("memory luaKiB=%.1f textures=%s textureBytes=%s canvases=%s")
       :format(collectgarbage("count"), tostring(stats.images),
         tostring(stats.texturememory), tostring(stats.canvases)))
+  end
+end
+
+function Trace:asset(label, path, w, h)
+  if self.disabled or not self.path then return end
+  -- Asset loading happens in update, between render frames. Keep that event
+  -- in the same chunk even though the frame's file handle is already closed.
+  local opened = not self.file
+  if opened then
+    local ok, file = pcall(io.open, self.path, "a")
+    if not ok or not file then self.disabled = true; return end
+    self.file = file
+  end
+  local ok, info = pcall(function() return love.filesystem.getInfo(path) end)
+  self:note(("asset %s file=%s size=%sx%s fileBytes=%s"):format(label,
+    tostring(path), tostring(w), tostring(h), tostring(ok and info and info.size)))
+  if opened and self.file then
+    pcall(function() self.file:close() end)
+    self.file = nil
   end
 end
 
@@ -58,12 +78,15 @@ function Trace:checkpoint(label, target)
   love.graphics.flushBatch()
   self:note(label .. " submitted")
   if self.mode == "sync" and target then
-    self:note(label .. " readback begin")
+    self:note(label .. " readback begin pixel=1x1")
     -- Readback is the public LOVE API that waits for this render target.
     -- This intentionally changes scheduling; it is diagnostic, not a fix.
     love.graphics.push("all")
     love.graphics.setCanvas() -- LOVE forbids reading the active Canvas.
-    local ok, data = pcall(target.newImageData, target)
+    -- A one-pixel read still waits for the render target, without allocating
+    -- a full 240x160 image at every checkpoint (150 KiB per RGBA8 image).
+    -- LOVE 11: slice, mipmap, x, y, width, height. Slice is ignored for 2D.
+    local ok, data = pcall(target.newImageData, target, 1, 1, 0, 0, 1, 1)
     love.graphics.pop()
     if ok then
       data:release()

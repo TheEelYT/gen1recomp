@@ -126,6 +126,9 @@ function Ppu.indexLayer(path, w, h, bpp)
   local key = "L:" .. path
   local hit = cacheImages[key]
   if not hit then
+    -- Native image allocations are not represented by the Lua heap count.
+    -- Reclaim the previous asset's temporary data before decoding another.
+    if _G.POKEPORT_VITA then collectgarbage("collect") end
     local img = love.graphics.newImage(path)
     img:setFilter("nearest", "nearest")
     hit = { image = img, w = w or img:getWidth(), h = h or img:getHeight(), bpp = bpp or 4 }
@@ -138,6 +141,7 @@ function Ppu.indexSheet(path, frameW, frameH, rects)
   local key = "S:" .. path
   local hit = cacheImages[key]
   if not hit then
+    if _G.POKEPORT_VITA then collectgarbage("collect") end
     local img = IndexedPng.indexImage(path)
     hit = { image = img, w = img:getWidth(), h = img:getHeight(), frameW = frameW, frameH = frameH, rects = rects }
     cacheImages[key] = hit
