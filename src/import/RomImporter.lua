@@ -7912,11 +7912,12 @@ function RomImporter:_pumpModCheck()
   end
 end
 
--- ------- mod install / update (async download, blocking unzip)
+-- ------- mod install / update (async download, cooperative Vita unzip)
 --
 -- The download is the slow half and now runs on the fetch pool behind a
--- non-dismissable loader; unzipping the finished archive is fast and stays
--- on the main thread, where love.filesystem belongs.  All three entry points
+-- non-dismissable loader. Vita unzipping also yields between files so a large
+-- mod cannot stop the launcher painting. Filesystem work stays on the main
+-- thread. All three entry points
 -- (update a mod, install a specific version, install from an index) funnel
 -- into one in-flight job, so two installs can never race for the same id.
 --
@@ -7998,39 +7999,73 @@ end
 function RomImporter:_pumpModInstall()
   local job = self._modInstall
   if not job then return end
-  local ModUpdate = require("src.mods.ModUpdate")
-  local ok, done, path, err, progress = pcall(ModUpdate.pumpDownloadZip, job.h)
-  if ok and not done then
-    -- Feed real download progress into the overlay when the size is known.
-    if progress and self._busy then self._busy.progress = progress end
-    return
-  end
-  self._modInstall = nil
   local spec = job.spec
-  if not ok then
-    self:_modInstallFailed(spec, "download failed: " .. tostring(done))
-    return
+  local LauncherMods = require("src.mods.LauncherMods")
+  local vita = _G.POKEPORT_VITA == true or (love and love.system and love.system._vitaHttp == true)
+  local ran, res, resErr
+  local function fail(text)
+    self._modInstall = nil
+    self:_modInstallFailed(spec, text)
   end
-  if not path then
-    self:_modInstallFailed(spec, err or "download failed")
-    return
-  end
-  -- Hash gate before the unzip: a pinned archive that does not match the cart
-  -- is thrown away rather than installed.
-  if spec.sha256 then
-    local verified, why = RomImporter.verifyArchiveSha256(path, spec.sha256)
-    if not verified then
-      pcall(love.filesystem.remove, path)
-      self:_modInstallFailed(spec, why)
+  if job.unpack then
+    local ok, done, installed, why, progress = pcall(LauncherMods.pumpDownloadedZip, job.unpack)
+    if not ok then return fail("install failed: " .. tostring(done)) end
+    if not done then
+      if progress and self._busy then
+        self._busy.detail = tostring(progress.path):match("[^/]+$")
+        if progress.phase == "scan" then
+          self._busy.count = Strings("Preparing %d files", progress.scanned)
+          self._busy.progress = nil
+        else
+          self._busy.count = Strings("%d / %d files, %.1f MiB", progress.files,
+            progress.total, progress.bytes / 1048576)
+          self._busy.progress = progress.total > 0 and progress.files / progress.total or nil
+        end
+      end
       return
     end
+    ran, res, resErr = true, installed, why
+  else
+    local path = job.path
+    if not path then
+      local ModUpdate = require("src.mods.ModUpdate")
+      local ok, done, downloaded, err, progress = pcall(ModUpdate.pumpDownloadZip, job.h)
+      if ok and not done then
+        if progress and self._busy then
+          -- The current native bridge does not publish intermediate byte
+          -- counts. A spinner is honest; an unchanging 0% is not useful.
+          self._busy.progress = (not vita or progress > 0) and progress or nil
+        end
+        return
+      end
+      if not ok then return fail("download failed: " .. tostring(done)) end
+      if not downloaded then return fail(err or "download failed") end
+      path = downloaded
+      if vita then
+        job.path, job.h = path, nil
+        self:_setBusy(Strings(spec.sha256 and "Verifying %s" or "Installing %s",
+          tostring(spec.name or spec.modId)))
+        return -- Paint the new stage before its first filesystem operation.
+      end
+    end
+    -- Preserve the cart's hash gate before any destination files are changed.
+    if spec.sha256 then
+      local verified, why = RomImporter.verifyArchiveSha256(path, spec.sha256)
+      if not verified then
+        pcall(love.filesystem.remove, path)
+        return fail(why)
+      end
+    end
+    self:_setBusy(Strings("Installing %s", tostring(spec.name or spec.modId)))
+    if vita then
+      collectgarbage("collect") -- Release the hash input before mounting/copying.
+      job.unpack = LauncherMods.beginDownloadedZip(spec.modId, path, job.version)
+      job.path = nil
+      return
+    end
+    ran, res, resErr = pcall(LauncherMods.installDownloadedZip, spec.modId, path, job.version)
   end
-  -- Unzip + manifest check.  Fast, and it must run here: love.filesystem
-  -- writes are main-thread only.
-  self:_setBusy(Strings("Installing %s", tostring(spec.name or spec.modId)))
-  local LauncherMods = require("src.mods.LauncherMods")
-  local ran, res, resErr = pcall(LauncherMods.installDownloadedZip,
-    spec.modId, path, job.version)
+  self._modInstall = nil
   self:_clearBusy()
   if not ran then
     self:_modInstallFailed(spec, "install failed: " .. tostring(res))

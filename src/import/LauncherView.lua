@@ -6874,7 +6874,7 @@ local function loaderSpec(imp)
   local b = imp._busy
   if b then
     return { title = b.title, detail = b.detail, progress = b.progress,
-             onCancel = b.cancel }
+             count = b.count, onCancel = b.cancel }
   end
   return nil
 end

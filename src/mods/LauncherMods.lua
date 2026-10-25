@@ -826,20 +826,33 @@ end
 -- in play and in the OS save directory otherwise (#330).  No explicit mkdir:
 -- CacheFs.write creates the parent chain on both paths, which also means an
 -- empty folder inside the .zip is simply not carried over (it holds nothing).
-local function copyTree(src, dst)
+local function copyTree(src, dst, progress, root)
   local fs = love.filesystem
   for _, name in ipairs(fs.getDirectoryItems(src)) do
     local s = src .. "/" .. name
     local d = dst .. "/" .. name
     local info = fs.getInfo(s)
     if info and info.type == "directory" then
-      local ok, err = copyTree(s, d)
+      local ok, err = copyTree(s, d, progress)
       if not ok then return nil, err end
-    else
-      local data = fs.read(s)
-      if data == nil then return nil, "could not read " .. name end
+    elseif not (root and progress and name == "manifest.json") then
+      local data, readErr = fs.read(s)
+      if data == nil and progress then
+        -- A failed allocation can surface as a generic PhysFS read failure.
+        -- Reclaim the previous file's strings and retry once, preserving the
+        -- real error if the archive/storage read is persistently broken.
+        collectgarbage("collect")
+        data, readErr = fs.read(s)
+      end
+      if data == nil then return nil, "could not read " .. s .. ": " .. tostring(readErr or "no read error supplied") end
+      if info and info.size and #data ~= info.size then
+        return nil, ("short read of %s: %d of %d bytes"):format(s, #data, info.size)
+      end
+      local size = #data
       local ok, err = CacheFs.write(d, data)
       if not ok then return nil, "could not write " .. name .. ": " .. tostring(err) end
+      data = nil
+      if progress then progress(d, size) end
     end
   end
   return true
@@ -1043,9 +1056,12 @@ function LauncherMods._installZipInner(source, opts)
     return nil, "mod install needs LOVE"
   end
   local fs = love.filesystem
-  local data, readErr = readArchive(source)
-  if not data then return nil, readErr end
-  if not zipLooksValid(data) then
+  local diskMount = opts.diskMount and type(source) == "string"
+    and not isHostAbsolutePath(source)
+  local data, readErr
+  if not diskMount then data, readErr = readArchive(source) end
+  if not diskMount and not data then return nil, readErr end
+  if not diskMount and not zipLooksValid(data) then
     local label = type(source) == "string" and (source:match("[^/\\]+$") or source)
       or "archive"
     return nil, "not a zip file: " .. tostring(label)
@@ -1058,7 +1074,13 @@ function LauncherMods._installZipInner(source, opts)
   local tmp = nil
   local mountKey = nil
   local mounted = false
-  if fs.newFileData then
+  if diskMount then
+    local okMount, mountErr = fs.mount(source, mount)
+    if not okMount then
+      return nil, "could not mount downloaded .zip: " .. tostring(mountErr or source)
+    end
+    mountKey, mounted = source, true
+  elseif fs.newFileData then
     local archiveName = ("mod_import_%d_%d.zip"):format(
       os.time(), math.random(0, 999999))
     local okFd, fd = pcall(fs.newFileData, data, archiveName)
@@ -1080,10 +1102,16 @@ function LauncherMods._installZipInner(source, opts)
     end
     mountKey = tmp
   end
+  local cleaned = false
   local function cleanup()
+    if cleaned then return end
+    cleaned = true
     pcall(fs.unmount, mountKey)
     if tmp then fs.remove(tmp) end
   end
+
+  local initialPrefix = CacheFs.prefix
+  local function installMounted()
 
   local prefix, rootErr = LauncherMods.locateRoot(topLevelPaths(mount))
   if not prefix then
@@ -1114,6 +1142,23 @@ function LauncherMods._installZipInner(source, opts)
     return nil, "mod archives must not include user-supplied baseroms/ files"
   end
 
+  if opts.onScan then
+    local count = 0
+    local function countFiles(path, top)
+      for _, name in ipairs(fs.getDirectoryItems(path)) do
+        local child = path .. "/" .. name
+        local info = fs.getInfo(child)
+        if info and info.type == "directory" then countFiles(child, false)
+        elseif not (top and name == "manifest.json") then
+          count = count + 1
+          opts.onScan(count, child)
+        end
+      end
+    end
+    countFiles(root, true)
+    if opts.onTotal then opts.onTotal(count) end
+  end
+
   local dest = "mods/" .. manifest.id
   local baseromRecovery = "imports/baseroms-recovery/" .. manifest.id
   local existing, installedSomewhere = sameIdTrees(fs, manifest.id)
@@ -1128,6 +1173,23 @@ function LauncherMods._installZipInner(source, opts)
   if #existing > 0 then
     for _, path in ipairs(existing) do
       snapshotTree(path .. "/baseroms", preservedBaseroms)
+    end
+    -- Cooperative copying can be interrupted by closing the application.
+    -- Persist user-owned inputs before deleting their old tree, rather than
+    -- relying on the coroutine's RAM snapshot surviving until completion.
+    if opts.onProgress then
+      local beforeRecovery = CacheFs.prefix
+      CacheFs.prefix = ""
+      for rel, bytes in pairs(preservedBaseroms) do
+        local recoveryPath = baseromRecovery .. "/" .. rel
+        local ran, written, why = pcall(CacheFs.write, recoveryPath, bytes)
+        if not ran or not written then
+          CacheFs.remove(recoveryPath)
+          CacheFs.prefix = beforeRecovery
+          return nil, "could not stage user baserom " .. rel .. ": " .. tostring(ran and why or written)
+        end
+      end
+      CacheFs.prefix = beforeRecovery
     end
     -- drop every old tree before copy -- mods/<id> and any same-id folder
     -- under another name, or the survivor keeps winning discover()'s
@@ -1150,7 +1212,22 @@ function LauncherMods._installZipInner(source, opts)
   -- only ever make the directory in the save dir (#330).
   local savedPrefix = CacheFs.prefix
   CacheFs.prefix = ""
-  local copied, copyErr = copyTree(root, dest)
+  local progress
+  if opts.onProgress then
+    progress = function(path, bytes)
+      -- A suspended installer must not leave the shared cache router pinned
+      -- to root while the launcher and other jobs paint their next frame.
+      CacheFs.prefix = savedPrefix
+      opts.onProgress(path, bytes)
+      CacheFs.prefix = ""
+    end
+  end
+  local ranCopy, copied, copyErr = pcall(copyTree, root, dest, progress, true)
+  CacheFs.prefix = ""
+  if not ranCopy then copied, copyErr = nil, tostring(copied) end
+  -- Publish the manifest last on the cooperative path, so an interrupted
+  -- copy cannot present a partly installed mod as ready on the next boot.
+  if copied and progress then copied, copyErr = CacheFs.write(dest .. "/manifest.json", raw) end
   if not copied then removeTree(dest) end
   local preserveErr
   for rel, bytes in pairs(preservedBaseroms) do
@@ -1181,6 +1258,12 @@ function LauncherMods._installZipInner(source, opts)
   end
   cleanup()
   return true, manifest.id, manifest
+  end
+  local ran, installed, id, manifest = pcall(installMounted)
+  CacheFs.prefix = initialPrefix
+  cleanup()
+  if not ran then return nil, "import failed: " .. tostring(installed) end
+  return installed, id, manifest
 end
 
 -- Install (or replace) a mod from a GitHub release zip URL.
@@ -1213,9 +1296,11 @@ end
 -- The install half of installFromRelease, split out so the launcher can run
 -- the DOWNLOAD half asynchronously (src/net/Fetch.lua) and still land in the
 -- same place.  `localPath` is a love.filesystem-relative path to an already
--- downloaded zip; it is consumed (removed) either way.
+-- downloaded zip; normally consumed either way. Vita keeps a failed archive
+-- for inspection and mounts it from disk rather than copying it into FileData.
 -- Returns true, version | nil, errString.
-function LauncherMods.installDownloadedZip(modId, localPath, version)
+function LauncherMods.installDownloadedZip(modId, localPath, version, opts)
+  opts = opts or {}
   local ok, result, err = pcall(function()
     if type(modId) ~= "string" or modId == "" then
       return nil, "missing mod id"
@@ -1225,13 +1310,64 @@ function LauncherMods.installDownloadedZip(modId, localPath, version)
     end
     local installed, res = LauncherMods.installZip(localPath, {
       replace = true, expectId = modId,
+      diskMount = opts.diskMount, onProgress = opts.onProgress,
+      onScan = opts.onScan, onTotal = opts.onTotal,
     })
-    pcall(love.filesystem.remove, localPath)
+    if installed or not opts.keepArchiveOnFailure then pcall(love.filesystem.remove, localPath) end
     if not installed then return nil, res end
     return true, version or res
   end)
   if not ok then return nil, "install failed: " .. tostring(result) end
   return result, err
+end
+
+-- Vita's large mods must not turn the main thread into one unbroken unzip.
+-- Keep filesystem work on the main thread, but yield with closed files after
+-- each asset. The ordinary desktop/mobile entry point remains synchronous.
+function LauncherMods.beginDownloadedZip(modId, localPath, version)
+  local job = { files = 0, bytes = 0, total = 0 }
+  local lines = 0
+  local function report(event, detail)
+    if _G.POKEPORT_VITA ~= true or lines >= 128 then return end
+    if event == "copy" and lines >= 126 then return end
+    local file = io.open("ux0:/data/g1r-mod-install.txt", lines == 0 and "w" or "a")
+    if not file then return end
+    file:write(("%s files=%d bytes=%d lua_kib=%.0f %s\n"):format(
+      event, job.files, job.bytes, collectgarbage("count"), tostring(detail or "")))
+    file:close(); lines = lines + 1
+  end
+  job.co = coroutine.create(function()
+    report("begin", localPath)
+    local ok, result = LauncherMods.installDownloadedZip(modId, localPath, version, {
+      diskMount = true, keepArchiveOnFailure = true,
+      onScan = function(count, path)
+        if count % 32 == 0 then coroutine.yield({ phase = "scan", scanned = count, path = path }) end
+      end,
+      onTotal = function(count) job.total = count end,
+      onProgress = function(path, bytes)
+        job.files, job.bytes = job.files + 1, job.bytes + bytes
+        collectgarbage("step", 128)
+        if job.files == 1 or job.files % 64 == 0 then report("copy", path) end
+        coroutine.yield({ phase = "copy", path = path, files = job.files, bytes = job.bytes, total = job.total })
+      end,
+    })
+    report(ok and "complete" or "failed", result)
+    return ok, result
+  end)
+  return job
+end
+
+function LauncherMods.pumpDownloadedZip(job)
+  local now = love and love.timer and love.timer.getTime or os.clock
+  local deadline, progress = now() + 0.006
+  for _ = 1, 8 do
+    local ran, result, detail = coroutine.resume(job.co)
+    if not ran then return true, nil, "install failed: " .. tostring(result) end
+    if coroutine.status(job.co) == "dead" then return true, result, detail end
+    progress = result
+    if now() >= deadline then break end
+  end
+  return false, nil, nil, progress
 end
 
 -- Install a mod listed in a community index (src/mods/ModIndex.lua).
