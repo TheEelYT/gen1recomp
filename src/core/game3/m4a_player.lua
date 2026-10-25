@@ -43,13 +43,21 @@ local function load_lua(cache, rel)
   return result
 end
 
-function Player.loadPack(cache, root)
+function Player.loadPack(cache, root, opts)
+  opts = opts or {}
   root = root or "data/generated/gba/audio"
   local index = load_lua(cache, root .. "/index.lua")
   if type(index) ~= "table" then
     return nil, "missing index.lua"
   end
-  local samplesBin = cache_read(cache, root .. "/samples.bin") or ""
+  local samplesBin = opts.samplesData
+  if not Sample.isDataBank(samplesBin) then samplesBin = nil end
+  if not samplesBin and opts.shareSamples and cache and cache.readData
+      and love and love.data and love.data.newDataView then
+    local ok, data = pcall(cache.readData, cache, root .. "/samples.bin")
+    if ok and Sample.isDataBank(data) then samplesBin = data end
+  end
+  if not samplesBin then samplesBin = cache_read(cache, root .. "/samples.bin") or "" end
   local samples = index.samples or load_lua(cache, root .. "/samples.lua") or {}
   local voicegroups = index.voicegroups or load_lua(cache, root .. "/voicegroups.lua") or {}
   return {

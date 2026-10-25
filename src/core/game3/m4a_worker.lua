@@ -6,6 +6,7 @@ require("love.thread")
 require("love.sound")
 require("love.timer")
 require("love.filesystem")
+require("love.data")
 
 local cmdCh = love.thread.getChannel("game3_m4a_cmd")
 local outCh = love.thread.getChannel("game3_m4a_out")
@@ -66,11 +67,25 @@ local BUFFER = Player.BUFFER_SAMPLES or 8192
 local TARGET_QUEUED = Player.CHANNEL_TARGET or 12
 local sampleRate = Mix.SAMPLE_RATE
 
+local function unload_pack()
+  pack = nil
+  bgm = { voices = {}, muted = false, volume = bgm.volume or 1,
+    reverb = bgm.reverb, mono = bgm.mono, abs = 0 }
+  snaps, baked, fanfareQueue = {}, {}, {}
+  baking, bakingId, priority, packRoot = nil, nil, nil, nil
+  outCh:clear()
+  fanfareCh:clear()
+  collectgarbage("collect")
+end
+
 local function apply_cmd(msg)
   if type(msg) ~= "table" then return end
   if msg.cmd == "quit" then
     running = false
+  elseif msg.cmd == "uninstall" then
+    unload_pack()
   elseif msg.cmd == "install" then
+    if msg.lowMemory then unload_pack() end
     if msg.sampleRate then
       sampleRate = Mix.setSampleRate(msg.sampleRate)
       BUFFER = Player.BUFFER_SAMPLES or 8192
@@ -78,9 +93,9 @@ local function apply_cmd(msg)
     end
     cache:setPrefix(msg.prefix)
     local err
-    pack, err = Player.loadPack(cache, msg.root)
+    pack, err = Player.loadPack(cache, msg.root, { samplesData = msg.samplesData })
     if not pack then
-      statusCh:push({ installFailed = true, root = msg.root, err = tostring(err) })
+      statusCh:push({ installFailed = true, root = msg.root, installId = msg.installId, err = tostring(err) })
     end
     if msg.root ~= packRoot then
       packRoot = msg.root
@@ -105,6 +120,15 @@ local function apply_cmd(msg)
           seen[id] = true
         end
       end
+    end
+    if msg.lowMemory then
+      -- Release the parsed source/chunk temporaries once per install, before
+      -- music rendering. Main-thread image allocation cleanup is unchanged.
+      collectgarbage("collect")
+      statusCh:push({ installed = pack ~= nil, root = msg.root, prefix = msg.prefix,
+        installId = msg.installId, sharedSamples = pack and Sample.isDataBank(pack.samplesBin),
+        sampleBytes = pack and Sample.bankSize(pack.samplesBin) or 0,
+        workerLuaKiB = collectgarbage("count") })
     end
   elseif msg.cmd == "bakeFanfare" then
     priority = tonumber(msg.id)
@@ -162,6 +186,7 @@ while running do
     apply_cmd(msg)
     msg = cmdCh:pop()
   end
+  if not running then break end
 
   if priority and pack then
     local id = priority

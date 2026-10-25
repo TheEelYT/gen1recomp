@@ -52,7 +52,7 @@ end
 
 love.timer = love.timer or {}
 love.timer.sleep = love.timer.sleep or function() end
-for _, name in ipairs({ "love.thread", "love.sound", "love.timer", "love.filesystem" }) do
+for _, name in ipairs({ "love.thread", "love.sound", "love.timer", "love.filesystem", "love.data" }) do
   package.preload[name] = package.preload[name] or function() return true end
 end
 
@@ -128,7 +128,9 @@ resetThreads(true)
 local Audio = freshAudio()
 check(Audio.install(fakeCache, { root = ROOT }), "audio installs from the main-thread cache")
 local sent = installs()
-check(#sent > 0, "install pushed to the worker")
+eq(#sent, 1, "new worker receives exactly one install")
+Audio.install(fakeCache, { root = ROOT })
+eq(#installs(), 2, "existing worker receives one install per explicit reinstall")
 for i, m in ipairs(sent) do
   eq(m.prefix, "firered/", "NX install message " .. i .. " carries the firered/ prefix")
 end
@@ -182,4 +184,60 @@ eq(Audio._bgmLocal and Audio._bgmLocal.songId, 11, "sync song change swaps the s
 check((rawget(source, "stops") or 0) > stopsBefore, "sync song change stops the source to flush queued PCM")
 Audio.shutdown()
 
-T.finish("game3 m4a worker prefix")
+-- Vita shares the immutable native sample bank, including when switching
+-- cartridges that use the same relative audio root.
+local function bank(size)
+  local p = newproxy(true)
+  getmetatable(p).__index = {typeOf = function(_, t) return t == "Data" end,
+    getSize = function() return size end}
+  return p
+end
+love.data = {newDataView = function() error("no samples requested in install test") end}
+_G.POKEPORT_VITA = true
+setOS("Linux")
+resetThreads(true)
+local shared = bank(1024)
+local sharedCache = {read = fakeCache.read, readData = function() return shared end}
+Audio = freshAudio()
+check(Audio.install(sharedCache, {root = ROOT}), "Vita pack installs")
+sent = installs()
+eq(#sent, 1, "Vita sends one install")
+eq(sent[1].samplesData, shared, "Vita sends the same native bank object")
+eq(sent[1].lowMemory, true, "Vita requests old-pack retirement")
+Audio.endSession()
+local uninstall = false
+for _, m in ipairs(channels.game3_m4a_cmd.items) do if m.cmd == "uninstall" then uninstall = true end end
+check(uninstall, "Vita endSession retires the worker pack")
+Audio.shutdown()
+local other = bank(2048)
+status = runWorker({{cmd="install",root=ROOT,prefix="firered/",samplesData=shared,lowMemory=true,installId=1},
+  {cmd="install",root=ROOT,prefix="emerald/",samplesData=other,lowMemory=true,installId=2}},
+  {["firered/"..ROOT.."/index.lua"]=INDEX, ["emerald/"..ROOT.."/index.lua"]=INDEX})
+local first, second = status:pop(), status:pop()
+check(first.installed and first.sharedSamples, "worker acknowledges shared FireRed bank")
+eq(first.sampleBytes, 1024, "worker reports FireRed bank size")
+check(second.installed and second.sharedSamples, "worker acknowledges shared Emerald bank")
+eq(second.sampleBytes, 2048, "worker replaces bank on cartridge switch")
+eq(second.installId, 2, "acknowledgment identifies the current install")
+check(not readPath("firered/"..ROOT.."/samples.bin") and not readPath("emerald/"..ROOT.."/samples.bin"),
+  "worker never rereads either full bank")
+-- Generate a bank only when the worker receives the command: no test-owner
+-- reference may keep it alive after uninstall.
+resetThreads(false)
+local ch = love.thread.getChannel("game3_m4a_cmd")
+local pop = ch.pop
+function ch:pop()
+  local v = pop(self)
+  return type(v) == "function" and v() or v
+end
+local weak = setmetatable({}, {__mode="v"})
+ch:push(function()
+  local value = bank(4096); weak[1] = value
+  return {cmd="install",root=ROOT,prefix="emerald/",samplesData=value,lowMemory=true}
+end)
+ch:push({cmd="uninstall"}); ch:push({cmd="quit"})
+serve({["emerald/"..ROOT.."/index.lua"]=INDEX})
+assert(loadfile("src/core/game3/m4a_worker.lua"))()
+eq(weak[1], nil, "worker uninstall releases the old bank before another load")
+_G.POKEPORT_VITA = nil
+T.finish("game3 m4a worker prefix and shared-bank lifetime")

@@ -141,12 +141,34 @@ local function filesystem_cache()
   }
 end
 
+local memoryReportWritten = false
+local function report_memory(stage, worker)
+  if _G.POKEPORT_VITA ~= true then return end
+  pcall(function()
+    local bank = Audio._pack and Audio._pack.samplesBin
+    local shared = Sample.isDataBank(bank)
+    if worker then shared = worker.sharedSamples == true end
+    local f = assert(io.open("ux0:/data/g1r-audio.txt", memoryReportWritten and "a" or "w"))
+    f:write(("stage=%s install=%s root=%s prefix=%s bankBytes=%d shared=%s mainLuaKiB=%.1f workerLuaKiB=%s\n")
+      :format(stage, tostring(Audio._installId), tostring(Audio._root),
+        tostring(lazyReq("src.core.WorkerFs").prefix()), Sample.bankSize(bank),
+        tostring(shared),
+        collectgarbage("count"), tostring(worker and worker.workerLuaKiB or "-")))
+    f:close()
+    memoryReportWritten = true
+  end)
+end
+
 local function push_install()
+  local shared = Audio._pack and Sample.isDataBank(Audio._pack.samplesBin)
   Audio._cmdCh:push({
     cmd = "install",
     root = Audio._root,
     prefix = lazyReq("src.core.WorkerFs").prefix(),
     sampleRate = Mix.SAMPLE_RATE,
+    samplesData = shared and Audio._pack.samplesBin or nil,
+    lowMemory = _G.POKEPORT_VITA == true,
+    installId = Audio._installId,
   })
 end
 
@@ -176,7 +198,7 @@ local function ensure_worker()
   end
   Audio._worker = thread
   push_install()
-  return true
+  return true, true -- this newly started worker has already received install
 end
 
 local function ensure_bgm_source()
@@ -193,7 +215,8 @@ function Audio.install(cache, opts)
   opts = opts or {}
   Audio._root = opts.root or "data/generated/gba/audio"
   Audio._cache = cache or filesystem_cache()
-  local pack, err = Player.loadPack(Audio._cache, Audio._root)
+  Audio._installId = (Audio._installId or 0) + 1
+  local pack, err = Player.loadPack(Audio._cache, Audio._root, { shareSamples = _G.POKEPORT_VITA == true })
   if not pack then
     Audio._ready = false
     Audio._pack = nil
@@ -209,7 +232,9 @@ function Audio.install(cache, opts)
     Audio._fanfareSrc = {}
     Audio._fanfareRoot = Audio._root
   end
-  if ensure_worker() then
+  report_memory("main-installed")
+  local worker, started = ensure_worker()
+  if worker and not started then
     push_install()
   end
   log("installed root=" .. Audio._root)
@@ -1637,7 +1662,11 @@ local function check_worker_status()
   if not (ch and Audio._worker) then return end
   local msg = ch:pop()
   while msg do
-    if type(msg) == "table" and msg.installFailed and msg.root == Audio._root then
+    if type(msg) == "table" and msg.installed and msg.installId == Audio._installId then
+      report_memory("worker-installed", msg)
+    end
+    if type(msg) == "table" and msg.installFailed and msg.root == Audio._root
+        and (msg.installId == nil or msg.installId == Audio._installId) then
       warn_once("worker", "bgm worker could not load pack at " .. tostring(msg.root)
         .. ": " .. tostring(msg.err))
       if Audio._cmdCh then Audio._cmdCh:push({ cmd = "quit" }) end
@@ -1788,8 +1817,12 @@ function Audio.endSession()
     Audio._bgmSource = nil
   end
   if Audio._cmdCh then
-    Audio._cmdCh:push({ cmd = "stop" })
-    Audio._cmdCh:push({ cmd = "dropFanfares" })
+    if _G.POKEPORT_VITA == true then
+      Audio._cmdCh:push({ cmd = "uninstall" })
+    else
+      Audio._cmdCh:push({ cmd = "stop" })
+      Audio._cmdCh:push({ cmd = "dropFanfares" })
+    end
   end
   if Audio._outCh then Audio._outCh:clear() end
   if Audio._fanfareCh then Audio._fanfareCh:clear() end

@@ -250,11 +250,32 @@ function Sample.waveRate(freqField)
 end
 
 --- Read one sample blob from samples.bin given index meta {offset,size,freq}.
+function Sample.isDataBank(bank)
+  return type(bank) == "userdata" and bank.typeOf and bank:typeOf("Data")
+    and love and love.data and type(love.data.newDataView) == "function" or false
+end
+
+function Sample.bankSize(bank)
+  if type(bank) == "string" then return #bank end
+  if Sample.isDataBank(bank) then return bank:getSize() end
+  return 0
+end
+
 function Sample.loadPcm(samplesBin, meta)
-  if type(samplesBin) ~= "string" or type(meta) ~= "table" then return nil end
+  if type(meta) ~= "table" then return nil end
+  local dataBank = Sample.isDataBank(samplesBin)
+  if not dataBank and type(samplesBin) ~= "string" then return nil end
   local off = meta.offset or 0
   local size = meta.size or 0
-  if size <= 0 or off < 0 or off + size > #samplesBin then return nil end
+  if size <= 0 or off < 0 or off + size > Sample.bankSize(samplesBin) then return nil end
+  if dataBank then
+    -- getString() on the whole bank would duplicate it. A DataView copies
+    -- only this instrument's existing string representation for the mixer.
+    local view = love.data.newDataView(samplesBin, off, size)
+    local pcm = view:getString()
+    view:release()
+    return pcm
+  end
   return samplesBin:sub(off + 1, off + size)
 end
 

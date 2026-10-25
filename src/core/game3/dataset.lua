@@ -52,6 +52,14 @@ end
 
 local function loveCache()
   return {
+    -- Raw audio banks can stay in a reference-counted FileData shared with
+    -- the audio worker. Preserve the exact cartridge namespace used by read.
+    -- Other roots/custom caches retain their existing string-reader fallback.
+    readData = function(_, rel)
+      if _G.POKEPORT_VITA ~= true or not versioned(rel) or headless()
+          or CacheBlob.packs(rel) or require("src.import.CacheFs").root() then return nil end
+      return love.filesystem.read("data", require("src.core.GameVersion").cachePrefix() .. rel)
+    end,
     assetWorkerSpec = function(_, root, kind, key)
       local rel = root .. "/" .. tostring(key) .. (kind == "pair" and "/mids.idx" or ".meta")
       local CacheFs = require("src.import.CacheFs")
