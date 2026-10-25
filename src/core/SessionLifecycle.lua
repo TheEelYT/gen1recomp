@@ -21,6 +21,8 @@ end
 -- version session (save editor or game).  GPU release runs before soft
 -- invalidate via installLoader(nil).
 function SessionLifecycle.endMountedSession(version)
+  local cartTrace = package.loaded["src.debug.VitaCartTrace"]
+  if cartTrace then cartTrace.stop() end
   local stream = package.loaded["src.core.game3.asset_stream"]
   if stream then stream.shutdown() end
   local audio = package.loaded["src.core.game3.audio"]

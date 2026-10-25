@@ -1,11 +1,22 @@
 -- Encode/decode Sevii native FRLG mid atlas + palette + layout blobs.
--- Pure Lua (no love / no ROM). Shared by extract, register, and tests.
+-- Default path is pure Lua (no love / no ROM); Vita can use compact FFI cells.
+-- Shared by extract, register, and tests.
 
 local Tileset = require("src.import.gba.tileset")
 local Metatile = require("src.import.gba.metatile")
 local Versions = require("src.import.gba.versions")
 
 local NativePack = {}
+
+local vitaCellType
+local function cellFactory()
+  if _G.POKEPORT_VITA ~= true then return nil end
+  if vitaCellType == nil then
+    local ok, ffi = pcall(require, "ffi")
+    vitaCellType = ok and ffi.typeof("struct { int32_t mid; int32_t coll; int32_t elev; }") or false
+  end
+  return vitaCellType or nil
+end
 
 NativePack.MAGIC_IDX = "SVMI"
 NativePack.MAGIC_PAL = "SVMP"
@@ -285,7 +296,7 @@ function NativePack.encodeMidLayout(layout)
 end
 
 function NativePack.decodeMidLayout(blob)
-  if type(blob) ~= "string" or #blob < 14 or blob:sub(1, 4) ~= NativePack.MAGIC_MID then
+  if type(blob) ~= "string" or #blob < 16 or blob:sub(1, 4) ~= NativePack.MAGIC_MID then
     return nil, "bad layout.mid magic"
   end
   local formatVersion = blob:byte(5)
@@ -296,6 +307,10 @@ function NativePack.decodeMidLayout(blob)
   local trueHeight = read_u16(blob, 13)
   local borderWidth = blob:byte(15)
   local borderHeight = blob:byte(16)
+  local n = width * height
+  if 16 + borderWidth * borderHeight * 2 + n * 4 > #blob then
+    return nil, "truncated layout.mid cells"
+  end
   local off = 17
   local borderMids = {}
   for i = 1, borderWidth * borderHeight do
@@ -303,14 +318,19 @@ function NativePack.decodeMidLayout(blob)
     off = off + 2
   end
   local cells = {}
-  local n = width * height
+  -- Full-world mods retain hundreds of decoded layouts. On Vita a native
+  -- record replaces each three-key Lua hash table, while the outer array
+  -- retains normal indexing, length and ipairs semantics. Records own their
+  -- storage, so keeping one cell after releasing its layout is safe.
+  local Cell = cellFactory()
   for i = 1, n do
     local mid = read_u16(blob, off)
     local coll = blob:byte(off + 2)
     local elev = blob:byte(off + 3)
-    cells[i] = { mid = mid, coll = coll, elev = elev }
+    cells[i] = Cell and Cell(mid, coll, elev) or { mid = mid, coll = coll, elev = elev }
     off = off + 4
   end
+  if _G.POKEPORT_VITA == true then require("src.debug.VitaCartTrace").layout(n, Cell ~= nil) end
   return {
     formatVersion = formatVersion,
     flags = flags,

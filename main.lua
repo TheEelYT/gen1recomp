@@ -684,22 +684,28 @@ function bootGame(version, cartId, opts)
   -- to that version's files.
   local GameVersion = require("src.core.GameVersion")
   GameVersion.set(version or os.getenv("POKEPORT_VERSION") or "red")
+  local cartDefinition, cartHash, cartSpeeds, cartOptions
+  if cartId then
+    require("src.debug.VitaCartTrace").begin(cartId)
+    local ok, cart, hash = pcall(require("src.carts.CartStore").prepareBoot, cartId)
+    if not ok or not cart then
+      require("src.debug.VitaCartTrace").record("cart.read.failed", ok and hash or cart)
+      require("src.debug.VitaCartTrace").stop()
+      require("src.core.SaveData").setCart(nil)
+      Importer = makeLauncher({ initialTab = GameVersion.get() })
+      Importer._cartPopup = GameVersion.get()
+      Importer._cartNotice = "Could not launch cart: " .. tostring(ok and hash or cart)
+      return -- Never fall through to a different game/save scope.
+    end
+    cartDefinition, cartHash, cartSpeeds, cartOptions = cart, hash, cart.speeds, cart.options
+    if _G.POKEPORT_VITA == true then collectgarbage("collect") end
+    require("src.debug.VitaCartTrace").record("cart.ready", cartId)
+  end
   local CacheFs = require("src.import.CacheFs")
   -- Keep CacheFs.prefix aligned for any CacheFs.read fallback during Data:load
   -- (Blue/Yellow/Gold caches live under blue/ / yellow/ / gold/).
   CacheFs.prefix = GameVersion.cachePrefix()
   CacheFs.mountVersion(GameVersion.get())
-  local cartHash, cartSpeeds, cartOptions
-  if cartId then
-    local ok, cart, hash = pcall(function()
-      return require("src.carts.CartStore").get(cartId)
-    end)
-    if ok and cart then
-      cartHash, cartSpeeds, cartOptions = hash, cart.speeds, cart.options
-    else
-      cartId = nil
-    end
-  end
   local SaveData = require("src.core.SaveData")
   SaveData.setCart(cartId, cartHash)
   -- The author's settings land in the cart's own scope the first time only;
@@ -724,11 +730,17 @@ function bootGame(version, cartId, opts)
   -- connections) and the Gen 2 screens instead of src/core/Game.lua's Gen 1
   -- wiring.
   local arena = opts.arena
-  local loadOpts = { arena = arena, cartId = cartId, onExit = opts.onExit }
+  local loadOpts = { arena = arena, cartId = cartId, cart = cartDefinition, onExit = opts.onExit }
   if GameVersion.generation() == 3 then
     Game = require("src.core.Game3").new()
     Game.returnToLauncher = function(o) pendingLauncherReturn = o or {} end
-    Game:load(loadOpts)
+    local loaded, loadErr = Game:load(loadOpts)
+    if loaded == false then
+      rebuildLauncherInProcess({ tab = GameVersion.get() })
+      Importer._cartPopup = GameVersion.get()
+      Importer._cartNotice = "Could not launch cart: " .. tostring(loadErr)
+      return
+    end
   elseif GameVersion.generation() == 2 then
     Game = require("src.core.Game2").new()
     if arena then
@@ -766,6 +778,7 @@ function bootGame(version, cartId, opts)
   -- from love.update's loop, so the in-engine one must stay at 1 or the
   -- two would compound (10x10 = 100 steps per observation).
   Game.speedOverride = (autopilot or driverCo) and 1 or speedOverride
+  if cartId then require("src.debug.VitaCartTrace").record("game.ready", cartId) end
 end
 
 local function showLauncher(version)

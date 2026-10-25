@@ -88,21 +88,31 @@ local function readCart(fs, id)
   if not safeId(id) then return nil, "unknown cart id" end
   if not (fs and fs.read) then return nil, "NO FILESYSTEM" end
   local path = fileFor(id)
-  if fs.getInfo and not fs.getInfo(path) then
-    return nil, ("cart %q is not installed"):format(id)
-  end
-  local body = fs.read(path)
+  local readOk, body, readErr = pcall(fs.read, path)
+  if not readOk then readErr, body = body, nil end
   if type(body) ~= "string" or body == "" then
-    return nil, ("cart %q is not installed"):format(id)
+    local infoOk, info = true, nil
+    if fs.getInfo then infoOk, info = pcall(fs.getInfo, path) end
+    local message = tostring(readErr or ""):lower()
+    if infoOk and not info and (not readErr or message:find("does not exist", 1, true)
+        or message:find("not found", 1, true) or message:find("no such file", 1, true)) then
+      return nil, ("cart %q is not installed"):format(id)
+    end
+    return nil, ("could not read cart %q: %s"):format(id, tostring(readErr or "empty read")), "unavailable"
   end
   local ok, cart, err = pcall(CartManifest.decode, body)
-  if not ok then return nil, "BAD CART" end
+  if not ok then
+    if tostring(cart):lower():find("memory", 1, true) then
+      return nil, "could not decode cart: " .. tostring(cart), "unavailable"
+    end
+    return nil, "BAD CART"
+  end
   if not cart then return nil, err or "BAD CART" end
   if cart.id ~= id then
     return nil, ("cart file %s names %q"):format(path, tostring(cart.id))
   end
   local hashed, hash = pcall(CartManifest.hash, cart)
-  if not hashed then return nil, "BAD CART" end
+  if not hashed then return nil, "could not hash cart: " .. tostring(hash), "unavailable" end
   return cart, hash
 end
 
@@ -153,7 +163,7 @@ function CartStore.list(fs)
   if not fs then return rows end
   local opts = readOptions(fs)
   local reg = registry(opts) or {}
-  local ids, seen = {}, {}
+  local ids, seen, unavailable = {}, {}, {}
   for id in pairs(reg) do
     if safeId(id) and not seen[id] then
       seen[id] = true
@@ -163,8 +173,9 @@ function CartStore.list(fs)
   table.sort(ids)
   for _, id in ipairs(strayIds(fs, seen)) do ids[#ids + 1] = id end
   for _, id in ipairs(ids) do
-    local cart, hash = readCart(fs, id)
+    local cart, hash, reason = readCart(fs, id)
     if cart then rows[#rows + 1] = entryFor(cart, hash) end
+    if reason == "unavailable" and reg[id] then unavailable[id] = reg[id] end
   end
   table.sort(rows, function(a, b)
     local at, bt = tostring(a.title):lower(), tostring(b.title):lower()
@@ -176,6 +187,7 @@ function CartStore.list(fs)
     healed[row.id] = recordFor(row.cart, row.cartHash)
     if not sameRecord(reg[row.id], healed[row.id]) then changed = true end
   end
+  for id, record in pairs(unavailable) do healed[id] = record end
   for id in pairs(reg) do
     if healed[id] == nil then changed = true end
   end
@@ -196,6 +208,16 @@ end
 
 function CartStore.get(id, fs)
   return readCart(fsOr(fs), id)
+end
+
+-- Read once before mounting a version cache. The game needs the definition,
+-- not the large label image or another cart read after loading world data.
+function CartStore.prepareBoot(id, fs)
+  local cart, hash = CartStore.get(id, fs)
+  if not cart then return nil, hash end
+  local definition = {}
+  for key, value in pairs(cart) do if key ~= "labelArt" then definition[key] = value end end
+  return definition, hash
 end
 
 function CartStore.labelArt(id, fs)

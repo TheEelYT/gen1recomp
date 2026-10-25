@@ -430,4 +430,23 @@ T.eq(tamperedFs.files["carts/art_cart.g1rcart"], CartManifest.encode(artless),
   "the bad art is not written back to disk")
 T.eq(#CartStore.list(tamperedFs), 1, "the cart still lists without its art")
 
+local bootCart, bootHash = CartStore.prepareBoot("art_cart", sharedFs)
+T.check(bootCart ~= nil, "boot prepares an installed cart")
+T.eq(bootCart.labelArt, nil, "boot definition omits the large display image")
+T.eq(bootHash, CartManifest.hash(artFixture), "boot definition retains cart identity")
+T.same(bootCart.mods, artFixture.mods, "boot definition retains pinned mods")
+local read = sharedFs.read
+sharedFs.read = function(path)
+  if path == "carts/art_cart.g1rcart" then return nil, "out of memory" end
+  return read(path)
+end
+local unavailable, readErr = CartStore.get("art_cart", sharedFs)
+T.eq(unavailable, nil, "temporary read failure is surfaced")
+T.check(readErr:find("out of memory", 1, true), "real read failure is preserved")
+T.check(not readErr:find("not installed", 1, true), "read failure is not mistaken for uninstall")
+CartStore.list(sharedFs)
+T.check(SaveData.loadOptions(sharedFs).carts.art_cart ~= nil, "temporary failure retains registry entry")
+sharedFs.read = read
+T.check(CartStore.get("art_cart", sharedFs) ~= nil, "cart is readable again without re-import")
+
 T.finish("cart_store")

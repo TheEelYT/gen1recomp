@@ -27,6 +27,8 @@ local function emit(level, fmt, ...)
   local msg = format(fmt, ...)
   local line = string.format("[%s] %s", level, msg)
   print(line)
+  local cartTrace = package.loaded["src.debug.VitaCartTrace"]
+  if level == "error" and cartTrace and cartTrace.error then pcall(cartTrace.error, msg) end
   table.insert(Logger.history, line)
   if #Logger.history > 200 then
     table.remove(Logger.history, 1)

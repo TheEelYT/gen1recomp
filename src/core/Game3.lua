@@ -217,7 +217,8 @@ function Game3:load(opts)
   self:applyOptions(options)
 
   self:_exposeModData()
-  self:_loadMods(opts)
+  local modsOk, modsErr = self:_loadMods(opts)
+  if modsOk == false then return false, modsErr end
   pcall(function() lazyReq("src.core.DiscordPresence").init(self) end)
 
   if opts.arena then
@@ -328,8 +329,11 @@ end
 
 function Game3:_loadMods(opts)
   local modOpts = opts and opts.modOpts or nil
+  local trace = lazyReq("src.debug.VitaCartTrace")
+  local traceErrors = trace.errorCount or 0
+  trace.record("mods.begin", opts and opts.cartId)
   local ok, loader = pcall(function()
-    local mods = lazyReq("src.mods.Loader").new()
+    local mods = lazyReq("src.mods.Loader").new({ cart = opts and opts.cart })
     mods.game = self
     mods:load(self.data, modOpts)
     return mods
@@ -337,10 +341,22 @@ function Game3:_loadMods(opts)
   if ok and loader then
     self.mods = loader
     self.modStatus = loader:status()
+    if opts and opts.cartId and loader.cartReport and loader.cartReport.enforced
+        and (loader.cartReport.refused or #(loader.errors or {}) > 0
+          or (trace.errorCount or 0) > traceErrors) then
+      local why = loader.cartReport.message or (loader.errors or {})[1]
+        or trace.lastError or "cart mods could not be loaded"
+      trace.record("mods.failed", why)
+      return false, why
+    end
   else
     lazyReq("src.core.Logger").error(
-      "mods failed to load, continuing without them: %s", tostring(loader))
+      opts and opts.cartId and "cart mods failed to load: %s"
+        or "mods failed to load, continuing without them: %s", tostring(loader))
+    trace.record("mods.failed", loader)
+    if opts and opts.cartId then return false, tostring(loader) end
   end
+  trace.record("mods.ready", "loaded=" .. tostring(loader and #(loader.loaded or {}) or 0))
   -- After the merge, so a translation mod's catalog is what Strings() reads,
   -- as Game (src/core/Game.lua) and Game2 do.  Without it the catalog the
   -- launcher preloaded (every enabled mod's lang/strings.lua, whatever game
