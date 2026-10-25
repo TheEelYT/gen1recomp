@@ -32,6 +32,12 @@ for _, vita in ipairs({ false, true }) do
     T.eq(load(), image, kind .. " cache hit reuses image")
     T.eq(loads, 1, kind .. " cache hit does not decode again")
     T.check(dead[1] ~= nil, kind .. " cache hit does not force collection")
+    local nextImage
+    if kind == "layer" then nextImage = Ppu.indexLayer("second-fixture", 8, 8, 4)
+    else nextImage = Ppu.indexSheet("second-fixture", 8, 8) end
+    T.eq(collected, vita, kind .. " also collects before subsequent uncached images on Vita")
+    T.eq(loads, 2, kind .. " subsequent cache miss decodes once")
+    T.check(nextImage ~= image, kind .. " distinct path creates a distinct image")
   end
 end
 collectgarbage("restart")

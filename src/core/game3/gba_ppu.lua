@@ -3,7 +3,6 @@ local Palette = require("src.core.game3.gba_palette")
 local Sprites = require("src.core.game3.gba_sprites")
 local Scanline = require("src.core.game3.scanline_fx")
 local IndexedPng = require("src.core.game3.indexed_png")
-local ImageMemory = require("src.core.game3.vita_image_memory")
 
 local band, rshift = bit.band, bit.rshift
 
@@ -75,7 +74,6 @@ local REG_DEFAULTS = {
 
 function Ppu.new()
   local self = setmetatable({}, Ppu)
-  if _G.POKEPORT_VITA then ImageMemory.reset() end
   if _G.POKEPORT_VITA then self.trace = require("src.debug.VitaGpuTrace").new() end
   self.palette = Palette.new()
   self.sprites = Sprites.new(self.palette)
@@ -124,21 +122,24 @@ end
 
 local cacheImages = {}
 
-local function loadIndexedSheet(path)
-  local timer = _G.POKEPORT_VITA and love and love.timer
+local function collectImageGarbage(path)
+  if not _G.POKEPORT_VITA then return end
+  local timer = love and love.timer
   local started = timer and timer.getTime and timer.getTime()
-  local img = IndexedPng.indexImage(path)
+  collectgarbage("collect")
   if started then
-    require("src.debug.VitaLoadTrace").slow("indexed-png", path, "decode+upload", timer.getTime() - started)
+    require("src.debug.VitaLoadTrace").slow("gc", path, "before-image", timer.getTime() - started, "full")
   end
-  return img
 end
 
 function Ppu.indexLayer(path, w, h, bpp)
   local key = "L:" .. path
   local hit = cacheImages[key]
   if not hit then
-    local img = ImageMemory.load(path, love.graphics.newImage)
+    -- Native image allocations are not represented by the Lua heap count.
+    -- Reclaim the previous asset's temporary data before decoding another.
+    collectImageGarbage(path)
+    local img = love.graphics.newImage(path)
     img:setFilter("nearest", "nearest")
     hit = { image = img, w = w or img:getWidth(), h = h or img:getHeight(), bpp = bpp or 4 }
     cacheImages[key] = hit
@@ -150,7 +151,13 @@ function Ppu.indexSheet(path, frameW, frameH, rects)
   local key = "S:" .. path
   local hit = cacheImages[key]
   if not hit then
-    local img = ImageMemory.load(path, loadIndexedSheet)
+    collectImageGarbage(path)
+    local timer = _G.POKEPORT_VITA and love and love.timer
+    local started = timer and timer.getTime and timer.getTime()
+    local img = IndexedPng.indexImage(path)
+    if started then
+      require("src.debug.VitaLoadTrace").slow("indexed-png", path, "decode+upload", timer.getTime() - started)
+    end
     hit = { image = img, w = img:getWidth(), h = img:getHeight(), frameW = frameW, frameH = frameH, rects = rects }
     cacheImages[key] = hit
   end
@@ -159,7 +166,6 @@ end
 
 function Ppu.clearCache()
   cacheImages = {}
-  ImageMemory.reset()
 end
 
 -- vitaGL aliases the GLSL swizzle token `t` to `y` with a macro. A texture

@@ -75,52 +75,44 @@ Hardware memory pressure, audio continuity and performance still require the
 device test. Metadata tables, pixel tables, shader startup and transition GC
 remain separate optimization targets.
 
-## First device result and image collection policy
+## Image collection experiment withdrawn after device crash
 
-The uploaded `g1r-audio.txt` confirms the shared path for one Emerald install:
-`bankBytes=3900201`, `shared=true` in both main and worker reports. That is about
-3.72 MiB of bank storage shared across the two states, not the synthetic 16 MiB
-bank used by the host ownership test. The worker reports about 11.5 MiB of Lua
-memory after install. These two entries do not establish cartridge-switch or
-battle-audio behavior, nor total process RAM.
+Engine `3565d7f6` retained the first pre-image full collection but delayed later
+collections until 4 MiB of Lua growth or estimated image activity. The device's
+`g1r-loads(4).txt` confirms that policy ran: `full/startup` takes 2402.5 ms and
+`full/image-budget` takes 1474.9 ms. Those are the only logged pre-image scans
+before the log ends at 109.672 s. This is a shorter session than the previous
+log, so the totals are not a like-for-like performance comparison.
 
-The same run logs 28 full pre-image collections totaling 42.36 seconds. The
-median is 1452 ms. The first collection is needed: it takes 2448 ms and leaves
-about 86 MiB of main Lua heap, down from about 134 MiB during game-data loading.
-Later collections repeatedly scan essentially the same live heap.
+The run loads the player's house tileset, weather shaders, fonts and field
+prewarm jobs. The final logged job is `data:mon_anim`; a slow-call log records
+completed operations, so this does not identify the crashing operation or
+establish how much later the crash happened. The audio report again confirms
+one shared 3,900,201-byte bank and a worker acknowledgment. It contains no
+reported allocation failure.
 
-The next candidate changes only PPU image collection frequency. A new PPU or
-cleared image cache retains a full collection before its first uncached image.
-Afterward, another full scan is triggered by either 4 MiB of Lua growth above
-the observed low-water mark or 4 MiB of image activity (width × height × 8,
-conservatively allowing RGBA CPU and GPU traffic). This activity budget is a
-trigger between image loads, not a measurement of garbage/free memory or a hard
-cap on one decoder's peak allocation. Normal/field incremental GC remains active.
-An allocation error gets one full collection and one retry; other errors still
-propagate immediately. Cache hits do not perform collection work.
+Dump `1792898060` records a main-thread CPU data abort (`0x30004`), PC
+`0xe0011a8c` in SceLibKernel, fault address `0x4`. The audio worker is not the
+faulting thread. The app RX mapping is `0x8100c000` with size `0x6bb378`.
+Stack evidence is consistent with texture deletion from an Image released by
+a Shader finalizer during ordinary Lua garbage collection, rather than native
+`lua_close`. This resembles the earlier graphics allocator fault, but its
+origin (including possible prior corruption) is not established. The existing
+`love(3)` ELF predates the native process-exit patch and has a different code
+size; its addresses must not be treated as exact symbols for this dump. The
+rebuilt runtime's `vendor/love-vita/src/love` ELF is needed for an exact trace.
 
-Image construction, ownership and shader lifetime remain at the playable
-rollback versions. The earlier failed candidate removed the startup full scan
-as well as changing image and shader lifetime; those changes are not reinstated.
-The audio sharing and native application-close workaround are retained.
+Withdraw the collection-frequency experiment as a precaution. Restore
+`gba_ppu.lua` byte-for-byte to the playable `f831c196` version: full cleanup
+before every uncached layer or sheet, no cleanup on image cache hits. Remove
+the unused budget module, its policy tests and synthetic benchmark. Extend the
+existing weak-reference test to cover subsequent uncached images as well as
+the first one. Audio sharing, shaders, image ownership and the native app-close
+workaround are unchanged. This rollback does not fix the allocator's underlying
+fault or establish that collection frequency caused it. Loading pauses remain
+an open issue; retain the conservative policy while investigating native frees.
 
-`vita_image_budget_test.lua` checks startup cleanup, both thresholds, lowered
-heap baselines, cache resets/hits, one-shot recovery and unchanged desktop
-behavior. Indexed-sheet timings still exclude GC so diagnostic totals are not
-counted twice. The original weak-reference startup-reclamation test still passes.
-
-A host experiment (`luajit tests/vita_image_budget_benchmark.lua baseline|budget`)
-keeps about 74 MiB of live Lua data and creates native temporary buffers across
-40 image loads. Both policies reclaim 50 MiB of startup garbage before decoding.
-The original policy runs 40 full collections; the candidate runs 5. Measured GC
-CPU time is 6.49 s versus 0.63 s on this host. Peak native temporaries rise from
-0.25 MiB to 2 MiB, and peak Lua heap rises from 73.66 MiB to 74.10 MiB. All native
-temporaries are freed at the end. This measures a synthetic host workload, not
-Vita frame times, decoder peaks or an actual Emerald asset sequence.
-
-For the next device comparison, repackage the engine with the existing runtime.
-No native rebuild or ROM re-import is needed. Keep GPU tracing off and repeat
-Emerald's intro/title and a short field session. Copy `g1r-loads.txt` and
-`g1r-audio.txt`. Full scans now have routes `full/startup`, `full/lua-growth`,
-`full/image-budget` or `full/allocation-retry`. Startup shader compilation and
-synchronous tileset decoding remain separate sources of pauses.
+Repackage with the existing runtime; no native rebuild or ROM re-import is
+needed for this rollback. Preserve the current dump and send the matching
+`B:\gen1recomp-vita\vendor\love-vita\src\love` file for native analysis. A
+new crash reproduction is not required just to obtain that file.
