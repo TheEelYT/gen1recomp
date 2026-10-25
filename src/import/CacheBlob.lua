@@ -75,9 +75,10 @@ function CacheBlob.inflate(z)
   end
 end
 
-function CacheBlob.encode(rel, bytes)
+function CacheBlob.encode(rel, bytes, level)
   if type(bytes) ~= "string" or not CacheBlob.packs(rel) then return bytes end
-  return CacheBlob.deflate(bytes, rel:find("/atlas_", 1, true) and CacheBlob.DERIVED_LEVEL or CacheBlob.LEVEL)
+  return CacheBlob.deflate(bytes, level
+    or (rel:find("/atlas_", 1, true) and CacheBlob.DERIVED_LEVEL or CacheBlob.LEVEL))
 end
 
 function CacheBlob.decode(rel, bytes)

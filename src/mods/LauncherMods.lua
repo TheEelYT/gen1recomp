@@ -826,16 +826,18 @@ end
 -- in play and in the OS save directory otherwise (#330).  No explicit mkdir:
 -- CacheFs.write creates the parent chain on both paths, which also means an
 -- empty folder inside the .zip is simply not carried over (it holds nothing).
-local function copyTree(src, dst, progress, root)
+local function copyTree(src, dst, progress, root, compressionLevel)
   local fs = love.filesystem
+  local clock = love and love.timer and love.timer.getTime or os.clock
   for _, name in ipairs(fs.getDirectoryItems(src)) do
     local s = src .. "/" .. name
     local d = dst .. "/" .. name
     local info = fs.getInfo(s)
     if info and info.type == "directory" then
-      local ok, err = copyTree(s, d, progress)
+      local ok, err = copyTree(s, d, progress, nil, compressionLevel)
       if not ok then return nil, err end
     elseif not (root and progress and name == "manifest.json") then
+      local started = progress and clock()
       local data, readErr = fs.read(s)
       if data == nil and progress then
         -- A failed allocation can surface as a generic PhysFS read failure.
@@ -849,10 +851,11 @@ local function copyTree(src, dst, progress, root)
         return nil, ("short read of %s: %d of %d bytes"):format(s, #data, info.size)
       end
       local size = #data
-      local ok, err = CacheFs.write(d, data)
+      local writing = progress and clock()
+      local ok, err = CacheFs.write(d, data, compressionLevel)
       if not ok then return nil, "could not write " .. name .. ": " .. tostring(err) end
       data = nil
-      if progress then progress(d, size) end
+      if progress then progress(d, size, writing - started, clock() - writing) end
     end
   end
   return true
@@ -1214,15 +1217,15 @@ function LauncherMods._installZipInner(source, opts)
   CacheFs.prefix = ""
   local progress
   if opts.onProgress then
-    progress = function(path, bytes)
+    progress = function(path, bytes, readTime, writeTime)
       -- A suspended installer must not leave the shared cache router pinned
       -- to root while the launcher and other jobs paint their next frame.
       CacheFs.prefix = savedPrefix
-      opts.onProgress(path, bytes)
+      opts.onProgress(path, bytes, readTime, writeTime)
       CacheFs.prefix = ""
     end
   end
-  local ranCopy, copied, copyErr = pcall(copyTree, root, dest, progress, true)
+  local ranCopy, copied, copyErr = pcall(copyTree, root, dest, progress, true, opts.compressionLevel)
   CacheFs.prefix = ""
   if not ranCopy then copied, copyErr = nil, tostring(copied) end
   -- Publish the manifest last on the cooperative path, so an interrupted
@@ -1312,6 +1315,7 @@ function LauncherMods.installDownloadedZip(modId, localPath, version, opts)
       replace = true, expectId = modId,
       diskMount = opts.diskMount, onProgress = opts.onProgress,
       onScan = opts.onScan, onTotal = opts.onTotal,
+      compressionLevel = opts.compressionLevel,
     })
     if installed or not opts.keepArchiveOnFailure then pcall(love.filesystem.remove, localPath) end
     if not installed then return nil, res end
@@ -1325,33 +1329,42 @@ end
 -- Keep filesystem work on the main thread, but yield with closed files after
 -- each asset. The ordinary desktop/mobile entry point remains synchronous.
 function LauncherMods.beginDownloadedZip(modId, localPath, version)
-  local job = { files = 0, bytes = 0, total = 0 }
+  local clock = love and love.timer and love.timer.getTime or os.clock
+  local job = { files = 0, bytes = 0, total = 0,
+    readSeconds = 0, writeSeconds = 0, gcSeconds = 0, pumpSeconds = 0 }
+  job.started = clock()
   local lines = 0
   local function report(event, detail)
     if _G.POKEPORT_VITA ~= true or lines >= 128 then return end
     if event == "copy" and lines >= 126 then return end
     local file = io.open("ux0:/data/g1r-mod-install.txt", lines == 0 and "w" or "a")
     if not file then return end
-    file:write(("%s files=%d bytes=%d lua_kib=%.0f %s\n"):format(
-      event, job.files, job.bytes, collectgarbage("count"), tostring(detail or "")))
+    file:write(("%s files=%d bytes=%d lua_kib=%.0f elapsed_ms=%.1f read_ms=%.1f write_ms=%.1f gc_ms=%.1f pump_ms=%.1f %s\n"):format(
+      event, job.files, job.bytes, collectgarbage("count"), (clock() - job.started) * 1000,
+      job.readSeconds * 1000, job.writeSeconds * 1000, job.gcSeconds * 1000,
+      job.pumpSeconds * 1000, tostring(detail or "")))
     file:close(); lines = lines + 1
   end
+  job.report = report
   job.co = coroutine.create(function()
     report("begin", localPath)
     local ok, result = LauncherMods.installDownloadedZip(modId, localPath, version, {
-      diskMount = true, keepArchiveOnFailure = true,
+      diskMount = true, keepArchiveOnFailure = true, compressionLevel = 1,
       onScan = function(count, path)
         if count % 32 == 0 then coroutine.yield({ phase = "scan", scanned = count, path = path }) end
       end,
       onTotal = function(count) job.total = count end,
-      onProgress = function(path, bytes)
+      onProgress = function(path, bytes, readTime, writeTime)
         job.files, job.bytes = job.files + 1, job.bytes + bytes
+        job.readSeconds = job.readSeconds + (readTime or 0)
+        job.writeSeconds = job.writeSeconds + (writeTime or 0)
+        local gcStart = clock()
         collectgarbage("step", 128)
+        job.gcSeconds = job.gcSeconds + clock() - gcStart
         if job.files == 1 or job.files % 64 == 0 then report("copy", path) end
         coroutine.yield({ phase = "copy", path = path, files = job.files, bytes = job.bytes, total = job.total })
       end,
     })
-    report(ok and "complete" or "failed", result)
     return ok, result
   end)
   return job
@@ -1359,15 +1372,23 @@ end
 
 function LauncherMods.pumpDownloadedZip(job)
   local now = love and love.timer and love.timer.getTime or os.clock
-  local deadline, progress = now() + 0.006
-  for _ = 1, 8 do
+  local started, progress = now()
+  local deadline = started + 0.032
+  local function finish(done, result, detail, update)
+    job.pumpSeconds = (job.pumpSeconds or 0) + now() - started
+    if done and job.report then job.report(result and "complete" or "failed", detail) end
+    return done, result, detail, update
+  end
+  -- A 6 ms/eight-yield limit can starve copying when the Vita cart view is
+  -- expensive to redraw. Keep a bounded work slice but amortize UI overhead.
+  for _ = 1, 64 do
     local ran, result, detail = coroutine.resume(job.co)
-    if not ran then return true, nil, "install failed: " .. tostring(result) end
-    if coroutine.status(job.co) == "dead" then return true, result, detail end
+    if not ran then return finish(true, nil, "install failed: " .. tostring(result)) end
+    if coroutine.status(job.co) == "dead" then return finish(true, result, detail) end
     progress = result
     if now() >= deadline then break end
   end
-  return false, nil, nil, progress
+  return finish(false, nil, nil, progress)
 end
 
 -- Install a mod listed in a community index (src/mods/ModIndex.lua).

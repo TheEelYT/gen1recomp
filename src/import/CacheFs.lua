@@ -329,10 +329,10 @@ end
 
 -- write cache-relative `rel` (forward-slash path) with the given bytes;
 -- returns ok, err like love.filesystem.write
-function CacheFs.write(rel, data)
+function CacheFs.write(rel, data, compressionLevel)
   rel = withPrefix(rel)
   if unsafe_rel(rel) then return false, "unsafe cache path" end
-  data = CacheBlob.encode(rel, data)
+  data = CacheBlob.encode(rel, data, compressionLevel)
   local root, rootErr = resolveWriteRoot()
   if not root and rootErr then return false, rootErr end
   if root then

@@ -18,7 +18,7 @@ local realGetInfo, realWrite = fs.getInfo, CacheFs.write
 local broken, failMode, failures, wholeReads, memoryMounts
 local rgba = ("\1\2\3\255"):rep(256 * 256)
 local ticks = 0
-love.timer = { getTime = function() ticks = ticks + 0.01; return ticks end }
+love.timer = { getTime = function() ticks = ticks + 0.1; return ticks end }
 fs.newFileData = function() memoryMounts = memoryMounts + 1; error("must mount disk") end
 fs.mount = function(path, point, append)
   T.eq(type(path), "string", "archive is mounted from disk")
@@ -42,9 +42,10 @@ fs.getInfo = function(path, kind)
   end
   return info
 end
-CacheFs.write = function(path, data)
+CacheFs.write = function(path, data, level)
   if failMode == "throw" and path:find("asset_003", 1, true) then error("injected compression error") end
-  return realWrite(path, data)
+  if path:match("%.rgba$") then T.eq(level, 1, "Vita install requests fast cache compression") end
+  return realWrite(path, data, level)
 end
 
 local function fixture(mode)

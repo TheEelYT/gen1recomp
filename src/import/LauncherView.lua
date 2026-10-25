@@ -216,7 +216,9 @@ function LauncherView.update(imp, dt)
     imp._themeVideo:release()
     imp._themeVideo = nil
   end
-  if imp._themeVideo then imp._themeVideo:update(dt) end
+  if imp._themeVideo and not (_G.POKEPORT_VITA == true and imp._modInstall) then
+    imp._themeVideo:update(dt)
+  end
   if imp._launchFade then return end
 
   local down = false
@@ -6993,6 +6995,20 @@ end
 function LauncherView.draw(imp)
   ensureState(imp)
   local m = Layout.metrics(1200)
+
+  -- A blocking Vita install does not need the expensive cartridge art, save
+  -- panels and animated background repainted underneath its progress card.
+  if _G.POKEPORT_VITA == true and imp._modInstall and imp._busy then
+    Kit.beginFrame(0, 0, false, 0)
+    imp._clickPt, imp._wheelY, imp._noDragN = nil, 0, 0
+    Theme.field()
+    local spec = loaderSpec(imp)
+    if Loader.overlay(m, spec) and spec.onCancel then
+      queueAction(imp, "loader-cancel", spec.onCancel)
+    end
+    Kit.endFrame()
+    return
+  end
 
   -- The pointer is the pad cursor while it is active, so the ring, hover and
   -- clicks all agree on where "the pointer" is.
