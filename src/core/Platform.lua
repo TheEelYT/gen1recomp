@@ -11,6 +11,7 @@ local function compute()
   local uwp = osName == "UWP"
   local ps4 = osName == "PS4"
   local mobile = osName == "Android" or osName == "iOS"
+  local vita = _G.POKEPORT_VITA == true or (love and love.system and love.system._vitaHttp == true)
   local nativePicker = love and love.system
     and type(love.system.pickFile) == "function"
   local nativeHttp = love and love.system
@@ -23,11 +24,11 @@ local function compute()
     mobile = mobile,
     console = nx or uwp or ps4,
     hasNativePicker = nativePicker,
-    canSpawnProcess = osName == "OS X" or osName == "Windows" or osName == "Linux",
+    canSpawnProcess = not vita and (osName == "OS X" or osName == "Windows" or osName == "Linux"),
     romImportMode = (nx or ps4) and "save-directory"
       or (nativePicker and "native-picker")
       or "desktop",
-    networkValidated = not nx and not uwp and not ps4,
+    networkValidated = not vita and not nx and not uwp and not ps4,
     -- networkValidated is the self-updater's gate and stays a per-platform
     -- policy call: a console package cannot replace itself on disk, so that
     -- answer never depends on whether a transport exists.  Fetching a mod
@@ -38,7 +39,7 @@ local function compute()
     -- (#597).  The UWP LOVE backend does not export that bridge yet, so this
     -- still resolves false on Xbox and the launcher still says so, but the
     -- day the backend grows one, nothing here or in RomImporter has to change.
-    canFetchRemote = (not nx and not uwp and not ps4) or nativeHttp,
+    canFetchRemote = (not vita and not nx and not uwp and not ps4) or nativeHttp,
     -- How a gamepad drives the launcher when it is the only input: the Switch
     -- moves a virtual cursor, Xbox and PS4 move a focus ring (the highlighted
     -- control is the selected one; Y/Triangle still toggles the cursor).  nil

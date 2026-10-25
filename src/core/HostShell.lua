@@ -458,6 +458,11 @@ end
 local curlAvailable = nil
 
 function HostShell.haveCurl()
+  -- Vita workers do not inherit conf.lua globals; the native marker is
+  -- exported in every Lua state by the Vita HTTP bridge.
+  if _G.POKEPORT_VITA == true or (love and love.system and love.system._vitaHttp == true) then
+    return false
+  end
   if curlAvailable ~= nil then return curlAvailable end
   local path, kind = HostShell.resolveCurl()
   local pipe = HostShell.popen(
@@ -603,6 +608,7 @@ local function haveBridge()
   -- the gate is no longer the thing in the way.
   local osName = love.system.getOS and love.system.getOS()
   return osName == "Android" or osName == "iOS" or osName == "UWP"
+    or love.system._vitaHttp == true
 end
 
 local function haveRequestBridge()
@@ -611,6 +617,7 @@ local function haveRequestBridge()
   end
   local osName = love.system.getOS and love.system.getOS()
   return osName == "Android" or osName == "iOS" or osName == "UWP"
+    or love.system._vitaHttp == true
 end
 
 -- Is any transport available at all?  Callers gate on this, never on curl.
@@ -647,6 +654,12 @@ function HostShell.httpDownload(url, absPath, userAgent, accept, maxTime, etagPa
   if type(url) ~= "string" or url == "" then return nil, "missing url" end
   if type(absPath) ~= "string" or absPath == "" then return nil, "missing path" end
   userAgent = userAgent or "gen1recomp"
+  if love and love.system and love.system._vitaHttp == true and haveBridge() then
+    local ok, done, err = pcall(love.system.httpDownload, url, absPath, userAgent, accept,
+      tonumber(maxTime) or 90)
+    if ok and done then return true end
+    return nil, fetchError(url, nil, ok and err or done)
+  end
   if HostShell.haveCurl() then
     local argv = curlBase(true, 15, tonumber(maxTime) or 300)
     push(argv, "-H", "User-Agent: " .. userAgent)
@@ -694,6 +707,19 @@ end
 function HostShell.httpGet(url, userAgent, accept, maxTime)
   if type(url) ~= "string" or url == "" then return nil, "missing url" end
   userAgent = userAgent or "gen1recomp"
+  if love and love.system and love.system._vitaHttp == true
+      and type(love.system.httpGet) == "function" then
+    local ok, body, err, code = pcall(love.system.httpGet, url, userAgent, accept,
+      tonumber(maxTime) or 25)
+    if not ok or type(body) ~= "string" then
+      return nil, fetchError(url, nil, ok and err or body)
+    end
+    if not code or code < 200 or code >= 300 then
+      return nil, fetchError(url, code, body)
+    end
+    if body == "" then return nil, "empty response from " .. url end
+    return body
+  end
   if HostShell.haveCurl() then
     -- No -f here (the download branch keeps it).  -f suppresses the error
     -- BODY, and on the two services this talks to that body is the whole
@@ -749,6 +775,13 @@ end
 -- instead of half-working through httpDownload (a GET round-trip to a POST
 -- endpoint would be a lie).
 function HostShell.httpPost(url, body, contentType, userAgent, maxTime)
+  if love and love.system and love.system._vitaHttp == true then
+    local _, err, code = HostShell.httpRequest(url, { method = "POST", body = body,
+      headers = { ["Content-Type"] = contentType or "application/octet-stream" },
+      userAgent = userAgent, maxTime = maxTime })
+    if code and code >= 200 and code < 300 then return true end
+    return nil, err or ("HTTP " .. tostring(code))
+  end
   if type(url) ~= "string" or url == "" then return nil, "missing url" end
   if type(body) ~= "string" then return nil, "missing body" end
   userAgent = userAgent or "gen1recomp"
@@ -868,14 +901,14 @@ local function requestHeaderPairs(lines)
   return out
 end
 
-local function bridgeRequest(url, method, headers, body, userAgent)
+local function bridgeRequest(url, method, headers, body, userAgent, maxTime)
   if not BRIDGE_METHODS[method] then
     return nil, "no request transport for " .. method .. " on this platform"
   end
   local fields = requestHeaderPairs(headers)
   if not fields then return nil, "bad request header" end
   local ok, envelope = pcall(love.system.httpRequest, url, method, fields,
-                             body, userAgent)
+                             body, userAgent, maxTime)
   if not ok or type(envelope) ~= "string" or envelope == "" then
     return nil, "this app build cannot make signed requests: update the app to use save sync"
   end
@@ -940,7 +973,7 @@ function HostShell.httpRequest(url, opts)
 
   if not HostShell.haveCurl() then
     if haveRequestBridge() then
-      return bridgeRequest(url, method, headers, body, userAgent)
+      return bridgeRequest(url, method, headers, body, userAgent, maxTime)
     end
     if method == "GET" and #headers == 0 then
       local got, err = HostShell.httpGet(url, userAgent, opts.accept, maxTime)

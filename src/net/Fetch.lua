@@ -58,6 +58,10 @@ local function ensureWorkers()
   -- flag and leftovers or its workers quit on their first job.
   quitCh:clear()
   cmdCh:clear()
+  local system = love and love.system
+  if system and system._vitaHttp == true and type(system.httpResetCancel) == "function" then
+    pcall(system.httpResetCancel)
+  end
   for i = 1, POOL do
     local ok, th = pcall(love.thread.newThread, "src/net/fetch_worker.lua")
     if ok and th and pcall(function() th:start() end) then
@@ -228,6 +232,12 @@ end
 -- maxSeconds; there is no portable way to interrupt a running curl.
 function Fetch.shutdown()
   if quitCh then quitCh:push(true) end
+  -- Interrupt Vita's active native curl before joining workers. Queued native
+  -- calls observe the same cancellation generation when they acquire the lock.
+  local system = love and love.system
+  if system and system._vitaHttp == true and type(system.httpCancelAll) == "function" then
+    pcall(system.httpCancelAll)
+  end
   if cmdCh then
     cmdCh:clear()
     for _ = 1, #workers do cmdCh:push({ kind = "quit" }) end
